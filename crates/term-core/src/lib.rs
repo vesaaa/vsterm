@@ -6,4 +6,4 @@ mod terminal;
 
 pub use error::TermError;
 pub use local_pty::LocalPtySession;
-pub use terminal::{CellAttr, Rgb, TerminalHandle, TerminalSnapshot};
+pub use terminal::{CellAttr, OutputHook, Rgb, TerminalHandle, TerminalSnapshot};

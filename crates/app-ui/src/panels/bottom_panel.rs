@@ -31,21 +31,35 @@ impl Default for BottomPanelState {
     }
 }
 
-/// Renders bottom tools into a fixed-height region. Height is NOT switched with tabs.
+/// Vertical space the bottom strip needs (tabs + separator + body).
+pub fn reserved_height(state: &BottomPanelState) -> f32 {
+    // Tab row (~22) + separator (~6) + body. Keep in sync with `show`.
+    28.0 + 6.0 + state.height
+}
+
+/// Renders bottom tools into the caller's allocated region (must already be non-overlapping).
 pub fn show(ui: &mut Ui, state: &mut BottomPanelState, book: &CommandBook) -> Option<String> {
     let mut send_cmd = None;
     let fixed_h = state.height;
+    ui.set_clip_rect(ui.max_rect());
 
     ui.horizontal(|ui| {
-        ui.selectable_value(&mut state.tab, BottomTab::Files, i18n::t("tab.files"));
-        ui.selectable_value(&mut state.tab, BottomTab::Commands, i18n::t("tab.commands"));
+        let files = ui.selectable_value(&mut state.tab, BottomTab::Files, i18n::t("tab.files"));
+        let cmds =
+            ui.selectable_value(&mut state.tab, BottomTab::Commands, i18n::t("tab.commands"));
+        if files.has_focus() {
+            files.surrender_focus();
+        }
+        if cmds.has_focus() {
+            cmds.surrender_focus();
+        }
     });
     ui.separator();
 
-    // Allocate a consistent body height (Files as reference).
     let body = egui::Frame::NONE.show(ui, |ui| {
         ui.set_min_height(fixed_h);
         ui.set_max_height(fixed_h);
+        ui.set_clip_rect(ui.max_rect());
         match state.tab {
             BottomTab::Files => {
                 ui.label(RichText::new(i18n::t("bottom.files.hint")).weak().small());
@@ -53,20 +67,34 @@ pub fn show(ui: &mut Ui, state: &mut BottomPanelState, book: &CommandBook) -> Op
                 let list_h = (fixed_h - 70.0).max(60.0);
                 ui.columns(2, |cols| {
                     cols[0].group(|ui| {
-                        ui.label(RichText::new(i18n::t("bottom.files.local")).size(12.0).color(Color32::from_rgb(100, 105, 115)));
+                        ui.label(
+                            RichText::new(i18n::t("bottom.files.local"))
+                                .size(12.0)
+                                .color(Color32::from_rgb(100, 105, 115)),
+                        );
                         ui.text_edit_singleline(&mut state.local_path);
                         list_dir_preview(ui, &state.local_path, list_h - 40.0);
                     });
                     cols[1].group(|ui| {
-                        ui.label(RichText::new(i18n::t("bottom.files.remote")).size(12.0).color(Color32::from_rgb(100, 105, 115)));
+                        ui.label(
+                            RichText::new(i18n::t("bottom.files.remote"))
+                                .size(12.0)
+                                .color(Color32::from_rgb(100, 105, 115)),
+                        );
                         ui.text_edit_singleline(&mut state.remote_path);
                         ui.set_min_height(list_h - 40.0);
                         ui.label(RichText::new("SFTP …").weak());
                     });
                 });
                 ui.horizontal(|ui| {
-                    let _ = ui.button(i18n::t("bottom.files.upload"));
-                    let _ = ui.button(i18n::t("bottom.files.download"));
+                    let up = ui.button(i18n::t("bottom.files.upload"));
+                    let down = ui.button(i18n::t("bottom.files.download"));
+                    if up.has_focus() {
+                        up.surrender_focus();
+                    }
+                    if down.has_focus() {
+                        down.surrender_focus();
+                    }
                 });
             }
             BottomTab::Commands => {
@@ -81,7 +109,7 @@ pub fn show(ui: &mut Ui, state: &mut BottomPanelState, book: &CommandBook) -> Op
                         .show(ui, |ui| {
                             for cmd in &book.commands {
                                 ui.horizontal(|ui| {
-                                    if ui
+                                    let resp = ui
                                         .add(
                                             egui::Button::new(&cmd.name)
                                                 .min_size([140.0, 24.0].into()),
@@ -90,10 +118,12 @@ pub fn show(ui: &mut Ui, state: &mut BottomPanelState, book: &CommandBook) -> Op
                                             cmd.description
                                                 .clone()
                                                 .unwrap_or_else(|| cmd.command.clone()),
-                                        )
-                                        .clicked()
-                                    {
+                                        );
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
                                         send_cmd = Some(cmd.command.clone());
+                                    }
+                                    if resp.has_focus() {
+                                        resp.surrender_focus();
                                     }
                                     ui.label(
                                         RichText::new(cmd.command.trim_end())
@@ -107,8 +137,6 @@ pub fn show(ui: &mut Ui, state: &mut BottomPanelState, book: &CommandBook) -> Op
                 }
             }
         }
-        // Consume remaining space so Commands tab keeps same footprint as Files.
-        ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
     });
     let _ = body;
 

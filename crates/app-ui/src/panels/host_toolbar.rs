@@ -1,7 +1,7 @@
 //! Main area tabs: Terminal / System Info / Routes.
 
 use crate::i18n;
-use egui::{Color32, RichText, Ui};
+use egui::{Color32, PointerButton, RichText, Ui};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MainTab {
@@ -44,7 +44,12 @@ fn tab_chip(ui: &mut Ui, current: &mut MainTab, value: MainTab, icon: Option<&st
         .stroke(egui::Stroke::new(1.0_f32, stroke))
         .corner_radius(4.0)
         .min_size([110.0, 28.0].into());
-    if ui.add(btn).clicked() {
+    let resp = ui.add(btn);
+    // Mouse only — Space/Enter must not switch tabs while typing in the terminal.
+    if resp.clicked_by(PointerButton::Primary) {
         *current = value;
+    }
+    if resp.has_focus() {
+        resp.surrender_focus();
     }
 }

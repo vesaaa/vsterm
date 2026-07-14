@@ -8,7 +8,7 @@ use session_tree::{BackendKind, SessionConfig};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use term_core::{LocalPtySession, TerminalHandle};
+use term_core::{LocalPtySession, OutputHook, TerminalHandle};
 use uuid::Uuid;
 use vault::Vault;
 
@@ -122,6 +122,8 @@ pub struct ConnectionManager {
     order: Mutex<Vec<ConnectionId>>,
     active: Mutex<Option<ConnectionId>>,
     generation: AtomicU64,
+    /// Wakes the UI when any terminal receives output (set once by the app).
+    repaint_wake: Mutex<Option<OutputHook>>,
 }
 
 impl Default for ConnectionManager {
@@ -137,6 +139,29 @@ impl ConnectionManager {
             order: Mutex::new(Vec::new()),
             active: Mutex::new(None),
             generation: AtomicU64::new(0),
+            repaint_wake: Mutex::new(None),
+        }
+    }
+
+    /// Bind an egui wake callback so PTY reader threads can request a repaint.
+    pub fn set_repaint_wake(&self, hook: OutputHook) {
+        *self.repaint_wake.lock() = Some(Arc::clone(&hook));
+        // Apply to existing terminals without holding wake + connections in nested order
+        // that conflicts with finish_connect (wake → then connections).
+        let terminals: Vec<TerminalHandle> = self
+            .connections
+            .lock()
+            .values()
+            .map(|c| c.terminal.clone())
+            .collect();
+        for t in terminals {
+            t.set_output_hook(Some(Arc::clone(&hook)));
+        }
+    }
+
+    fn wire_output_hook(&self, terminal: &TerminalHandle) {
+        if let Some(hook) = self.repaint_wake.lock().as_ref() {
+            terminal.set_output_hook(Some(Arc::clone(hook)));
         }
     }
 
@@ -198,6 +223,7 @@ impl ConnectionManager {
         remote: RemoteSession,
         result: Result<SshIoSession, ConnError>,
     ) {
+        let hook = self.repaint_wake.lock().clone();
         let mut conns = self.connections.lock();
         let Some(conn) = conns.get_mut(&id) else {
             return;
@@ -205,6 +231,9 @@ impl ConnectionManager {
         match result {
             Ok(io) => {
                 conn.terminal = io.terminal().clone();
+                if let Some(h) = hook {
+                    conn.terminal.set_output_hook(Some(h));
+                }
                 conn.io = Some(ConnectionIo::Ssh(io));
                 conn.state = ConnectionState::Connected;
                 conn.error_message = None;
@@ -302,6 +331,7 @@ impl ConnectionManager {
     }
 
     fn insert(&self, conn: ActiveConnection) {
+        self.wire_output_hook(&conn.terminal);
         let id = conn.id;
         self.connections.lock().insert(id, conn);
         self.order.lock().push(id);

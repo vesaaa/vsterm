@@ -163,6 +163,8 @@ mod tests {
             cells: line.chars().map(cell).collect(),
             cursor: (0, 0),
             cursor_visible: false,
+            history_size: 0,
+            display_offset: 0,
         };
         apply_semantic(&mut snap);
         let cells = &snap.cells;
@@ -190,6 +192,8 @@ mod tests {
                 .collect(),
             cursor: (0, 0),
             cursor_visible: false,
+            history_size: 0,
+            display_offset: 0,
         };
         apply_semantic(&mut snap);
         assert_eq!(snap.cells[0].fg, Rgb::new(80, 250, 123));

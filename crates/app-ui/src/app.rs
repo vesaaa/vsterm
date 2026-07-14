@@ -77,6 +77,8 @@ pub struct VsTermApp {
     session_editor: Option<SessionEditorState>,
     folder_dialog: Option<FolderDialogState>,
     delete_confirm: Option<DeleteTarget>,
+    /// Whether `set_repaint_wake` has been bound to this egui context.
+    repaint_wake_bound: bool,
 }
 
 impl VsTermApp {
@@ -129,6 +131,7 @@ impl VsTermApp {
             session_editor: None,
             folder_dialog: None,
             delete_confirm: None,
+            repaint_wake_bound: false,
         }
     }
 
@@ -881,7 +884,28 @@ impl eframe::App for VsTermApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        // One-shot: let PTY reader threads wake egui when output arrives.
+        if !self.repaint_wake_bound {
+            let ctx_wake = ctx.clone();
+            self.connections.set_repaint_wake(std::sync::Arc::new(move || {
+                ctx_wake.request_repaint();
+            }));
+            self.repaint_wake_bound = true;
+        }
+
+        let connecting = self.pending_connect.is_some()
+            || self.auth_prompt.is_some()
+            || self
+                .connections
+                .list_meta()
+                .iter()
+                .any(|m| m.state == connection_mgr::ConnectionState::Connecting);
+        let wants_metrics = self.left_tab == LeftTab::Monitor
+            || matches!(
+                self.main_tab,
+                MainTab::SystemInfo | MainTab::Routes
+            );
+        schedule_repaint(ctx, connecting, wants_metrics);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(i18n::t("app.name")));
 
         self.poll_pending_connect();
@@ -1188,13 +1212,22 @@ impl eframe::App for VsTermApp {
 
             match self.main_tab {
                 MainTab::Terminal => {
-                    let bottom_h = self.bottom.height + 36.0;
-                    let total = ui.available_height();
-                    let term_h = (total - bottom_h - 4.0).max(80.0);
+                    // Strict vertical split: terminal and bottom strip never share hit-test area.
+                    let gap = 6.0;
+                    let bottom_h = bottom_panel::reserved_height(&self.bottom);
+                    let full = ui.available_rect_before_wrap();
+                    let term_h = (full.height() - bottom_h - gap).max(80.0);
+                    let term_rect = egui::Rect::from_min_size(
+                        full.min,
+                        egui::vec2(full.width(), term_h),
+                    );
+                    let bottom_rect = egui::Rect::from_min_max(
+                        egui::pos2(full.min.x, term_rect.max.y + gap),
+                        full.max,
+                    );
 
-                    egui::Frame::NONE.show(ui, |ui| {
-                        ui.set_min_height(term_h);
-                        ui.set_max_height(term_h);
+                    ui.allocate_ui_at_rect(term_rect, |ui| {
+                        ui.set_clip_rect(term_rect);
                         let (cols, rows) = TerminalView::show(ui, &self.connections);
                         if (cols, rows) != self.last_term_size && cols > 0 && rows > 0 {
                             if let Err(err) = self.connections.resize_active(cols, rows) {
@@ -1205,13 +1238,27 @@ impl eframe::App for VsTermApp {
                         }
                     });
 
-                    ui.add_space(4.0);
-                    ui.separator();
-                    if let Some(cmd) = bottom_panel::show(ui, &mut self.bottom, &self.commands) {
-                        if let Err(err) = self.connections.write_to_active(cmd.as_bytes()) {
-                            self.status = format!("{}: {err}", i18n::t("status.open_failed"));
+                    // Thin separator drawn in the gap (visual only, no interactive widgets).
+                    let sep_y = term_rect.max.y + gap * 0.5;
+                    ui.painter().hline(
+                        term_rect.x_range(),
+                        sep_y,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(210, 214, 220)),
+                    );
+
+                    ui.allocate_ui_at_rect(bottom_rect, |ui| {
+                        if let Some(cmd) =
+                            bottom_panel::show(ui, &mut self.bottom, &self.commands)
+                        {
+                            if let Err(err) = self.connections.write_to_active(cmd.as_bytes()) {
+                                self.status =
+                                    format!("{}: {err}", i18n::t("status.open_failed"));
+                            }
                         }
-                    }
+                    });
+
+                    // Consume the full region so subsequent UI does not stack under us.
+                    ui.advance_cursor_after_rect(full);
                 }
                 MainTab::SystemInfo => {
                     let err = self.remote_host.last_error();
@@ -1332,3 +1379,41 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
     store.save_tree(&tree)?;
     Ok(())
 }
+
+/// Event-driven painting: wake on input / terminal output; slow timer only for
+/// cursor blink, connecting polls, and metrics panels. Avoids a fixed ~30 FPS loop.
+fn schedule_repaint(ctx: &egui::Context, connecting: bool, wants_metrics: bool) {
+    use std::time::Duration;
+
+    let interactive = ctx.input(|i| {
+        i.pointer.any_down()
+            || i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Text(_)
+                        | egui::Event::Paste(_)
+                        | egui::Event::Key {
+                            pressed: true,
+                            ..
+                        }
+                        | egui::Event::PointerButton { pressed: true, .. }
+                        | egui::Event::MouseWheel { .. }
+                )
+            })
+    });
+
+    if interactive {
+        ctx.request_repaint();
+    }
+
+    let ms = if connecting {
+        200
+    } else if wants_metrics {
+        400
+    } else {
+        // Terminal cursor blink cadence when idle.
+        530
+    };
+    ctx.request_repaint_after(Duration::from_millis(ms));
+}
+

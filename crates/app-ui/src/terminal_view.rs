@@ -7,6 +7,7 @@ use term_core::{Rgb, TerminalSnapshot};
 const CELL_W: f32 = 8.4;
 const CELL_H: f32 = 16.0;
 const TERM_BG: Color32 = Color32::BLACK;
+const SCROLL_W: f32 = 12.0;
 
 #[derive(Clone, Copy, Default)]
 struct TermSelection {
@@ -62,12 +63,27 @@ pub struct TerminalView;
 impl TerminalView {
     /// Renders the active terminal. Returns desired (cols, rows) based on available space.
     pub fn show(ui: &mut Ui, mgr: &Arc<ConnectionManager>) -> (u16, u16) {
-        let avail = ui.available_size();
-        let cols = ((avail.x / CELL_W).floor() as u16).max(20);
+        // Stay strictly inside the parent-allocated rect (no bleed into bottom strip).
+        let outer_max = ui.max_rect();
+        ui.set_clip_rect(outer_max);
+        let avail = ui.available_size().min(outer_max.size());
+        let term_w = (avail.x - SCROLL_W).max(CELL_W * 20.0);
+        let cols = ((term_w / CELL_W).floor() as u16).max(20);
         let rows = ((avail.y / CELL_H).floor() as u16).max(5);
 
-        let (rect, resp) = ui.allocate_exact_size(avail, Sense::click_and_drag());
-        ui.painter().rect_filled(rect, 0.0, TERM_BG);
+        let (outer, _) = ui.allocate_exact_size(avail, Sense::hover());
+        let outer = outer.intersect(outer_max);
+        let term_rect = Rect::from_min_size(
+            outer.min,
+            Vec2::new(term_w.min(outer.width()), outer.height()),
+        );
+        let scroll_rect = Rect::from_min_max(
+            Pos2::new(term_rect.max.x, outer.min.y),
+            outer.max,
+        );
+
+        let resp = ui.interact(term_rect, ui.id().with("term_grid"), Sense::click_and_drag());
+        ui.painter().rect_filled(term_rect, 0.0, TERM_BG);
 
         let sel_id = Id::new("vsterm_term_selection");
         let mut selection = ui
@@ -86,7 +102,7 @@ impl TerminalView {
         let Some(mut snapshot) = snapshot else {
             selection.clear();
             ui.ctx().data_mut(|d| d.insert_temp(sel_id, selection));
-            paint_status(ui, rect, mgr);
+            paint_status(ui, term_rect, mgr);
             return (cols, rows);
         };
 
@@ -100,19 +116,53 @@ impl TerminalView {
             .unwrap_or(false);
         let menu_open = resp.context_menu_opened();
 
+        // Mouse wheel → scrollback (positive wheel = into history).
+        if resp.hovered() {
+            let scroll_y = ui.input(|i| {
+                i.events.iter().fold(0.0_f32, |acc, e| match e {
+                    egui::Event::MouseWheel {
+                        unit,
+                        delta,
+                        modifiers,
+                        ..
+                    } if !modifiers.ctrl => {
+                        let lines = match unit {
+                            egui::MouseWheelUnit::Line => delta.y,
+                            egui::MouseWheelUnit::Page => delta.y * max_rows as f32,
+                            egui::MouseWheelUnit::Point => delta.y / CELL_H,
+                        };
+                        acc + lines
+                    }
+                    _ => acc,
+                })
+            });
+            let delta = scroll_y.round() as i32;
+            if delta != 0 {
+                let _ = mgr.with_active(|c| c.terminal.scroll_lines(delta));
+                selection.clear();
+                ui.ctx().request_repaint();
+                if let Some(s) = mgr.with_active(|c| c.terminal.snapshot()) {
+                    snapshot = s;
+                    crate::term_highlight::apply_semantic(&mut snapshot);
+                }
+            }
+        }
+
         // Primary-button selection only; leave range intact while the context menu is open.
         if !menu_open {
             let pointer_cell = resp
                 .interact_pointer_pos()
                 .or_else(|| ui.input(|i| i.pointer.interact_pos()))
-                .and_then(|pos| pos_to_cell(pos, rect, max_cols, max_rows));
+                .and_then(|pos| pos_to_cell(pos, term_rect, max_cols, max_rows));
 
             if let Some(cell) = pointer_cell {
                 if ui.input(|i| i.pointer.primary_pressed()) {
                     selection.anchor = Some(cell);
                     selection.focus = Some(cell);
+                    ui.ctx().request_repaint();
                 } else if ui.input(|i| i.pointer.primary_down()) && selection.anchor.is_some() {
                     selection.focus = Some(cell);
+                    ui.ctx().request_repaint();
                 }
             }
             if resp.clicked_by(PointerButton::Primary) && !resp.dragged() {
@@ -142,7 +192,7 @@ impl TerminalView {
                 }
 
                 let cell_rect = Rect::from_min_size(
-                    rect.min + Vec2::new(col as f32 * CELL_W, row as f32 * CELL_H),
+                    term_rect.min + Vec2::new(col as f32 * CELL_W, row as f32 * CELL_H),
                     Vec2::new(CELL_W, CELL_H),
                 );
                 if selection.contains(col, row) {
@@ -170,7 +220,7 @@ impl TerminalView {
             let (cx, cy) = snapshot.cursor;
             if cy < max_rows && cx < max_cols {
                 let cursor_rect = Rect::from_min_size(
-                    rect.min + Vec2::new(cx as f32 * CELL_W, cy as f32 * CELL_H),
+                    term_rect.min + Vec2::new(cx as f32 * CELL_W, cy as f32 * CELL_H),
                     Vec2::new(CELL_W, CELL_H),
                 );
                 ui.painter().rect_filled(
@@ -181,7 +231,27 @@ impl TerminalView {
             }
         }
 
+        // Scrollbar for scrollback history.
+        if snapshot.history_size > 0 {
+            if let Some(new_offset) =
+                paint_scrollbar(ui, scroll_rect, snapshot.display_offset, snapshot.history_size, max_rows)
+            {
+                let _ = mgr.with_active(|c| c.terminal.set_display_offset(new_offset));
+                selection.clear();
+                ui.ctx().request_repaint();
+            }
+        } else {
+            ui.painter()
+                .rect_filled(scroll_rect, 0.0, Color32::from_rgb(20, 20, 22));
+        }
+
         if resp.clicked_by(PointerButton::Primary) {
+            resp.request_focus();
+        }
+
+        // Hovering the grid claims keyboard focus so Space/Enter go to the PTY,
+        // not leftover-focused chrome buttons (quick commands, toolbar, …).
+        if !menu_open && resp.hovered() && !resp.has_focus() {
             resp.request_focus();
         }
 
@@ -197,7 +267,7 @@ impl TerminalView {
                 14.0,
                 can_copy,
             );
-            if copy_resp.clicked() {
+            if copy_resp.clicked_by(PointerButton::Primary) {
                 if let Some(text) = &selected_text {
                     ui.ctx().copy_text(text.clone());
                 }
@@ -211,7 +281,7 @@ impl TerminalView {
                 14.0,
                 can_input,
             );
-            if paste_resp.clicked() {
+            if paste_resp.clicked_by(PointerButton::Primary) {
                 if let Some(text) = read_clipboard_text() {
                     paste_to_session(mgr, &text);
                 }
@@ -220,7 +290,8 @@ impl TerminalView {
             }
         });
 
-        if resp.has_focus() || resp.hovered() {
+        // Only drive PTY input when this widget owns keyboard focus.
+        if !menu_open && resp.has_focus() {
             let copy_requested = ui.input(|i| {
                 let ctrl = i.modifiers.command || i.modifiers.ctrl;
                 if !ctrl {
@@ -235,12 +306,23 @@ impl TerminalView {
                 }
             }
 
+            // Shift+PageUp/Down → scrollback (Alacritty-style). Bare PageUp/Down go to the PTY.
+            if ui.input(|i| i.key_pressed(egui::Key::PageUp) && i.modifiers.shift) {
+                let _ = mgr.with_active(|c| c.terminal.scroll_page_up());
+                selection.clear();
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::PageDown) && i.modifiers.shift) {
+                let _ = mgr.with_active(|c| c.terminal.scroll_page_down());
+                selection.clear();
+            }
+
             if can_input {
                 ui.input(|i| {
                     for event in &i.events {
                         match event {
                             egui::Event::Copy => {}
                             egui::Event::Paste(text) => {
+                                let _ = mgr.with_active(|c| c.terminal.scroll_to_bottom());
                                 paste_to_session(mgr, text);
                             }
                             egui::Event::Key {
@@ -257,12 +339,19 @@ impl TerminalView {
                                 ..
                             } if modifiers.ctrl || modifiers.command => {}
                             egui::Event::Key {
+                                key: egui::Key::PageUp | egui::Key::PageDown,
+                                pressed: true,
+                                modifiers,
+                                ..
+                            } if modifiers.shift => {}
+                            egui::Event::Key {
                                 key: egui::Key::Escape,
                                 pressed: true,
                                 ..
                             } if selection.has_range() => {}
                             other => {
                                 if let Some(bytes) = event_to_bytes(other) {
+                                    let _ = mgr.with_active(|c| c.terminal.scroll_to_bottom());
                                     let _ = mgr.write_to_active(&bytes);
                                 }
                             }
@@ -274,12 +363,86 @@ impl TerminalView {
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) && selection.has_range() {
                 selection.clear();
             }
+        } else if resp.hovered() {
+            // Still allow copy shortcuts while reading scrollback without focus steal races.
+            let copy_requested = ui.input(|i| {
+                let ctrl = i.modifiers.command || i.modifiers.ctrl;
+                if !ctrl {
+                    return false;
+                }
+                (i.key_pressed(egui::Key::C) && (selection.has_range() || i.modifiers.shift))
+                    || i.key_pressed(egui::Key::Insert)
+            });
+            if copy_requested {
+                if let Some(text) = &selected_text {
+                    ui.ctx().copy_text(text.clone());
+                }
+            }
         }
 
         ui.ctx().data_mut(|d| d.insert_temp(sel_id, selection));
 
         (cols, rows)
     }
+}
+
+/// Returns a new display_offset when the user drags the thumb.
+fn paint_scrollbar(
+    ui: &mut Ui,
+    rect: Rect,
+    display_offset: usize,
+    history_size: usize,
+    screen_rows: usize,
+) -> Option<usize> {
+    if history_size == 0 || rect.width() < 2.0 {
+        return None;
+    }
+
+    ui.painter()
+        .rect_filled(rect, 0.0, Color32::from_rgb(28, 28, 32));
+
+    let track = rect.shrink2(Vec2::new(2.0, 3.0));
+    let total = (history_size + screen_rows) as f32;
+    let thumb_h = ((screen_rows as f32 / total) * track.height()).clamp(18.0, track.height());
+    let travel = (track.height() - thumb_h).max(0.0);
+    // offset=history → thumb at top; offset=0 → thumb at bottom.
+    let t = if history_size == 0 {
+        1.0
+    } else {
+        1.0 - (display_offset as f32 / history_size as f32)
+    };
+    let thumb_y = track.min.y + travel * t;
+    let thumb = Rect::from_min_size(
+        Pos2::new(track.min.x, thumb_y),
+        Vec2::new(track.width(), thumb_h),
+    );
+
+    let resp = ui.interact(rect, ui.id().with("term_scroll"), Sense::click_and_drag());
+    let fill = if resp.hovered() || resp.dragged() {
+        Color32::from_rgb(110, 115, 125)
+    } else {
+        Color32::from_rgb(70, 74, 82)
+    };
+    ui.painter().rect_filled(thumb, 2.0, fill);
+
+    if resp.dragged() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let rel = ((pos.y - track.min.y - thumb_h * 0.5) / travel.max(1.0)).clamp(0.0, 1.0);
+            let offset = ((1.0 - rel) * history_size as f32).round() as usize;
+            return Some(offset.min(history_size));
+        }
+    }
+    if resp.clicked() && !resp.dragged() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            if pos.y < thumb.min.y {
+                return Some(display_offset.saturating_add(screen_rows).min(history_size));
+            }
+            if pos.y > thumb.max.y {
+                return Some(display_offset.saturating_sub(screen_rows));
+            }
+        }
+    }
+    None
 }
 
 fn paint_status(ui: &mut Ui, rect: Rect, mgr: &Arc<ConnectionManager>) {

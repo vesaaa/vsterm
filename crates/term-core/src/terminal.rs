@@ -1,13 +1,18 @@
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Point};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{point_to_viewport, viewport_to_point, Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
 use crate::TermError;
+
+/// Invoked (possibly from a PTY reader thread) after the grid accepts new bytes.
+pub type OutputHook = Arc<dyn Fn() + Send + Sync>;
+
+const SCROLLBACK_LINES: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb {
@@ -41,6 +46,10 @@ pub struct TerminalSnapshot {
     pub cells: Vec<CellAttr>,
     pub cursor: (usize, usize),
     pub cursor_visible: bool,
+    /// Invisible scrollback lines currently available.
+    pub history_size: usize,
+    /// How far the viewport is scrolled into history (0 = live bottom).
+    pub display_offset: usize,
 }
 
 struct TermSize {
@@ -65,6 +74,7 @@ impl Dimensions for TermSize {
 /// Thread-safe terminal emulator wrapping alacritty_terminal::Term.
 pub struct TerminalHandle {
     inner: Arc<Mutex<TermState>>,
+    output_hook: Arc<Mutex<Option<OutputHook>>>,
 }
 
 struct TermState {
@@ -82,7 +92,9 @@ impl TerminalHandle {
             cols: cols_usize,
             rows: rows_usize,
         };
-        let term = Term::new(Config::default(), &size, VoidListener);
+        let mut config = Config::default();
+        config.scrolling_history = SCROLLBACK_LINES;
+        let term = Term::new(config, &size, VoidListener);
         Self {
             inner: Arc::new(Mutex::new(TermState {
                 term,
@@ -90,7 +102,13 @@ impl TerminalHandle {
                 cols: cols_usize,
                 rows: rows_usize,
             })),
+            output_hook: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// UI sets this so PTY reader threads can wake the egui event loop.
+    pub fn set_output_hook(&self, hook: Option<OutputHook>) {
+        *self.output_hook.lock() = hook;
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -98,10 +116,65 @@ impl TerminalHandle {
         (state.cols as u16, state.rows as u16)
     }
 
-    pub fn advance_bytes(&self, bytes: &[u8]) {
+    /// Positive `lines` scrolls into history (up); negative toward the live bottom.
+    /// No-op on the alternate screen where the remote application owns the viewport.
+    pub fn scroll_lines(&self, lines: i32) {
+        if lines == 0 {
+            return;
+        }
         let mut state = self.inner.lock();
-        let TermState { term, parser, .. } = &mut *state;
-        parser.advance(term, bytes);
+        if state.term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        state.term.scroll_display(Scroll::Delta(lines));
+    }
+
+    pub fn scroll_page_up(&self) {
+        let mut state = self.inner.lock();
+        if state.term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        state.term.scroll_display(Scroll::PageUp);
+    }
+
+    pub fn scroll_page_down(&self) {
+        let mut state = self.inner.lock();
+        if state.term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        state.term.scroll_display(Scroll::PageDown);
+    }
+
+    pub fn scroll_to_bottom(&self) {
+        let mut state = self.inner.lock();
+        state.term.scroll_display(Scroll::Bottom);
+    }
+
+    /// Absolute display offset into scrollback (clamped).
+    pub fn set_display_offset(&self, offset: usize) {
+        let mut state = self.inner.lock();
+        if state.term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let cur = state.term.grid().display_offset();
+        let delta = offset as i32 - cur as i32;
+        if delta != 0 {
+            state.term.scroll_display(Scroll::Delta(delta));
+        }
+    }
+
+    pub fn advance_bytes(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        {
+            let mut state = self.inner.lock();
+            let TermState { term, parser, .. } = &mut *state;
+            parser.advance(term, bytes);
+        }
+        if let Some(hook) = self.output_hook.lock().clone() {
+            hook();
+        }
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), TermError> {
@@ -122,11 +195,14 @@ impl TerminalHandle {
         let state = self.inner.lock();
         let cols = state.cols;
         let rows = state.rows;
+        let display_offset = state.term.grid().display_offset();
+        let history_size = state.term.history_size();
         let mut cells = Vec::with_capacity(cols * rows);
 
         for line in 0..rows {
             for col in 0..cols {
-                let point = Point::new(Line(line as i32), Column(col));
+                let point =
+                    viewport_to_point(display_offset, Point::new(line, Column(col)));
                 let cell = &state.term.grid()[point];
                 let ch = cell.c;
                 let flags = cell.flags;
@@ -147,15 +223,21 @@ impl TerminalHandle {
             }
         }
 
-        let cursor = state.term.grid().cursor.point;
-        let cursor_visible = state.term.mode().contains(TermMode::SHOW_CURSOR);
+        let cursor_point = state.term.grid().cursor.point;
+        let cursor_visible = state.term.mode().contains(TermMode::SHOW_CURSOR)
+            && display_offset == 0;
+        let cursor = point_to_viewport(display_offset, cursor_point)
+            .map(|p| (p.column.0, p.line))
+            .unwrap_or((0, 0));
 
         TerminalSnapshot {
             cols,
             rows,
             cells,
-            cursor: (cursor.column.0, cursor.line.0.max(0) as usize),
+            cursor,
             cursor_visible,
+            history_size,
+            display_offset,
         }
     }
 }
@@ -164,6 +246,7 @@ impl Clone for TerminalHandle {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            output_hook: Arc::clone(&self.output_hook),
         }
     }
 }
