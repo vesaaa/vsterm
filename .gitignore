@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# VsTerm local data (never commit credentials)
+.vsterm/
+**/credentials/
+*.enc
+
+# Env / secrets
+.env
+.env.*
+*.pem
+id_rsa
+id_ed25519

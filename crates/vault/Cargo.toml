@@ -1,0 +1,17 @@
+[package]
+name = "vault"
+version.workspace = true
+edition.workspace = true
+description = "Encrypted credential storage for VsTerm"
+
+[dependencies]
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+keyring = { workspace = true }
+age = { workspace = true }
+aes-gcm = { workspace = true }
+zeroize = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }

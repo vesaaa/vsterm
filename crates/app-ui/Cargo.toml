@@ -1,0 +1,31 @@
+[package]
+name = "app-ui"
+version.workspace = true
+edition.workspace = true
+description = "VsTerm egui application shell"
+default-run = "vsterm"
+
+[[bin]]
+name = "vsterm"
+path = "src/main.rs"
+
+[dependencies]
+session-tree = { workspace = true }
+vault = { workspace = true }
+term-core = { workspace = true }
+connection-mgr = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+egui_plot = { workspace = true }
+wgpu = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+sysinfo = { workspace = true }
+chrono = { workspace = true }

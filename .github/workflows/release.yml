@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: vsterm.exe
+            asset: vsterm-windows-x64.zip
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bin: vsterm
+            asset: vsterm-macos-x64.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: vsterm
+            asset: vsterm-macos-arm64.tar.gz
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bin: vsterm
+            asset: vsterm-linux-x64.tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxi-dev libxrandr-dev libxss-dev libvulkan-dev \
+            pkg-config
+
+      - name: Build release
+        run: cargo build --release -p app-ui --locked --target ${{ matrix.target }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "dist/vsterm"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" $dir/
+          Copy-Item README.md $dir/
+          Copy-Item assets/fonts/JetBrainsMono-OFL.txt $dir/
+          Copy-Item assets/fonts/NotoSansSC-OFL.txt $dir/
+          Compress-Archive -Path "$dir/*" -DestinationPath "${{ matrix.asset }}" -Force
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist/vsterm
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/vsterm/
+          chmod +x "dist/vsterm/${{ matrix.bin }}"
+          cp README.md dist/vsterm/
+          cp assets/fonts/JetBrainsMono-OFL.txt dist/vsterm/
+          cp assets/fonts/NotoSansSC-OFL.txt dist/vsterm/
+          tar -czvf "${{ matrix.asset }}" -C dist vsterm
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' \) -exec cp {} release-assets/ \;
+          ls -lah release-assets
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

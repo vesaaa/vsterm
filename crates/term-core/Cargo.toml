@@ -1,0 +1,15 @@
+[package]
+name = "term-core"
+version.workspace = true
+edition.workspace = true
+description = "Terminal emulation core (alacritty_terminal + portable-pty)"
+
+[dependencies]
+alacritty_terminal = { workspace = true }
+portable-pty = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "session-tree"
+version.workspace = true
+edition.workspace = true
+description = "Session tree data model and YAML persistence for VsTerm"
+
+[dependencies]
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }

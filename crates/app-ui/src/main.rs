@@ -1,0 +1,112 @@
+//! VsTerm — cross-platform SSH terminal manager.
+
+mod app;
+mod commands;
+mod fonts;
+mod i18n;
+mod metrics;
+mod panels;
+mod terminal_view;
+mod theme;
+
+use anyhow::Result;
+use tracing_subscriber::EnvFilter;
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1400.0, 860.0])
+            .with_min_inner_size([900.0, 560.0])
+            .with_title("VsTerm"),
+        renderer: eframe::Renderer::Wgpu,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(wgpu_setup()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "VsTerm",
+        native_options,
+        Box::new(|cc| Ok(Box::new(app::VsTermApp::new(cc)))),
+    )
+    .map_err(|e| anyhow::anyhow!("eframe error: {e}"))?;
+
+    Ok(())
+}
+
+fn preferred_backends() -> wgpu::Backends {
+    #[cfg(target_os = "windows")]
+    {
+        wgpu::Backends::DX12
+    }
+    #[cfg(target_os = "macos")]
+    {
+        wgpu::Backends::METAL
+    }
+    #[cfg(target_os = "linux")]
+    {
+        wgpu::Backends::VULKAN
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux"
+    )))]
+    {
+        wgpu::Backends::PRIMARY
+    }
+}
+
+fn wgpu_setup() -> eframe::egui_wgpu::WgpuSetupCreateNew {
+    let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::default();
+    setup.instance_descriptor.backends = preferred_backends();
+    setup.power_preference = wgpu::PowerPreference::HighPerformance;
+    setup.native_adapter_selector = Some(std::sync::Arc::new(|adapters, surface| {
+        if adapters.is_empty() {
+            return Err(
+                "no wgpu adapters — check GPU drivers / backend (DX12/Metal/Vulkan)".into(),
+            );
+        }
+        for adapter in adapters {
+            let info = adapter.get_info();
+            tracing::info!(
+                "wgpu adapter candidate: {} ({:?}, {:?})",
+                info.name,
+                info.backend,
+                info.device_type
+            );
+        }
+        let hardware = adapters.iter().find(|a| {
+            let ty = a.get_info().device_type;
+            matches!(
+                ty,
+                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+            ) && surface_ok(a, surface)
+        });
+        if let Some(adapter) = hardware {
+            return Ok(adapter.clone());
+        }
+        let any_ok = adapters.iter().find(|a| surface_ok(a, surface));
+        if let Some(adapter) = any_ok {
+            tracing::warn!("using fallback wgpu adapter: {}", adapter.get_info().name);
+            return Ok(adapter.clone());
+        }
+        Ok(adapters[0].clone())
+    }));
+    setup
+}
+
+fn surface_ok(adapter: &wgpu::Adapter, surface: Option<&wgpu::Surface<'_>>) -> bool {
+    match surface {
+        Some(surface) => adapter.is_surface_supported(surface),
+        None => true,
+    }
+}
