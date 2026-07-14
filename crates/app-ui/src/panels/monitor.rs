@@ -1,7 +1,7 @@
 use crate::i18n;
-use crate::metrics::{HostSnapshot, MetricsService};
+use crate::metrics::HostSnapshot;
 use egui::{Align2, Color32, FontId, Layout, RichText, Sense, Ui, UiBuilder};
-use egui_plot::{Line, Plot, PlotPoints};
+use egui_plot::{Line, Plot, PlotPoint, PlotPoints};
 
 const GAUGE_ROW_H: f32 = 22.0;
 const GAUGE_BLOCK_H: f32 = GAUGE_ROW_H * 3.0;
@@ -14,12 +14,26 @@ const GAP: f32 = 4.0;
 const LABEL_COLOR: Color32 = Color32::from_rgb(52, 56, 62);
 const HEADER_COLOR: Color32 = Color32::from_rgb(100, 105, 115);
 
-pub fn show(ui: &mut Ui, metrics: &MetricsService, has_connection: bool) {
+pub fn show(
+    ui: &mut Ui,
+    snap: &HostSnapshot,
+    selected_nic: &mut Option<String>,
+    has_connection: bool,
+    fetch_error: Option<&str>,
+) {
     if !has_connection {
         ui.centered_and_justified(|ui| {
             ui.label(RichText::new(i18n::t("monitor.no_connection")).weak());
         });
         return;
+    }
+
+    // Default to a primary NIC (ens*/eth*/…) so the chart is usable without picking.
+    let nic_stale = selected_nic
+        .as_ref()
+        .is_some_and(|cur| !snap.nics.iter().any(|n| n.name == *cur));
+    if selected_nic.is_none() || nic_stale {
+        *selected_nic = HostSnapshot::prefer_primary_nic(&snap.nics);
     }
 
     // Avoid automatic item_spacing eating our fixed-height budget (was clipping storage).
@@ -28,21 +42,29 @@ pub fn show(ui: &mut Ui, metrics: &MetricsService, has_connection: bool) {
     let w = ui.available_width().max(1.0);
     let total_h = ui.available_height().max(1.0);
 
-    let snap = metrics.snapshot();
-    let mut selected = metrics.selected_nic();
+    if snap.hostname.is_empty() {
+        ui.vertical(|ui| {
+            ui.label(RichText::new(i18n::t("monitor.loading")).weak());
+            if let Some(err) = fetch_error {
+                ui.add_space(6.0);
+                ui.colored_label(Color32::from_rgb(200, 80, 80), err);
+            }
+        });
+        return;
+    }
 
     let fixed_tail = NET_BLOCK_H + DISK_BLOCK_H + GAP * 2.0;
     let mid_h = (total_h - GAUGE_BLOCK_H - fixed_tail - GAP).max(48.0);
 
-    place_block(ui, w, GAUGE_BLOCK_H, |ui| usage_bars(ui, &snap, w));
+    place_block(ui, w, GAUGE_BLOCK_H, |ui| usage_bars(ui, snap, w));
     ui.add_space(GAP);
-    place_block(ui, w, mid_h, |ui| process_table(ui, &snap, w));
+    place_block(ui, w, mid_h, |ui| process_table(ui, snap, w));
     ui.add_space(GAP);
     place_block(ui, w, NET_BLOCK_H, |ui| {
-        network_section(ui, metrics, &snap, &mut selected, w);
+        network_section(ui, snap, selected_nic, w);
     });
     ui.add_space(GAP);
-    place_block(ui, w, DISK_BLOCK_H, |ui| storage_section(ui, &snap, w));
+    place_block(ui, w, DISK_BLOCK_H, |ui| storage_section(ui, snap, w));
 }
 
 fn place_block(ui: &mut Ui, w: f32, h: f32, add_contents: impl FnOnce(&mut Ui)) {
@@ -140,8 +162,15 @@ fn process_table(ui: &mut Ui, snap: &HostSnapshot, w: f32) {
     let rows_fit = ((body.height() - PROC_ROW_H) / PROC_ROW_H).floor().max(0.0) as usize;
     let avail = body.width();
 
-    // Columns sized from the actual body width so the rightmost "mem" is not clipped.
-    let pid_w = 36.0;
+    // PID column: widen for Linux PIDs (often 5–7 digits); 36px only fit ~4.
+    let pid_digits = snap
+        .processes
+        .iter()
+        .map(|p| p.pid.to_string().len())
+        .max()
+        .unwrap_or(5)
+        .clamp(5, 8);
+    let pid_w = (pid_digits as f32) * 8.5 + 6.0;
     let cpu_w = 40.0;
     let mem_w = 72.0;
     let name_w = (avail - pid_w - cpu_w - mem_w).max(40.0);
@@ -168,7 +197,7 @@ fn process_table(ui: &mut Ui, snap: &HostSnapshot, w: f32) {
                 proc_row(
                     ui,
                     &col_w,
-                    RichText::new(p.pid.to_string()),
+                    RichText::new(p.pid.to_string()).monospace().size(12.0),
                     RichText::new(truncate(&p.name, name_chars)),
                     RichText::new(format!("{:.1}", p.cpu)),
                     RichText::new(HostSnapshot::format_bytes(p.mem_bytes)),
@@ -213,7 +242,6 @@ fn proc_row(
 
 fn network_section(
     ui: &mut Ui,
-    metrics: &MetricsService,
     snap: &HostSnapshot,
     selected: &mut Option<String>,
     w: f32,
@@ -259,7 +287,7 @@ fn network_section(
                                 )
                                 .clicked()
                             {
-                                metrics.set_selected_nic(Some(nic.name.clone()));
+                                *selected = Some(nic.name.clone());
                             }
                         }
                     });
@@ -270,6 +298,11 @@ fn network_section(
     let (plot_rect, _) = ui.allocate_exact_size(egui::vec2(w, NET_PLOT_H), Sense::hover());
     if let Some(name) = selected.clone() {
         if let Some(hist) = snap.net_history.get(&name) {
+            // Plot units: KB/s
+            let y_peak = hist
+                .iter()
+                .map(|(rx, tx)| rx.max(*tx) / 1024.0)
+                .fold(0.0_f64, f64::max);
             let rx: PlotPoints = hist
                 .iter()
                 .enumerate()
@@ -287,13 +320,18 @@ fn network_section(
                     .layout(Layout::top_down(egui::Align::Min)),
                 |ui| {
                     ui.set_clip_rect(plot_rect);
-                    Plot::new("net_plot")
+                    let plot_resp = Plot::new("net_plot")
                         .width(plot_rect.width())
                         .height(plot_rect.height())
                         .allow_zoom(false)
                         .allow_scroll(false)
                         .allow_drag(false)
+                        .allow_boxed_zoom(false)
+                        .show_axes(false)
+                        .show_grid(true)
+                        .set_margin_fraction(egui::vec2(0.0, 0.02))
                         .include_y(0.0)
+                        .include_y(y_peak.max(1.0))
                         .show(ui, |plot_ui| {
                             plot_ui.line(
                                 Line::new(rx)
@@ -306,6 +344,36 @@ fn network_section(
                                     .color(Color32::from_rgb(40, 120, 200)),
                             );
                         });
+
+                    // Y labels inside the plot, just to the right of the left edge
+                    // (top + mid only) — keeps the chart full-bleed without an outer axis gutter.
+                    let bounds = plot_resp.transform.bounds();
+                    let [xmin, ymin] = bounds.min();
+                    let [_, ymax] = bounds.max();
+                    let y_mid = (ymin + ymax) * 0.5;
+                    let top_pos = plot_resp
+                        .transform
+                        .position_from_point(&PlotPoint::new(xmin, ymax));
+                    let mid_pos = plot_resp
+                        .transform
+                        .position_from_point(&PlotPoint::new(xmin, y_mid));
+                    let label_color = Color32::from_rgb(90, 95, 105);
+                    let font = FontId::proportional(10.0);
+                    let x = plot_rect.min.x + 3.0;
+                    ui.painter().text(
+                        egui::pos2(x, top_pos.y + 1.0),
+                        Align2::LEFT_TOP,
+                        HostSnapshot::format_bps(ymax * 1024.0),
+                        font.clone(),
+                        label_color,
+                    );
+                    ui.painter().text(
+                        egui::pos2(x, mid_pos.y),
+                        Align2::LEFT_CENTER,
+                        HostSnapshot::format_bps(y_mid * 1024.0),
+                        font,
+                        label_color,
+                    );
                 },
             );
         }
@@ -324,14 +392,14 @@ fn storage_section(ui: &mut Ui, snap: &HostSnapshot, w: f32) {
 
     let pad = 4.0;
     let body = inner.shrink2(egui::vec2(pad, 2.0));
-    let rows_fit = ((body.height() - PROC_ROW_H) / PROC_ROW_H).floor().max(0.0) as usize;
     let avail = body.width();
 
-    let mount_w = (avail * 0.28).clamp(48.0, 86.0);
-    let pct_w = 48.0;
-    let cap_w = (avail - mount_w - pct_w).max(80.0);
+    // df -h style: Mount | Used/Total | Use%
+    let mount_w = (avail * 0.30).clamp(52.0, 96.0);
+    let pct_w = 42.0;
+    let cap_w = (avail - mount_w - pct_w).max(72.0);
     let col_w = [mount_w, cap_w, pct_w];
-    let mount_chars = ((mount_w / 7.5).floor() as usize).clamp(4, 16);
+    let mount_chars = ((mount_w / 7.0).floor() as usize).clamp(5, 18);
 
     ui.scope_builder(
         UiBuilder::new()
@@ -348,24 +416,39 @@ fn storage_section(ui: &mut Ui, snap: &HostSnapshot, w: f32) {
                 header_text(i18n::t("monitor.use_pct")),
                 true,
             );
-            for (i, d) in snap.disks.iter().take(rows_fit).enumerate() {
-                let used = d.total.saturating_sub(d.available);
-                let pct = if d.total == 0 {
-                    0.0
-                } else {
-                    used as f64 / d.total as f64 * 100.0
-                };
-                disk_row(
-                    ui,
-                    &col_w,
-                    RichText::new(truncate(&d.mount, mount_chars)),
-                    RichText::new(HostSnapshot::format_ratio_compact(used, d.total))
-                        .monospace()
-                        .size(11.0),
-                    RichText::new(format!("{pct:.0}%")),
-                    i % 2 == 1,
-                );
-            }
+            let list_h = (body.height() - PROC_ROW_H).max(PROC_ROW_H);
+            egui::ScrollArea::vertical()
+                .id_salt("monitor_disk_scroll")
+                .max_height(list_h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if snap.disks.is_empty() {
+                        ui.label(
+                            RichText::new(i18n::t("monitor.disk_empty"))
+                                .size(11.0)
+                                .weak(),
+                        );
+                        return;
+                    }
+                    for (i, d) in snap.disks.iter().enumerate() {
+                        let used = d.total.saturating_sub(d.available);
+                        let pct = if d.total == 0 {
+                            0.0
+                        } else {
+                            used as f64 / d.total as f64 * 100.0
+                        };
+                        disk_row(
+                            ui,
+                            &col_w,
+                            RichText::new(truncate(&d.mount, mount_chars)),
+                            RichText::new(HostSnapshot::format_ratio_compact(used, d.total))
+                                .monospace()
+                                .size(11.0),
+                            RichText::new(format!("{pct:.0}%")),
+                            i % 2 == 1,
+                        );
+                    }
+                });
         },
     );
 }

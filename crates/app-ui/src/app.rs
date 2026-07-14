@@ -1,15 +1,20 @@
 use crate::commands::CommandBook;
+use crate::conn_error::{format_conn_error, ConnErrorDisplay};
 use crate::i18n::{self, Locale};
-use crate::metrics::MetricsService;
+use crate::metrics::{HostSnapshot, MetricsService};
+use crate::remote_host::RemoteHostService;
 use crate::panels::bottom_panel::{self, BottomPanelState};
 use crate::panels::host_toolbar::{self, MainTab};
 use crate::panels::{connection_list, monitor, routes, session_tree_panel, status_bar, toolbar};
 use crate::terminal_view::TerminalView;
 use crate::{fonts, theme};
-use connection_mgr::ConnectionManager;
+use connection_mgr::{ConnectFailure, ConnectionManager, ConnError, ConnErrorKey, RemoteSession};
+use session_tree::BackendKind;
 use eframe::egui;
-use session_tree::{AppPaths, SessionStore, SessionTree};
+use session_tree::{AppPaths, SessionConfig, SessionStore, SessionTree};
+use std::sync::mpsc;
 use std::sync::Arc;
+use vault::Vault;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum LeftTab {
@@ -18,11 +23,29 @@ enum LeftTab {
     Monitor,
 }
 
+const MAX_PASSWORD_ATTEMPTS: u32 = 3;
+
+struct PendingConnect {
+    config: SessionConfig,
+    attempt: u32,
+    rx: mpsc::Receiver<Result<(), ConnectFailure>>,
+}
+
+struct PasswordPromptState {
+    config: SessionConfig,
+    password: String,
+    show_empty_warn: bool,
+    attempt: u32,
+    focus_password: bool,
+}
+
 pub struct VsTermApp {
     store: Option<SessionStore>,
     tree: SessionTree,
     connections: Arc<ConnectionManager>,
     metrics: MetricsService,
+    remote_host: RemoteHostService,
+    selected_nic: Option<String>,
     commands: CommandBook,
     left_tab: LeftTab,
     main_tab: MainTab,
@@ -32,6 +55,10 @@ pub struct VsTermApp {
     status: String,
     last_term_size: (u16, u16),
     locale: Locale,
+    pending_connect: Option<PendingConnect>,
+    error_dialog: Option<ConnErrorDisplay>,
+    password_prompt: Option<PasswordPromptState>,
+    host_bind_gen: u64,
 }
 
 impl VsTermApp {
@@ -57,12 +84,15 @@ impl VsTermApp {
 
         let connections = Arc::new(ConnectionManager::new());
         let metrics = MetricsService::start();
+        let remote_host = RemoteHostService::start();
 
         Self {
             store,
             tree,
             connections,
             metrics,
+            remote_host,
+            selected_nic: None,
             commands,
             left_tab: LeftTab::Servers,
             main_tab: MainTab::Terminal,
@@ -73,6 +103,10 @@ impl VsTermApp {
             status,
             last_term_size: (80, 24),
             locale,
+            pending_connect: None,
+            error_dialog: None,
+            password_prompt: None,
+            host_bind_gen: 0,
         }
     }
 
@@ -94,10 +128,355 @@ impl VsTermApp {
                 self.status = i18n::t("status.opened_shell");
                 self.left_tab = LeftTab::Monitor;
                 self.main_tab = MainTab::Terminal;
+                self.sync_host_binding();
             }
             Err(err) => {
-                self.status = format!("{}: {err}", i18n::t("status.open_failed"));
+                self.error_dialog = Some(format_conn_error(&err));
+                self.status = i18n::t("status.open_failed");
             }
+        }
+    }
+
+    fn request_open_session(&mut self, config: SessionConfig) {
+        if self.pending_connect.is_some() {
+            self.status = i18n::t("status.connecting");
+            return;
+        }
+
+        let resolved = connection_mgr::resolve_backend(config.backend);
+        if resolved != BackendKind::System {
+            self.error_dialog = Some(format_conn_error(
+                &connection_mgr::backend_unavailable_error(resolved),
+            ));
+            self.status = i18n::t("status.open_failed");
+            return;
+        }
+        if !connection_mgr::SystemSshBackend::is_available() {
+            self.error_dialog = Some(format_conn_error(
+                &connection_mgr::backend_unavailable_error(BackendKind::System),
+            ));
+            self.status = i18n::t("status.open_failed");
+            return;
+        }
+
+        let vault = self
+            .store
+            .as_ref()
+            .and_then(|s| Vault::open(s.paths().vault_path()).ok());
+        if let Err(err) = connection_mgr::preflight(&config, vault.as_ref(), false) {
+            self.error_dialog = Some(format_conn_error(&err));
+            self.status = i18n::t("status.open_failed");
+            return;
+        }
+
+        if config.needs_password_prompt() {
+            self.password_prompt = Some(PasswordPromptState {
+                config,
+                password: String::new(),
+                show_empty_warn: false,
+                attempt: 1,
+                focus_password: true,
+            });
+            return;
+        }
+
+        self.start_ssh_session(config, None, 1);
+    }
+
+    fn start_ssh_session(
+        &mut self,
+        config: SessionConfig,
+        interactive_password: Option<String>,
+        attempt: u32,
+    ) {
+        if self.pending_connect.is_some() {
+            self.status = i18n::t("status.connecting");
+            return;
+        }
+
+        let resolved = connection_mgr::resolve_backend(config.backend);
+        if resolved != BackendKind::System {
+            self.error_dialog = Some(format_conn_error(
+                &connection_mgr::backend_unavailable_error(resolved),
+            ));
+            self.status = i18n::t("status.open_failed");
+            return;
+        }
+        if !connection_mgr::SystemSshBackend::is_available() {
+            self.error_dialog = Some(format_conn_error(
+                &connection_mgr::backend_unavailable_error(BackendKind::System),
+            ));
+            self.status = i18n::t("status.open_failed");
+            return;
+        }
+
+        let vault = self
+            .store
+            .as_ref()
+            .and_then(|s| Vault::open(s.paths().vault_path()).ok());
+        if let Err(err) =
+            connection_mgr::preflight(&config, vault.as_ref(), interactive_password.is_some())
+        {
+            self.error_dialog = Some(format_conn_error(&err));
+            self.status = i18n::t("status.open_failed");
+            return;
+        }
+
+        // Do not add a host tab / switch panels until authentication succeeds.
+        self.status = format!("{} — {}", i18n::t("status.connecting"), config.display_label());
+
+        let mgr = Arc::clone(&self.connections);
+        let vault_path = self.store.as_ref().map(|s| s.paths().vault_path());
+        let (tx, rx) = mpsc::channel();
+        let remote = RemoteSession {
+            config: config.clone(),
+            interactive_password: interactive_password.clone(),
+        };
+
+        let config_for_thread = config.clone();
+        let config_for_pending = config.clone();
+        std::thread::Builder::new()
+            .name("vsterm-ssh-connect".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let err = ConnError::Backend(format!("tokio runtime: {e}"));
+                        let _ = tx.send(Err(err.into_failure()));
+                        return;
+                    }
+                };
+                let result = rt.block_on(async {
+                    let vault = vault_path.as_ref().and_then(|p| Vault::open(p).ok());
+                    ConnectionManager::establish_ssh(
+                        &config,
+                        vault.as_ref(),
+                        interactive_password,
+                        80,
+                        24,
+                    )
+                    .await
+                });
+                match result {
+                    Ok(io) => {
+                        mgr.insert_ssh_connected(&config_for_thread, remote, io);
+                        let _ = tx.send(Ok(()));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Err(err.into_failure()));
+                    }
+                }
+            })
+            .ok();
+
+        self.pending_connect = Some(PendingConnect {
+            config: config_for_pending,
+            attempt,
+            rx,
+        });
+    }
+
+    fn sync_host_binding(&mut self) {
+        let vault_path = self.store.as_ref().map(|s| s.paths().vault_path());
+        if let Some(remote) = self.connections.active_remote() {
+            self.remote_host.bind(Some(remote), vault_path);
+            if self.selected_nic.is_none() {
+                self.selected_nic = self
+                    .remote_host
+                    .selected_nic()
+                    .or_else(|| {
+                        self.remote_host
+                            .snapshot()
+                            .as_ref()
+                            .map(|s| HostSnapshot::prefer_primary_nic(&s.nics))
+                            .flatten()
+                    });
+            }
+        } else {
+            self.remote_host.bind(None, None);
+            if self.connections.active_local_metrics() {
+                self.selected_nic = self.metrics.selected_nic();
+            }
+        }
+    }
+
+    fn host_snapshot(&self) -> HostSnapshot {
+        if self.connections.active_remote().is_some() {
+            return self
+                .remote_host
+                .snapshot()
+                .unwrap_or_default();
+        }
+        if self.connections.active_local_metrics() {
+            return self.metrics.snapshot();
+        }
+        HostSnapshot::default()
+    }
+
+    fn poll_pending_connect(&mut self) {
+        let Some(pending) = self.pending_connect.take() else {
+            return;
+        };
+        match pending.rx.try_recv() {
+            Ok(Ok(())) => {
+                self.left_tab = LeftTab::Monitor;
+                self.main_tab = MainTab::Terminal;
+                self.sync_host_binding();
+                self.status = i18n::t("status.connected");
+            }
+            Ok(Err(failure)) => {
+                self.sync_host_binding();
+                if failure.key == ConnErrorKey::AuthFailed && pending.attempt < MAX_PASSWORD_ATTEMPTS
+                {
+                    self.password_prompt = Some(PasswordPromptState {
+                        config: pending.config,
+                        password: String::new(),
+                        show_empty_warn: false,
+                        attempt: pending.attempt + 1,
+                        focus_password: true,
+                    });
+                    self.status = i18n::t("dialog.password.wrong");
+                } else {
+                    self.error_dialog =
+                        Some(crate::conn_error::format_connect_failure(&failure));
+                    if failure.key == ConnErrorKey::AuthFailed {
+                        self.error_dialog.as_mut().map(|d| {
+                            d.hint = i18n::t("dialog.password.max_attempts");
+                        });
+                    }
+                    self.status = i18n::t("status.open_failed");
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                self.pending_connect = Some(pending);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.status = i18n::t("status.open_failed");
+            }
+        }
+    }
+
+    fn show_password_dialog(&mut self, ctx: &egui::Context) {
+        let mut connect = false;
+        let mut cancel = false;
+
+        if let Some(prompt) = &mut self.password_prompt {
+            let mut open = true;
+            let attempt = prompt.attempt;
+            egui::Window::new(format!(
+                "{} ({}/{})",
+                i18n::t("dialog.password.title"),
+                attempt,
+                MAX_PASSWORD_ATTEMPTS
+            ))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "{}: {}",
+                    i18n::t("dialog.password.host"),
+                    prompt.config.display_label()
+                ));
+                if attempt > 1 {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 80, 80),
+                        i18n::t("dialog.password.wrong"),
+                    );
+                    ui.add_space(4.0);
+                }
+                ui.add_space(6.0);
+                ui.label(i18n::t("dialog.password.hint"));
+                ui.add_space(8.0);
+                ui.label(i18n::t("dialog.password.field"));
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut prompt.password)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
+                );
+                if prompt.focus_password {
+                    resp.request_focus();
+                    prompt.focus_password = false;
+                }
+                if prompt.show_empty_warn {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 80, 80),
+                        i18n::t("dialog.password.empty"),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button(i18n::t("dialog.password.connect")).clicked() {
+                        if prompt.password.is_empty() {
+                            prompt.show_empty_warn = true;
+                        } else {
+                            connect = true;
+                        }
+                    }
+                    if ui.button(i18n::t("dialog.password.cancel")).clicked() {
+                        cancel = true;
+                    }
+                });
+                // egui: Enter typically causes lost_focus; also accept Enter while focused.
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if enter && (resp.has_focus() || resp.lost_focus()) {
+                    if prompt.password.is_empty() {
+                        prompt.show_empty_warn = true;
+                    } else {
+                        connect = true;
+                    }
+                }
+            });
+            if !open {
+                cancel = true;
+            }
+        }
+
+        if connect {
+            let prompt = self.password_prompt.take().unwrap();
+            self.start_ssh_session(prompt.config, Some(prompt.password), prompt.attempt);
+        } else if cancel {
+            self.password_prompt = None;
+            self.status = i18n::t("status.open_failed");
+        }
+    }
+
+    fn show_error_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.error_dialog.clone() else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new(i18n::t("dialog.error.title"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(&dialog.title).strong());
+                if let Some(detail) = &dialog.detail {
+                    ui.add_space(6.0);
+                    ui.label(format!("{}:", i18n::t("dialog.error.detail")));
+                    ui.label(
+                        egui::RichText::new(detail)
+                            .monospace()
+                            .color(egui::Color32::from_rgb(100, 100, 110)),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.label(format!("{}:", i18n::t("dialog.error.hint")));
+                ui.label(&dialog.hint);
+                ui.add_space(10.0);
+                if ui.button(i18n::t("dialog.error.ok")).clicked() {
+                    self.error_dialog = None;
+                }
+            });
+        if !open {
+            self.error_dialog = None;
         }
     }
 
@@ -111,6 +490,8 @@ impl VsTermApp {
 
 impl eframe::App for VsTermApp {
     fn on_exit(&mut self) {
+        self.remote_host.bind(None, None);
+        self.remote_host.stop();
         self.metrics.stop();
         self.connections.close_all();
     }
@@ -118,6 +499,16 @@ impl eframe::App for VsTermApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(i18n::t("app.name")));
+
+        self.poll_pending_connect();
+        self.connections.reap_dead();
+        let gen = self.connections.generation();
+        if self.host_bind_gen != gen {
+            self.host_bind_gen = gen;
+            self.sync_host_binding();
+        }
+        self.show_password_dialog(ctx);
+        self.show_error_dialog(ctx);
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -139,6 +530,7 @@ impl eframe::App for VsTermApp {
                     if ui.button(i18n::t("menu.connection.close")).clicked() {
                         if let Some(id) = self.connections.active_id() {
                             self.connections.close(id);
+                            self.sync_host_binding();
                             self.status = i18n::t("status.closed");
                         }
                         ui.close_menu();
@@ -237,29 +629,25 @@ impl eframe::App for VsTermApp {
                                                         self.open_local_shell("Local Shell");
                                                     }
                                                     session_tree_panel::TreeAction::OpenSession {
-                                                        name,
+                                                        name: _,
                                                         session_ref,
                                                     } => {
                                                         if let Some(store) = &self.store {
                                                             match store.load_session(&session_ref)
                                                             {
                                                                 Ok(cfg) => {
-                                                                    self.open_local_shell(format!(
-                                                                        "{} ({})",
-                                                                        name, cfg.host
-                                                                    ));
-                                                                    self.status = format!(
-                                                                        "{} — {}",
-                                                                        cfg.display_label(),
-                                                                        cfg.id
-                                                                    );
+                                                                    self.request_open_session(cfg);
                                                                 }
                                                                 Err(err) => {
-                                                                    self.status = format!(
-                                                                        "{}: {err}",
-                                                                        i18n::t(
-                                                                            "status.open_failed"
-                                                                        )
+                                                                    self.error_dialog = Some(
+                                                                        format_conn_error(
+                                                                            &ConnError::NotFound(
+                                                                                err.to_string(),
+                                                                            ),
+                                                                        ),
+                                                                    );
+                                                                    self.status = i18n::t(
+                                                                        "status.open_failed",
                                                                     );
                                                                 }
                                                             }
@@ -269,9 +657,36 @@ impl eframe::App for VsTermApp {
                                             }
                                         }
                                         LeftTab::Monitor => {
-                                            let has =
-                                                self.connections.active_id().is_some();
-                                            monitor::show(ui, &self.metrics, has);
+                                            let has = self
+                                                .connections
+                                                .with_active(|c| {
+                                                    c.state == connection_mgr::ConnectionState::Connected
+                                                })
+                                                .unwrap_or(false);
+                                            let snap = self.host_snapshot();
+                                            let err = self.remote_host.last_error();
+                                            if let Some(e) = err.as_ref() {
+                                                if snap.hostname.is_empty() {
+                                                    self.status = format!(
+                                                        "{}: {e}",
+                                                        i18n::t("monitor.loading")
+                                                    );
+                                                }
+                                            }
+                                            monitor::show(
+                                                ui,
+                                                &snap,
+                                                &mut self.selected_nic,
+                                                has,
+                                                err.as_deref(),
+                                            );
+                                            if self.connections.active_remote().is_some() {
+                                                self.remote_host
+                                                    .set_selected_nic(self.selected_nic.clone());
+                                            } else if self.connections.active_local_metrics() {
+                                                self.metrics
+                                                    .set_selected_nic(self.selected_nic.clone());
+                                            }
                                         }
                                     }
                                 });
@@ -323,11 +738,13 @@ impl eframe::App for VsTermApp {
                                     match conn_action {
                                         Some(connection_list::ConnAction::Select(id)) => {
                                             self.connections.set_active(id);
+                                            self.sync_host_binding();
                                             self.left_tab = LeftTab::Monitor;
                                             self.main_tab = MainTab::Terminal;
                                         }
                                         Some(connection_list::ConnAction::Close(id)) => {
                                             self.connections.close(id);
+                                            self.sync_host_binding();
                                             self.status = i18n::t("status.closed");
                                         }
                                         None => {}
@@ -383,7 +800,9 @@ impl eframe::App for VsTermApp {
             ui.add_space(2.0);
             ui.separator();
 
-            let snap = self.metrics.snapshot();
+            let snap = self.host_snapshot();
+            let vault_path = self.store.as_ref().map(|s| s.paths().vault_path());
+            let remote = self.connections.active_remote();
 
             match self.main_tab {
                 MainTab::Terminal => {
@@ -413,10 +832,11 @@ impl eframe::App for VsTermApp {
                     }
                 }
                 MainTab::SystemInfo => {
-                    toolbar::show_panel(ui, Some(&snap));
+                    let err = self.remote_host.last_error();
+                    toolbar::show_panel(ui, Some(&snap), err.as_deref());
                 }
                 MainTab::Routes => {
-                    routes::show_panel(ui);
+                    routes::show_panel(ui, remote.as_ref(), vault_path.as_deref());
                 }
             }
         });
@@ -476,10 +896,9 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
         host: "10.0.1.10".into(),
         port: 22,
         username: "deploy".into(),
-        backend: BackendKind::Builtin,
-        auth: AuthConfig::Publickey {
-            private_key_path: "~/.ssh/id_ed25519".into(),
-            passphrase_ref: None,
+        backend: BackendKind::Auto,
+        auth: AuthConfig::Password {
+            password_ref: None,
         },
         color_tag: Some("#ff5555".into()),
         term_type: "xterm-256color".into(),
@@ -492,7 +911,7 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
         username: "deploy".into(),
         backend: BackendKind::Auto,
         auth: AuthConfig::Password {
-            password_ref: "vault://demo-db-01-pwd".into(),
+            password_ref: Some("vault://demo-db-01-pwd".into()),
         },
         color_tag: Some("#50fa7b".into()),
         term_type: "xterm-256color".into(),
@@ -500,6 +919,10 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
 
     store.save_session(&web)?;
     store.save_session(&db)?;
+
+    if let Ok(mut vault) = vault::Vault::open(store.paths().vault_path()) {
+        let _ = vault.set("demo-db-01-pwd", "demo-password");
+    }
 
     let tree = SessionTree {
         root: vec![

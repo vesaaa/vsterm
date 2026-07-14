@@ -1,4 +1,5 @@
 use connection_mgr::ConnectionManager;
+use connection_mgr::ConnectionState;
 use egui::{Color32, FontId, Rect, Sense, Ui, Vec2};
 use std::sync::Arc;
 use term_core::Rgb;
@@ -19,14 +20,49 @@ impl TerminalView {
         ui.painter()
             .rect_filled(rect, 0.0, Color32::from_rgb(40, 42, 54));
 
-        let Some(snapshot) = mgr.with_active(|c| c.terminal.snapshot()) else {
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                crate::i18n::t("term.empty"),
-                FontId::proportional(16.0),
-                Color32::from_rgb(152, 158, 180),
-            );
+        let snapshot = mgr
+            .with_active(|c| {
+                if c.state == ConnectionState::Connecting || c.state == ConnectionState::Failed {
+                    return None;
+                }
+                Some(c.terminal.snapshot())
+            })
+            .flatten();
+
+        let Some(snapshot) = snapshot else {
+            if let Some(state) = mgr.with_active(|c| c.state) {
+                let (msg, color) = match state {
+                    ConnectionState::Connecting => (
+                        crate::i18n::t("term.connecting"),
+                        Color32::from_rgb(152, 158, 180),
+                    ),
+                    ConnectionState::Failed => (
+                        mgr.with_active(|c| c.error_message.clone())
+                            .flatten()
+                            .unwrap_or_else(|| crate::i18n::t("term.failed")),
+                        Color32::from_rgb(255, 120, 120),
+                    ),
+                    _ => (
+                        crate::i18n::t("term.empty"),
+                        Color32::from_rgb(152, 158, 180),
+                    ),
+                };
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    msg,
+                    FontId::proportional(15.0),
+                    color,
+                );
+            } else {
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    crate::i18n::t("term.empty"),
+                    FontId::proportional(16.0),
+                    Color32::from_rgb(152, 158, 180),
+                );
+            }
             return (cols, rows);
         };
 
@@ -97,13 +133,18 @@ impl TerminalView {
             resp.request_focus();
         }
         if resp.has_focus() || resp.hovered() {
-            ui.input(|i| {
-                for event in &i.events {
-                    if let Some(bytes) = event_to_bytes(event) {
-                        let _ = mgr.write_to_active(&bytes);
+            let can_input = mgr
+                .with_active(|c| c.state == ConnectionState::Connected)
+                .unwrap_or(false);
+            if can_input {
+                ui.input(|i| {
+                    for event in &i.events {
+                        if let Some(bytes) = event_to_bytes(event) {
+                            let _ = mgr.write_to_active(&bytes);
+                        }
                     }
-                }
-            });
+                });
+            }
         }
 
         (cols, rows)

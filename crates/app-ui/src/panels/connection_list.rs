@@ -75,16 +75,21 @@ fn host_tab(
 
     let side_bg = Color32::from_rgb(248, 249, 250);
     let central_bg = Color32::from_rgb(255, 255, 255);
-    let accent = Color32::from_rgb(60, 120, 210);
 
-    // Background — active tab: no right border; top/bottom only.
+    // Background — active tab uses session color_tag as left accent (else blue).
+    // Never draw color_tag again beside the status light — that looked like a second "status".
+    let accent = meta
+        .color_tag
+        .as_deref()
+        .and_then(parse_hex_color)
+        .unwrap_or(Color32::from_rgb(60, 120, 210));
+
     if is_active {
         ui.painter().rect_filled(rect, 0.0, central_bg);
         let mut bar = rect;
         bar.max.x = rect.min.x + 3.0;
         ui.painter().rect_filled(bar, 0.0, accent);
         let stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(190, 205, 230));
-        // Top/bottom span full tab width; separator overlap is masked in app.rs.
         ui.painter().hline(rect.x_range(), rect.min.y, stroke);
         ui.painter().hline(rect.x_range(), rect.max.y - 1.0, stroke);
         ui.painter().rect_filled(
@@ -93,10 +98,19 @@ fn host_tab(
                 egui::pos2(rect.max.x, rect.min.y + 2.0),
             ),
             0.0,
-            Color32::from_rgba_unmultiplied(60, 120, 210, 40),
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 40),
         );
     } else {
         ui.painter().rect_filled(rect, 0.0, side_bg);
+        if meta.color_tag.as_deref().and_then(parse_hex_color).is_some() {
+            let mut bar = rect;
+            bar.max.x = rect.min.x + 2.0;
+            ui.painter().rect_filled(
+                bar,
+                0.0,
+                Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 160),
+            );
+        }
         let stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(228, 230, 234));
         ui.painter().hline(rect.x_range(), rect.max.y - 0.5, stroke);
         if resp.hovered() {
@@ -120,34 +134,17 @@ fn host_tab(
         Sense::click(),
     );
 
-    // Content layout inside tab (single line, fixed height)
+    // Content: status light (only) + title — no color strip before the light.
     let mut x = rect.min.x + if is_active { 10.0 } else { 8.0 };
     let y = rect.center().y;
-
-    if let Some(tag) = &meta.color_tag {
-        if let Some(color) = parse_hex_color(tag) {
-            let tag_rect = egui::Rect::from_center_size(
-                egui::pos2(x + 1.5, y),
-                egui::vec2(3.0, 22.0),
-            );
-            ui.painter().rect_filled(tag_rect, 0.0, color);
-            x += 8.0;
-        }
-    }
 
     let state_color = match meta.state {
         ConnectionState::Connected => Color32::from_rgb(40, 160, 90),
         ConnectionState::Connecting => Color32::from_rgb(200, 160, 40),
-        ConnectionState::Disconnected => Color32::from_rgb(140, 145, 155),
+        ConnectionState::Disconnected => Color32::from_rgb(150, 154, 162),
         ConnectionState::Failed => Color32::from_rgb(200, 60, 60),
     };
-    ui.painter().text(
-        egui::pos2(x, y),
-        egui::Align2::LEFT_CENTER,
-        "●",
-        FontId::proportional(9.0),
-        state_color,
-    );
+    ui.painter().circle_filled(egui::pos2(x + 3.5, y), 3.5, state_color);
     x += 12.0;
 
     let text_right = close_rect.min.x - 4.0;

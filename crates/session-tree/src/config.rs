@@ -26,8 +26,9 @@ pub enum AuthType {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AuthConfig {
     Password {
-        /// e.g. `vault://prod-web-01-pwd`
-        password_ref: String,
+        /// e.g. `vault://prod-web-01-pwd`. Omit or leave empty to prompt at connect time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password_ref: Option<String>,
     },
     Publickey {
         private_key_path: PathBuf,
@@ -41,6 +42,18 @@ impl AuthConfig {
         match self {
             Self::Password { .. } => AuthType::Password,
             Self::Publickey { .. } => AuthType::Publickey,
+        }
+    }
+
+    /// True when password auth has no saved vault ref — UI should prompt before connect.
+    pub fn needs_password_prompt(&self) -> bool {
+        if let Self::Password { password_ref } = self {
+            password_ref
+                .as_ref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+        } else {
+            false
         }
     }
 }
@@ -74,5 +87,9 @@ fn default_term_type() -> String {
 impl SessionConfig {
     pub fn display_label(&self) -> String {
         format!("{}@{}:{}", self.username, self.host, self.port)
+    }
+
+    pub fn needs_password_prompt(&self) -> bool {
+        self.auth.needs_password_prompt()
     }
 }

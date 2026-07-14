@@ -31,4 +31,17 @@ pub enum ConnError {
 
     #[error("vault error: {0}")]
     Vault(String),
+
+    #[error("private key not found: {path}")]
+    PrivateKeyMissing {
+        path: std::path::PathBuf,
+        /// How auth is configured in session YAML (e.g. "publickey").
+        configured_auth: String,
+    },
+
+    #[error("vault secret missing: {secret_ref}")]
+    VaultSecretMissing { secret_ref: String },
+
+    #[error("invalid session config ({field}): {reason}")]
+    InvalidConfig { field: String, reason: String },
 }

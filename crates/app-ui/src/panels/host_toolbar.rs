@@ -15,13 +15,14 @@ pub fn show(ui: &mut Ui, tab: &mut MainTab) {
     ui.spacing_mut().item_spacing.x = 4.0;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
-        tab_chip(ui, tab, MainTab::Terminal, "▦", &i18n::t("main.tab.terminal"));
-        tab_chip(ui, tab, MainTab::SystemInfo, "◎", &i18n::t("main.tab.sysinfo"));
-        tab_chip(ui, tab, MainTab::Routes, "⬡", &i18n::t("main.tab.routes"));
+        // Stick to glyphs that exist in common CJK UI fonts (avoid tofu / "?").
+        tab_chip(ui, tab, MainTab::Terminal, None, &i18n::t("main.tab.terminal"));
+        tab_chip(ui, tab, MainTab::SystemInfo, None, &i18n::t("main.tab.sysinfo"));
+        tab_chip(ui, tab, MainTab::Routes, None, &i18n::t("main.tab.routes"));
     });
 }
 
-fn tab_chip(ui: &mut Ui, current: &mut MainTab, value: MainTab, icon: &str, label: &str) {
+fn tab_chip(ui: &mut Ui, current: &mut MainTab, value: MainTab, icon: Option<&str>, label: &str) {
     let selected = *current == value;
     let fill = if selected {
         Color32::from_rgb(220, 232, 250)
@@ -34,7 +35,10 @@ fn tab_chip(ui: &mut Ui, current: &mut MainTab, value: MainTab, icon: &str, labe
         Color32::from_rgb(200, 205, 212)
     };
     let text_color = Color32::from_rgb(32, 34, 40);
-    let text = format!("{icon}  {label}");
+    let text = match icon {
+        Some(icon) => format!("{icon}  {label}"),
+        None => label.to_string(),
+    };
     let btn = egui::Button::new(RichText::new(text).size(13.0).color(text_color))
         .fill(fill)
         .stroke(egui::Stroke::new(1.0_f32, stroke))

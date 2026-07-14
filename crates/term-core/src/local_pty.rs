@@ -149,7 +149,7 @@ impl Drop for LocalPtySession {
                 let _ = handle.join();
                 let _ = tx.send(());
             });
-            match rx.recv_timeout(Duration::from_millis(800)) {
+            match rx.recv_timeout(Duration::from_millis(150)) {
                 Ok(()) => {}
                 Err(_) => {
                     tracing::warn!("pty reader did not exit in time; detaching");

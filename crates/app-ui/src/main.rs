@@ -2,6 +2,8 @@
 
 mod app;
 mod commands;
+mod conn_error;
+mod remote_host;
 mod fonts;
 mod icon;
 mod i18n;
@@ -14,6 +16,16 @@ use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
+    // Used as SSH_ASKPASS helper when collecting remote metrics / routes.
+    if std::env::var_os("VSTERM_ASKPASS_MODE").is_some() {
+        if let Ok(secret) = std::env::var("VSTERM_ASKPASS_SECRET") {
+            use std::io::Write;
+            print!("{secret}");
+            let _ = std::io::stdout().flush();
+        }
+        std::process::exit(0);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

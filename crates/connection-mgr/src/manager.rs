@@ -1,7 +1,8 @@
-use crate::backend::{SshBackend, SshSession};
+use crate::backend::SshSession;
 use crate::error::ConnError;
-use crate::russh_backend::RusshBackend;
-use crate::system_ssh::{resolve_backend, SystemSshBackend};
+use crate::remote_exec::RemoteSession;
+use crate::ssh_io::SshIoSession;
+use crate::system_ssh::{backend_unavailable_error, resolve_backend, SystemSshBackend};
 use parking_lot::Mutex;
 use session_tree::{BackendKind, SessionConfig};
 use std::collections::HashMap;
@@ -9,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use term_core::{LocalPtySession, TerminalHandle};
 use uuid::Uuid;
+use vault::Vault;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnectionId(pub Uuid);
@@ -39,6 +41,45 @@ pub enum ConnectionState {
     Failed,
 }
 
+enum ConnectionIo {
+    Local(LocalPtySession),
+    Ssh(SshIoSession),
+}
+
+impl ConnectionIo {
+    fn terminal(&self) -> &TerminalHandle {
+        match self {
+            Self::Local(p) => p.terminal(),
+            Self::Ssh(s) => s.terminal(),
+        }
+    }
+
+    fn write_input(&self, data: &[u8]) -> Result<(), ConnError> {
+        match self {
+            Self::Local(p) => p
+                .write_all(data)
+                .map_err(|e| ConnError::Term(e.to_string())),
+            Self::Ssh(s) => s.write_all(data),
+        }
+    }
+
+    fn resize(&self, cols: u16, rows: u16) -> Result<(), ConnError> {
+        match self {
+            Self::Local(p) => p
+                .resize(cols, rows)
+                .map_err(|e| ConnError::Term(e.to_string())),
+            Self::Ssh(s) => s.resize(cols, rows),
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        match self {
+            Self::Local(p) => p.is_alive(),
+            Self::Ssh(s) => s.is_alive(),
+        }
+    }
+}
+
 /// Runtime active connection shown in the vertical list (left-2 panel).
 pub struct ActiveConnection {
     pub id: ConnectionId,
@@ -47,32 +88,31 @@ pub struct ActiveConnection {
     pub state: ConnectionState,
     pub session_id: Option<String>,
     pub terminal: TerminalHandle,
-    /// Local PTY (stage 1 local shell / system ssh). Held to keep the process alive.
-    pub(crate) local_pty: Option<LocalPtySession>,
-    /// Future: russh session handle (stage 4).
+    pub(crate) io: Option<ConnectionIo>,
     #[allow(dead_code)]
     pub(crate) ssh_session: Option<Box<dyn SshSession>>,
+    pub error_message: Option<String>,
+    /// Set for SSH session connections (not local shell).
+    pub remote: Option<RemoteSession>,
+    pub is_local_shell: bool,
 }
 
 impl ActiveConnection {
     pub fn write_input(&self, data: &[u8]) -> Result<(), ConnError> {
-        if let Some(pty) = &self.local_pty {
-            pty.write_all(data)
-                .map_err(|e| ConnError::Term(e.to_string()))?;
-        }
-        Ok(())
+        let Some(io) = &self.io else {
+            return Err(ConnError::NotConnected);
+        };
+        io.write_input(data)
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), ConnError> {
-        if let Some(pty) = &self.local_pty {
-            pty.resize(cols, rows)
-                .map_err(|e| ConnError::Term(e.to_string()))?;
+        if let Some(io) = &self.io {
+            io.resize(cols, rows)
         } else {
             self.terminal
                 .resize(cols, rows)
-                .map_err(|e| ConnError::Term(e.to_string()))?;
+                .map_err(|e| ConnError::Term(e.to_string()))
         }
-        Ok(())
     }
 }
 
@@ -121,60 +161,144 @@ impl ConnectionManager {
             state: ConnectionState::Connected,
             session_id: None,
             terminal,
-            local_pty: Some(pty),
+            io: Some(ConnectionIo::Local(pty)),
             ssh_session: None,
+            error_message: None,
+            remote: None,
+            is_local_shell: true,
         };
         self.insert(conn);
         Ok(id)
     }
 
-    /// Open a connection from a saved session config (dual backend).
-    pub async fn open_session(&self, config: &SessionConfig) -> Result<ConnectionId, ConnError> {
-        let kind = resolve_backend(config.backend);
+    /// Insert a placeholder while an async connect is in flight.
+    pub fn insert_connecting(&self, config: &SessionConfig) -> ConnectionId {
         let id = ConnectionId::new();
-        let title = config.name.clone();
-        let color_tag = config.color_tag.clone();
+        let terminal = TerminalHandle::new(80, 24);
+        let conn = ActiveConnection {
+            id,
+            title: config.name.clone(),
+            color_tag: config.color_tag.clone(),
+            state: ConnectionState::Connecting,
+            session_id: Some(config.id.clone()),
+            terminal,
+            io: None,
+            ssh_session: None,
+            error_message: None,
+            remote: None,
+            is_local_shell: false,
+        };
+        self.insert(conn);
+        id
+    }
 
-        match kind {
-            BackendKind::System => {
-                // System ssh currently returns a raw PTY session; for stage 1–2 we
-                // also expose a local-shell path. Full channel→terminal wiring lands in stage 4.
-                let backend = SystemSshBackend::new();
-                let mut session = backend.connect(config).await?;
-                let channel = session.open_shell((80, 24)).await?;
-                drop(channel);
-                let terminal = TerminalHandle::new(80, 24);
-                let conn = ActiveConnection {
-                    id,
-                    title,
-                    color_tag,
-                    state: ConnectionState::Connected,
-                    session_id: Some(config.id.clone()),
-                    terminal,
-                    local_pty: None,
-                    ssh_session: Some(session),
-                };
-                self.insert(conn);
-                Ok(id)
+    pub fn finish_connect(
+        &self,
+        id: ConnectionId,
+        remote: RemoteSession,
+        result: Result<SshIoSession, ConnError>,
+    ) {
+        let mut conns = self.connections.lock();
+        let Some(conn) = conns.get_mut(&id) else {
+            return;
+        };
+        match result {
+            Ok(io) => {
+                conn.terminal = io.terminal().clone();
+                conn.io = Some(ConnectionIo::Ssh(io));
+                conn.state = ConnectionState::Connected;
+                conn.error_message = None;
+                conn.remote = Some(remote);
+                conn.is_local_shell = false;
             }
-            BackendKind::Builtin | BackendKind::Auto => {
-                let backend = RusshBackend::new();
-                let session = backend.connect(config).await?;
-                let terminal = TerminalHandle::new(80, 24);
-                let conn = ActiveConnection {
-                    id,
-                    title,
-                    color_tag,
-                    state: ConnectionState::Connecting,
-                    session_id: Some(config.id.clone()),
-                    terminal,
-                    local_pty: None,
-                    ssh_session: Some(session),
-                };
-                self.insert(conn);
-                Ok(id)
+            Err(err) => {
+                conn.state = ConnectionState::Failed;
+                conn.error_message = Some(err.to_string());
+                conn.io = None;
+                conn.remote = None;
             }
         }
+        drop(conns);
+        self.bump();
+    }
+
+    /// Insert a fully authenticated SSH session (UI should call only after success).
+    pub fn insert_ssh_connected(
+        &self,
+        config: &SessionConfig,
+        remote: RemoteSession,
+        io: SshIoSession,
+    ) -> ConnectionId {
+        let id = ConnectionId::new();
+        let terminal = io.terminal().clone();
+        let conn = ActiveConnection {
+            id,
+            title: config.name.clone(),
+            color_tag: config.color_tag.clone(),
+            state: ConnectionState::Connected,
+            session_id: Some(config.id.clone()),
+            terminal,
+            io: Some(ConnectionIo::Ssh(io)),
+            ssh_session: None,
+            error_message: None,
+            remote: Some(remote),
+            is_local_shell: false,
+        };
+        self.insert(conn);
+        id
+    }
+
+    /// Establish SSH I/O without inserting a connection (for async UI flow).
+    pub async fn establish_ssh(
+        config: &SessionConfig,
+        vault: Option<&Vault>,
+        interactive_password: Option<String>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<SshIoSession, ConnError> {
+        let resolved = resolve_backend(config.backend);
+        match resolved {
+            BackendKind::System => {
+                SystemSshBackend::open_interactive(
+                    config,
+                    vault,
+                    interactive_password,
+                    cols,
+                    rows,
+                )
+                .await
+            }
+            BackendKind::Builtin | BackendKind::Auto => Err(backend_unavailable_error(resolved)),
+        }
+    }
+
+    /// Open a connection from a saved session config (dual backend).
+    pub async fn open_session(
+        &self,
+        config: &SessionConfig,
+        vault: Option<&Vault>,
+    ) -> Result<ConnectionId, ConnError> {
+        let io = Self::establish_ssh(config, vault, None, 80, 24).await?;
+        let id = ConnectionId::new();
+        let terminal = io.terminal().clone();
+        let conn = ActiveConnection {
+            id,
+            title: config.name.clone(),
+            color_tag: config.color_tag.clone(),
+            state: ConnectionState::Connected,
+            session_id: Some(config.id.clone()),
+            terminal,
+            io: Some(ConnectionIo::Ssh(io)),
+            ssh_session: None,
+            error_message: None,
+            remote: Some(RemoteSession {
+                config: config.clone(),
+                interactive_password: None,
+            }),
+            is_local_shell: false,
+        };
+        self.insert(conn);
+        Ok(id)
     }
 
     fn insert(&self, conn: ActiveConnection) {
@@ -185,8 +309,31 @@ impl ConnectionManager {
         self.bump();
     }
 
+    pub fn active_remote(&self) -> Option<RemoteSession> {
+        let id = self.active_id()?;
+        let conns = self.connections.lock();
+        let conn = conns.get(&id)?;
+        if conn.state == ConnectionState::Connected && !conn.is_local_shell {
+            conn.remote.clone()
+        } else {
+            None
+        }
+    }
+
+    /// True when the active tab should show local host metrics (local shell or no SSH remote).
+    pub fn active_local_metrics(&self) -> bool {
+        let Some(id) = self.active_id() else {
+            return false;
+        };
+        let conns = self.connections.lock();
+        let Some(conn) = conns.get(&id) else {
+            return false;
+        };
+        conn.state == ConnectionState::Connected
+            && (conn.is_local_shell || conn.remote.is_none())
+    }
+
     pub fn close(&self, id: ConnectionId) {
-        // Drop connection outside the map lock so PTY shutdown cannot deadlock UI.
         let removed = self.connections.lock().remove(&id);
         self.order.lock().retain(|x| *x != id);
         {
@@ -208,7 +355,12 @@ impl ConnectionManager {
             *active = None;
             map.drain().map(|(_, c)| c).collect()
         };
-        drop(drained);
+        // Drop I/O off the UI/exit thread so window close stays snappy.
+        if !drained.is_empty() {
+            std::thread::spawn(move || {
+                drop(drained);
+            });
+        }
         self.bump();
     }
 
@@ -266,6 +418,28 @@ impl ConnectionManager {
         let conns = self.connections.lock();
         let conn = conns.get(&id).ok_or(ConnError::NotConnected)?;
         conn.resize(cols, rows)
+    }
+
+    /// Drop dead connections (SSH process exited).
+    pub fn reap_dead(&self) {
+        let dead: Vec<ConnectionId> = {
+            let conns = self.connections.lock();
+            conns
+                .values()
+                .filter(|c| {
+                    c.state == ConnectionState::Connected
+                        && c.io.as_ref().is_some_and(|io| !io.is_alive())
+                })
+                .map(|c| c.id)
+                .collect()
+        };
+        for id in dead {
+            if let Some(conn) = self.connections.lock().get_mut(&id) {
+                conn.state = ConnectionState::Disconnected;
+                conn.io = None;
+            }
+            self.bump();
+        }
     }
 }
 

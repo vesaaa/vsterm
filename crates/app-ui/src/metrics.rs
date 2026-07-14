@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use sysinfo::{Disks, Networks, System};
 
 const NET_HISTORY: usize = 60;
+pub(crate) const NET_HISTORY_LEN: usize = NET_HISTORY;
 
 #[derive(Debug, Clone)]
 pub struct ProcessRow {
@@ -73,6 +74,31 @@ impl HostSnapshot {
         } else {
             (self.swap_used as f64 / self.swap_total as f64 * 100.0) as f32
         }
+    }
+
+    /// Prefer a primary Ethernet/Wi-Fi NIC (ens*/eth*/eno*/enp*/wlan*) over lo/veth/…
+    pub fn prefer_primary_nic(nics: &[NicInfo]) -> Option<String> {
+        const PREFERRED: &[&str] = &[
+            "ens", "eth", "eno", "enp", "enx", "wlan", "wlp", "wlx",
+        ];
+        for prefix in PREFERRED {
+            if let Some(n) = nics.iter().find(|n| n.name.starts_with(prefix) && n.name.len() > prefix.len())
+            {
+                return Some(n.name.clone());
+            }
+        }
+        nics.iter()
+            .find(|n| {
+                let l = n.name.to_ascii_lowercase();
+                l != "lo"
+                    && !l.starts_with("docker")
+                    && !l.starts_with("veth")
+                    && !l.starts_with("br-")
+                    && !l.starts_with("virbr")
+                    && !l.contains("loop")
+            })
+            .or_else(|| nics.first())
+            .map(|n| n.name.clone())
     }
 
     pub fn format_bytes(n: u64) -> String {
@@ -264,11 +290,11 @@ fn tick(sys: &mut System, state: &Arc<Mutex<SamplerState>>) {
     nics.sort_by(|a, b| a.name.cmp(&b.name));
 
     if guard.selected_nic.is_none() {
-        guard.selected_nic = nics
-            .iter()
-            .find(|n| !n.name.to_lowercase().contains("loop") && n.name != "lo")
-            .or_else(|| nics.first())
-            .map(|n| n.name.clone());
+        guard.selected_nic = HostSnapshot::prefer_primary_nic(&nics);
+    } else if let Some(cur) = &guard.selected_nic {
+        if !nics.iter().any(|n| n.name == *cur) {
+            guard.selected_nic = HostSnapshot::prefer_primary_nic(&nics);
+        }
     }
 
     guard.snapshot = HostSnapshot {
