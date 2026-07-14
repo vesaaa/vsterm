@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=VsTerm
+GenericName=SSH Terminal Manager
+Comment=Cross-platform SSH terminal manager
+Exec=vsterm
+Icon=vsterm
+Terminal=false
+Categories=Network;TerminalEmulator;Development;
+StartupWMClass=vsterm

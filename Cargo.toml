@@ -62,6 +62,7 @@ sysinfo = "0.33"
 egui_plot = "0.31"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 encoding_rs = "0.8"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Internal crates
 session-tree = { path = "crates/session-tree" }

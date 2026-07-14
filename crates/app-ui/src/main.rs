@@ -3,6 +3,7 @@
 mod app;
 mod commands;
 mod fonts;
+mod icon;
 mod i18n;
 mod metrics;
 mod panels;
@@ -19,11 +20,16 @@ fn main() -> Result<()> {
         )
         .init();
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1400.0, 860.0])
+        .with_min_inner_size([900.0, 560.0])
+        .with_title("VsTerm");
+    if let Ok(icon) = icon::window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1400.0, 860.0])
-            .with_min_inner_size([900.0, 560.0])
-            .with_title("VsTerm"),
+        viewport,
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(wgpu_setup()),

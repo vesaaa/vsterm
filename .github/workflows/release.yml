@@ -79,15 +79,33 @@ jobs:
           Copy-Item assets/fonts/NotoSansSC-OFL.txt $dir/
           Compress-Archive -Path "$dir/*" -DestinationPath "${{ matrix.asset }}" -Force
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
         run: |
-          mkdir -p dist/vsterm
+          APP="dist/VsTerm.app/Contents"
+          mkdir -p "$APP/MacOS" "$APP/Resources"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$APP/MacOS/vsterm"
+          chmod +x "$APP/MacOS/vsterm"
+          cp assets/icons/macos/VsTerm.icns "$APP/Resources/"
+          cp assets/icons/macos/Info.plist "$APP/"
+          cp README.md dist/
+          cp assets/fonts/JetBrainsMono-OFL.txt dist/
+          cp assets/fonts/NotoSansSC-OFL.txt dist/
+          tar -czvf "${{ matrix.asset }}" -C dist VsTerm.app README.md JetBrainsMono-OFL.txt NotoSansSC-OFL.txt
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/vsterm/share/icons/hicolor/scalable/apps
+          mkdir -p dist/vsterm/share/icons/hicolor/256x256/apps
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/vsterm/
           chmod +x "dist/vsterm/${{ matrix.bin }}"
           cp README.md dist/vsterm/
           cp assets/fonts/JetBrainsMono-OFL.txt dist/vsterm/
           cp assets/fonts/NotoSansSC-OFL.txt dist/vsterm/
+          cp assets/icons/linux/vsterm.svg dist/vsterm/share/icons/hicolor/scalable/apps/
+          cp assets/icons/app/window_icon.png dist/vsterm/share/icons/hicolor/256x256/apps/vsterm.png
+          cp assets/icons/vsterm.desktop dist/vsterm/
           tar -czvf "${{ matrix.asset }}" -C dist vsterm
 
       - name: Upload artifact

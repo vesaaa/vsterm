@@ -30,3 +30,7 @@ parking_lot = { workspace = true }
 sysinfo = { workspace = true }
 chrono = { workspace = true }
 encoding_rs = { workspace = true }
+image = { workspace = true }
+
+[build-dependencies]
+winres = "0.1"
