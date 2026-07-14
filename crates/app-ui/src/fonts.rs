@@ -57,13 +57,29 @@ pub fn install(ctx: &egui::Context) {
         vec![FAMILY_MONO.to_owned(), ui_name.clone(), FAMILY_FALLBACK_CJK.to_owned()],
     );
 
+    // Lucide icon font (flat stroke glyphs) — separate family, not used for body text.
+    register_lucide_fonts(&mut fonts);
+
     ctx.set_fonts(fonts);
     apply_text_styles(ctx);
 
     tracing::info!(
-        "fonts: UI={ui_source}; mono=JetBrains Mono; CJK fallback=Noto Sans SC Light ({} KB)",
+        "fonts: UI={ui_source}; mono=JetBrains Mono; CJK fallback=Noto Sans SC Light ({} KB); icons=Lucide",
         NOTO_SANS_SC_LIGHT.len() / 1024
     );
+}
+
+fn register_lucide_fonts(fonts: &mut FontDefinitions) {
+    for asset in iconflow::fonts() {
+        let family = asset.family.to_string();
+        fonts
+            .font_data
+            .insert(family.clone(), Arc::new(FontData::from_static(asset.bytes)));
+        // Dedicated named family so IconId can select Lucide without CJK fallback swapping glyphs.
+        fonts
+            .families
+            .insert(FontFamily::Name(family.clone().into()), vec![family]);
+    }
 }
 
 fn apply_text_styles(ctx: &egui::Context) {

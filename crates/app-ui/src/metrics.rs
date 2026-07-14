@@ -57,6 +57,8 @@ pub struct HostSnapshot {
     pub disks: Vec<DiskInfo>,
     /// Per-nic (rx_bps, tx_bps) history for charts.
     pub net_history: HashMap<String, VecDeque<(f64, f64)>>,
+    /// Interface carrying the default route (e.g. `ppp0` on Merlin WAN).
+    pub default_if: Option<String>,
 }
 
 impl HostSnapshot {
@@ -76,13 +78,20 @@ impl HostSnapshot {
         }
     }
 
-    /// Prefer a primary Ethernet/Wi-Fi NIC (ens*/eth*/eno*/enp*/wlan*) over lo/veth/…
-    pub fn prefer_primary_nic(nics: &[NicInfo]) -> Option<String> {
+    /// Prefer the default-route NIC when known; else ens*/eth*/wlan* over lo/veth/…
+    pub fn prefer_primary_nic(nics: &[NicInfo], default_if: Option<&str>) -> Option<String> {
+        if let Some(want) = default_if {
+            if !want.is_empty() && nics.iter().any(|n| n.name == want) {
+                return Some(want.to_string());
+            }
+        }
         const PREFERRED: &[&str] = &[
-            "ens", "eth", "eno", "enp", "enx", "wlan", "wlp", "wlx",
+            "ppp", "wan", "ens", "eno", "enp", "enx", "wlan", "wlp", "wlx", "eth",
         ];
         for prefix in PREFERRED {
-            if let Some(n) = nics.iter().find(|n| n.name.starts_with(prefix) && n.name.len() > prefix.len())
+            if let Some(n) = nics
+                .iter()
+                .find(|n| n.name.starts_with(prefix) && n.name.len() > prefix.len())
             {
                 return Some(n.name.clone());
             }
@@ -290,10 +299,10 @@ fn tick(sys: &mut System, state: &Arc<Mutex<SamplerState>>) {
     nics.sort_by(|a, b| a.name.cmp(&b.name));
 
     if guard.selected_nic.is_none() {
-        guard.selected_nic = HostSnapshot::prefer_primary_nic(&nics);
+        guard.selected_nic = HostSnapshot::prefer_primary_nic(&nics, None);
     } else if let Some(cur) = &guard.selected_nic {
         if !nics.iter().any(|n| n.name == *cur) {
-            guard.selected_nic = HostSnapshot::prefer_primary_nic(&nics);
+            guard.selected_nic = HostSnapshot::prefer_primary_nic(&nics, None);
         }
     }
 
@@ -314,5 +323,6 @@ fn tick(sys: &mut System, state: &Arc<Mutex<SamplerState>>) {
         nics,
         disks: disk_rows,
         net_history: std::mem::take(&mut guard.snapshot.net_history),
+        default_if: None,
     };
 }

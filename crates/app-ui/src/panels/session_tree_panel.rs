@@ -1,5 +1,6 @@
 use crate::i18n;
-use egui::{Color32, RichText, Ui};
+use crate::ui_icon::{self, Icon};
+use egui::{Color32, Ui};
 use session_tree::{SessionTree, TreeNode};
 
 #[derive(Debug, Clone)]
@@ -28,7 +29,7 @@ pub fn show(
 
     ui.horizontal(|ui| {
         if ui
-            .button(RichText::new(i18n::t("tree.add_server")).size(12.0))
+            .button(egui::RichText::new(i18n::t("tree.add_server")).size(12.0))
             .on_hover_text(i18n::t("tree.add_server_hint"))
             .clicked()
         {
@@ -42,7 +43,7 @@ pub fn show(
             action = Some(TreeAction::AddServer { folder_id });
         }
         if ui
-            .button(RichText::new(i18n::t("tree.add_folder")).size(12.0))
+            .button(egui::RichText::new(i18n::t("tree.add_folder")).size(12.0))
             .clicked()
         {
             action = Some(TreeAction::AddFolder);
@@ -93,13 +94,12 @@ fn render_node(
                 selection,
                 Some(TreeSelection::Folder { id: sid, .. }) if sid == id
             );
-            let header = if selected {
-                RichText::new(format!("📁 {name}"))
-                    .size(13.0)
-                    .color(Color32::from_rgb(30, 80, 160))
+            let color = if selected {
+                ui_icon::COLOR_ACCENT
             } else {
-                RichText::new(format!("📁 {name}")).size(13.0)
+                Color32::from_rgb(32, 34, 40)
             };
+            let header = ui_icon::with_label(Icon::Folder, name, 14.0, color);
             let response = egui::CollapsingHeader::new(header)
                 .id_salt(("folder", id.as_str()))
                 .default_open(true)
@@ -150,12 +150,12 @@ fn render_node(
                 selection,
                 Some(TreeSelection::Session { session_ref: r, .. }) if r == session_ref
             );
-            let label = if selected {
-                RichText::new(format!("🖥  {name}"))
-                    .color(Color32::from_rgb(30, 80, 160))
+            let color = if selected {
+                ui_icon::COLOR_ACCENT
             } else {
-                RichText::new(format!("🖥  {name}"))
+                Color32::from_rgb(32, 34, 40)
             };
+            let label = ui_icon::with_label(Icon::Server, name, 14.0, color);
             let resp = ui.add(
                 egui::Button::new(label)
                     .frame(false)

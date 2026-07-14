@@ -336,7 +336,9 @@ impl VsTermApp {
                         self.remote_host
                             .snapshot()
                             .as_ref()
-                            .map(|s| HostSnapshot::prefer_primary_nic(&s.nics))
+                            .map(|s| {
+                                HostSnapshot::prefer_primary_nic(&s.nics, s.default_if.as_deref())
+                            })
                             .flatten()
                     });
             }

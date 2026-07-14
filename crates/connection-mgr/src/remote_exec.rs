@@ -157,10 +157,15 @@ fn run_remote_command(
         combined
     };
     if !status.success() && !body.contains("VSTERM_BEGIN") {
-        return Err(ConnError::Connect(format!(
-            "ssh exit {status}: {}",
-            truncate(&body, 240)
-        )));
+        // BusyBox/OpenWrt often exits 127 ("command not found") from a failed
+        // alternative in a probe chain while an earlier command already printed
+        // useful stdout. Accept non-empty stdout so callers can still parse it.
+        if body.trim().is_empty() {
+            return Err(ConnError::Connect(format!(
+                "ssh exit {status}: {}",
+                truncate(&body, 240)
+            )));
+        }
     }
     Ok(body)
 }

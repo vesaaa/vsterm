@@ -1,5 +1,9 @@
 //! VsTerm — cross-platform SSH terminal manager.
 
+// Release builds are a GUI app: do not allocate a console window on Windows.
+// Keep the console in debug so `cargo run` still shows tracing logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod commands;
 mod conn_error;
@@ -12,12 +16,14 @@ mod panels;
 mod term_highlight;
 mod terminal_view;
 mod theme;
+mod ui_icon;
 
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
     // Used as SSH_ASKPASS helper when collecting remote metrics / routes.
+    // Works with windows_subsystem: OpenSSH pipes stdout; no console is needed.
     if std::env::var_os("VSTERM_ASKPASS_MODE").is_some() {
         if let Ok(secret) = std::env::var("VSTERM_ASKPASS_SECRET") {
             use std::io::Write;
@@ -27,10 +33,17 @@ fn main() -> Result<()> {
         std::process::exit(0);
     }
 
+    // Default quieter in release GUI builds; override with RUST_LOG if needed.
+    let default_filter = if cfg!(debug_assertions) {
+        "info"
+    } else {
+        "warn"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
+        .with_ansi(cfg!(debug_assertions))
         .init();
 
     let mut viewport = egui::ViewportBuilder::default()

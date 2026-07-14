@@ -1,5 +1,6 @@
 use crate::commands::CommandBook;
 use crate::i18n;
+use crate::ui_icon::{self, Icon};
 use egui::{Color32, RichText, Ui};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -125,11 +126,13 @@ fn list_dir_preview(ui: &mut Ui, path: &str, max_h: f32) {
                     for entry in rd.flatten().take(40) {
                         let name = entry.file_name().to_string_lossy().into_owned();
                         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        ui.label(if is_dir {
-                            format!("📁 {name}")
-                        } else {
-                            format!("📄 {name}")
-                        });
+                        ui_icon::labeled(
+                            ui,
+                            if is_dir { Icon::Folder } else { Icon::File },
+                            &name,
+                            13.0,
+                            ui_icon::COLOR_MUTED,
+                        );
                     }
                 }
                 Err(err) => {

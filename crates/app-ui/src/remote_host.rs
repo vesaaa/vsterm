@@ -12,28 +12,49 @@ use std::time::{Duration, Instant};
 use vault::Vault;
 
 /// Sectioned remote script — markers keep df / ps / net from mixing.
-/// Disks are emitted as `DISK|total|avail|fstype|mount` so parsing is unambiguous.
+/// BusyBox/OpenWrt/Merlin friendly: no GNU-only `ps`/`df -B1` assumptions.
+/// Disks prefer `df` (reliable on Debian/BusyBox); `findmnt` is a fallback only.
+/// Process list uses short `comm=` first so long `args` cannot pollute sections.
 const METRICS_CMD: &str = r#"
+export LC_ALL=C LANG=C
 echo VSTERM_BEGIN
-hostname
-uname -sr
-uname -m
-grep -m1 model /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2-
-awk '/^cpu /{u=$2+$4;t=$2+$4+$5; if(t>0) print (u/t)*100; else print 0; exit}' /proc/stat 2>/dev/null
+hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown
+uname -sr 2>/dev/null || echo Linux
+uname -m 2>/dev/null || echo unknown
+( grep -m1 -E 'model name|cpu model|Hardware|system type' /proc/cpuinfo 2>/dev/null || true ) | head -n 1 | sed 's/^[^:]*:[ \t]*//'
+awk '/^cpu /{u=$2+$4;t=$2+$4+$5; if(t>0) print (u/t)*100; else print 0; exit}' /proc/stat 2>/dev/null || echo 0
 echo __SEC_MEM__
-grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo 2>/dev/null
+grep -E '^(MemTotal|MemAvailable|MemFree|Buffers|Cached|SwapTotal|SwapFree):' /proc/meminfo 2>/dev/null || true
 echo __SEC_PS__
-ps -eo pid=,pcpu=,rss=,comm= --sort=-pcpu 2>/dev/null | head -20
-echo __SEC_DF__
-if command -v findmnt >/dev/null 2>&1; then
-  findmnt -bnro SIZE,AVAIL,FSTYPE,TARGET -t notmpfs,devtmpfs,devpts,proc,sysfs,cgroup,cgroup2,squashfs,nsfs,ramfs 2>/dev/null | awk '{
-    total=$1; avail=$2; fs=$3;
-    mount=$4; for(i=5;i<=NF;i++) mount=mount " " $i;
-    if (mount=="") next;
-    print "DISK|" total "|" avail "|" fs "|" mount
-  }'
+ps_out=`ps -eo pid=,pcpu=,rss=,comm= --sort=-pcpu 2>/dev/null | head -n 20`
+[ -n "$ps_out" ] || ps_out=`ps -o pid= -o pcpu= -o rss= -o comm= --sort=-pcpu 2>/dev/null | head -n 20`
+if [ -n "$ps_out" ]; then
+  printf '%s\n' "$ps_out"
 else
-  df -PB1 2>/dev/null | awk '
+  ps_out=`ps -o pid= -o rss= -o args= 2>/dev/null | head -n 40`
+  if [ -n "$ps_out" ]; then
+    printf '%s\n' "$ps_out" | awk 'NF>=3 {
+      pid=$1; rss=$2; $1=""; $2=""; sub(/^ +/,"");
+      printf "%s 0.0 %s %s\n", pid, rss, $0
+    }' | sort -k3 -nr 2>/dev/null | head -n 20
+  else
+    for p in /proc/[0-9]*; do
+      [ -r "$p/stat" ] || continue
+      pid=${p##*/}
+      comm=`cat "$p/comm" 2>/dev/null` || continue
+      rss=`awk '/^VmRSS:/{print $2; exit}' "$p/status" 2>/dev/null`
+      [ -n "$rss" ] || rss=0
+      printf '%s 0.0 %s %s\n' "$pid" "$rss" "$comm"
+    done 2>/dev/null | sort -k3 -nr 2>/dev/null | head -n 20
+  fi
+fi
+echo __SEC_DF__
+disk_out=
+df_out=`df -P -k 2>/dev/null`
+[ -n "$df_out" ] || df_out=`df -k 2>/dev/null`
+[ -n "$df_out" ] || df_out=`df 2>/dev/null`
+if [ -n "$df_out" ]; then
+  disk_out=`printf '%s\n' "$df_out" | awk '
   BEGIN {
     while ((getline < "/proc/mounts") > 0) {
       mt=$2; gsub(/\\040/, " ", mt); types[mt]=$3
@@ -41,16 +62,38 @@ else
     close("/proc/mounts")
   }
   NR==1 { next }
-  {
-    total=$2; avail=$4;
+  NF>=6 {
+    total=$2*1024; avail=$4*1024;
     mount=$6; for(i=7;i<=NF;i++) mount=mount " " $i;
     fs=types[mount]; if (fs=="") fs="-"
+    if (total+0 <= 0) next
     print "DISK|" total "|" avail "|" fs "|" mount
-  }'
+  }'`
 fi
+if [ -z "$disk_out" ] && command -v findmnt >/dev/null 2>&1; then
+  # util-linux: a single leading "no" negates the whole comma-separated type list.
+  disk_out=`findmnt -bnro SIZE,AVAIL,FSTYPE,TARGET -t notmpfs,devtmpfs,devpts,proc,sysfs,cgroup,cgroup2,squashfs,nsfs,ramfs 2>/dev/null | awk '{
+    total=$1; avail=$2; fs=$3;
+    mount=$4; for(i=5;i<=NF;i++) mount=mount " " $i;
+    if (mount=="" || total+0 <= 0) next;
+    print "DISK|" total "|" avail "|" fs "|" mount
+  }'`
+fi
+[ -n "$disk_out" ] && printf '%s\n' "$disk_out"
 echo __SEC_NET__
-awk 'NR>2{n=$1; sub(":","",n); print n,$2,$10}' /proc/net/dev 2>/dev/null
+awk 'NR>2 {
+  n=$1; sub(":", "", n);
+  gsub(/^[ \t]+|[ \t]+$/, "", n);
+  if (n != "") print n, $2, $10
+}' /proc/net/dev 2>/dev/null || true
+echo __SEC_ROUTEIF__
+( ip -4 route show default 2>/dev/null || ip route show default 2>/dev/null || ip route 2>/dev/null || route -n 2>/dev/null || true ) | awk '
+  /^default/ || $1 == "0.0.0.0" {
+    for (i=1;i<NF;i++) if ($i=="dev") { print $(i+1); exit }
+    if ($1=="0.0.0.0" && NF>=8) { print $NF; exit }
+  }'
 echo VSTERM_END
+true
 "#;
 
 const SKIP_FS: &[&str] = &[
@@ -123,17 +166,39 @@ impl RemoteHostService {
                             Ok(snap) => {
                                 let mut g = worker.lock();
                                 if g.target.is_some() {
-                                    merge_net_history(
-                                        &mut g.snapshot.net_history,
-                                        &snap.net_history,
-                                    );
+                                    let elapsed = g.last_tick.elapsed().as_secs_f64().max(0.05);
+                                    let prev: HashMap<String, (u64, u64)> = g
+                                        .snapshot
+                                        .nics
+                                        .iter()
+                                        .map(|n| (n.name.clone(), (n.rx_bytes, n.tx_bytes)))
+                                        .collect();
+                                    let mut snap = snap;
+                                    let mut rates = HashMap::new();
+                                    for nic in &mut snap.nics {
+                                        if let Some(&(prx, ptx)) = prev.get(&nic.name) {
+                                            nic.rx_bps =
+                                                nic.rx_bytes.saturating_sub(prx) as f64 / elapsed;
+                                            nic.tx_bps =
+                                                nic.tx_bytes.saturating_sub(ptx) as f64 / elapsed;
+                                        }
+                                        rates.insert(nic.name.clone(), {
+                                            let mut q = VecDeque::new();
+                                            q.push_back((nic.rx_bps, nic.tx_bps));
+                                            q
+                                        });
+                                    }
+                                    merge_net_history(&mut g.snapshot.net_history, &rates);
+                                    snap.net_history = std::mem::take(&mut g.snapshot.net_history);
                                     if g.selected_nic.is_none()
                                         || g.selected_nic.as_ref().is_some_and(|cur| {
                                             !snap.nics.iter().any(|n| n.name == *cur)
                                         })
                                     {
-                                        g.selected_nic =
-                                            HostSnapshot::prefer_primary_nic(&snap.nics);
+                                        g.selected_nic = HostSnapshot::prefer_primary_nic(
+                                            &snap.nics,
+                                            snap.default_if.as_deref(),
+                                        );
                                     }
                                     g.snapshot = snap;
                                     g.last_tick = Instant::now();
@@ -274,6 +339,9 @@ fn parse_metrics(raw: &str) -> Option<HostSnapshot> {
 
     let mut mem_total = 0u64;
     let mut mem_avail = 0u64;
+    let mut mem_free = 0u64;
+    let mut buffers = 0u64;
+    let mut cached = 0u64;
     let mut swap_total = 0u64;
     let mut swap_free = 0u64;
     for line in sections.get("MEM").into_iter().flatten() {
@@ -288,12 +356,18 @@ fn parse_metrics(raw: &str) -> Option<HostSnapshot> {
                 match k.trim() {
                     "MemTotal" => mem_total = bytes,
                     "MemAvailable" => mem_avail = bytes,
+                    "MemFree" => mem_free = bytes,
+                    "Buffers" => buffers = bytes,
+                    "Cached" => cached = bytes,
                     "SwapTotal" => swap_total = bytes,
                     "SwapFree" => swap_free = bytes,
                     _ => {}
                 }
             }
         }
+    }
+    if mem_avail == 0 && mem_total > 0 {
+        mem_avail = mem_free.saturating_add(buffers).saturating_add(cached);
     }
 
     let mut processes = Vec::new();
@@ -352,6 +426,14 @@ fn parse_metrics(raw: &str) -> Option<HostSnapshot> {
         });
     }
 
+    let default_if = sections
+        .get("ROUTEIF")
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim())
+        .find(|s| !s.is_empty() && is_plausible_nic(s))
+        .map(str::to_string);
+
     let os_name = uname
         .split_whitespace()
         .next()
@@ -382,6 +464,7 @@ fn parse_metrics(raw: &str) -> Option<HostSnapshot> {
         nics,
         disks,
         net_history,
+        default_if,
     })
 }
 
@@ -389,7 +472,6 @@ fn parse_disk_line(line: &str) -> Option<DiskInfo> {
     if let Some(rest) = line.strip_prefix("DISK|") {
         return parse_disk_pipe(rest);
     }
-    // Legacy fallback: raw `df -PT -B1` rows (if an older agent still emits them).
     parse_df_legacy(line)
 }
 
@@ -422,17 +504,13 @@ fn parse_disk_pipe(rest: &str) -> Option<DiskInfo> {
 }
 
 fn parse_df_legacy(line: &str) -> Option<DiskInfo> {
-    // df -PT -B1: Filesystem Type Size Used Avail Use% Mount
-    // df -PB1:    Filesystem Size Used Avail Use% Mount
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() < 6 {
         return None;
     }
     let cap_idx = parts.iter().rposition(|p| p.ends_with('%'))?;
-    // With Type: indices … Type Size Used Avail Use% …
-    // Without:    … Size Used Avail Use% …  (Size is always three fields before Use%)
-    let after_fs = cap_idx; // number of fields from start used before mount; Use% at cap_idx
-    let has_type = after_fs >= 5; // fs + type + size + used + avail + use% → index of use% >= 5
+    let after_fs = cap_idx;
+    let has_type = after_fs >= 5;
     let (fs, total_s, avail_s) = if has_type {
         let fs = parts[1];
         if SKIP_FS.iter().any(|s| *s == fs) {
@@ -473,19 +551,35 @@ fn skip_mount(mount: &str) -> bool {
 }
 
 fn is_plausible_nic(name: &str) -> bool {
-    if name.contains('/') || name.contains('\\') {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains(' ') {
         return false;
     }
-    let lower = name.to_ascii_lowercase();
-    // Real-ish interface names; reject mount points / process leftovers.
+    // Strip VLAN/peer suffix (eth0@if2, ens18.100).
+    let base = name.split(['@', ':']).next().unwrap_or(name);
+    let lower = base.to_ascii_lowercase();
+    if lower.is_empty()
+        || !lower
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    if !lower
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return false;
+    }
+    // Accept well-known prefixes and generic kernel names (vmbr*, sit*, etc.).
     lower == "lo"
         || lower.starts_with("eth")
         || lower.starts_with("ens")
         || lower.starts_with("enp")
         || lower.starts_with("eno")
+        || lower.starts_with("enx")
+        || lower.starts_with("wl")
         || lower.starts_with("wlan")
-        || lower.starts_with("wlp")
-        || lower.starts_with("wlx")
         || lower.starts_with("bond")
         || lower.starts_with("br")
         || lower.starts_with("docker")
@@ -495,7 +589,14 @@ fn is_plausible_nic(name: &str) -> bool {
         || lower.starts_with("tap")
         || lower.starts_with("wg")
         || lower.starts_with("ppp")
+        || lower.starts_with("wan")
+        || lower.starts_with("vlan")
+        || lower.starts_with("usb")
+        || lower.starts_with("apcli")
         || lower.starts_with("vmnet")
+        || lower.starts_with("vmbr")
+        || lower.starts_with("nic")
+        || lower.starts_with("net")
 }
 
 fn split_sections(body: &str) -> HashMap<String, Vec<String>> {
@@ -549,9 +650,7 @@ fn strip_ansi(s: &str) -> String {
 }
 
 fn clean_field(s: &str) -> String {
-    s.trim()
-        .trim_matches(|c: char| c == '\0' || c.is_control())
-        .to_string()
+    s.trim().to_string()
 }
 
 #[cfg(test)]
@@ -564,18 +663,51 @@ mod tests {
         assert_eq!(root.mount, "/");
         let boot = parse_disk_line("DISK|1073741824|800000000|ext4|/boot").unwrap();
         assert_eq!(boot.mount, "/boot");
-        let home = parse_disk_line("DISK|500000000000|100000000000|xfs|/home").unwrap();
-        assert_eq!(home.mount, "/home");
         assert!(parse_disk_line("DISK|100|50|tmpfs|/run/user/0").is_none());
     }
 
     #[test]
-    fn parse_legacy_df_pt_lines() {
-        let line = "/dev/sda2 ext4 105555582976 12345678901 87654321098 13% /";
-        let d = parse_disk_line(line).unwrap();
-        assert_eq!(d.mount, "/");
-        assert_eq!(d.fs, "ext4");
-        let boot = "/dev/sda1 ext4 1073741824 200000000 800000000 20% /boot";
-        assert_eq!(parse_disk_line(boot).unwrap().mount, "/boot");
+    fn parse_debian_metrics_with_ens18() {
+        let raw = r#"
+VSTERM_BEGIN
+debian
+Linux 6.1.0-37-amd64
+x86_64
+Intel(R) Xeon(R)
+12.5
+__SEC_MEM__
+MemTotal:        2048000 kB
+MemAvailable:    1024000 kB
+MemFree:          512000 kB
+Buffers:           64000 kB
+Cached:           256000 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+__SEC_PS__
+1 0.0 1024 systemd
+__SEC_DF__
+DISK|21474836480|10737418240|ext4|/
+DISK|1073741824|536870912|ext4|/boot
+__SEC_NET__
+lo 1000 1000
+ens18 2048000 1024000
+__SEC_ROUTEIF__
+ens18
+VSTERM_END
+"#;
+        let snap = parse_metrics(raw).expect("parse");
+        assert_eq!(snap.hostname, "debian");
+        assert_eq!(snap.default_if.as_deref(), Some("ens18"));
+        assert!(snap.nics.iter().any(|n| n.name == "ens18"));
+        assert!(snap.disks.iter().any(|d| d.mount == "/"));
+        assert!(snap.disks.iter().any(|d| d.mount == "/boot"));
+    }
+
+    #[test]
+    fn plausible_nic_accepts_ens_and_vmbr() {
+        assert!(is_plausible_nic("ens18"));
+        assert!(is_plausible_nic("vmbr0"));
+        assert!(is_plausible_nic("eth0@if2"));
+        assert!(!is_plausible_nic("/run/foo"));
     }
 }

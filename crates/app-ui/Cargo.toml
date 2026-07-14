@@ -33,6 +33,8 @@ encoding_rs = { workspace = true }
 image = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }
+arboard = { workspace = true }
+iconflow = { workspace = true }
 
 [build-dependencies]
 winres = "0.1"

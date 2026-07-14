@@ -227,7 +227,16 @@ fn fetch_remote_routes(
     vault_path: Option<&Path>,
 ) -> Result<(Vec<RouteRow>, String), String> {
     let vault = vault_path.and_then(|p| Vault::open(p).ok());
-    let cmd = "ip -4 route 2>/dev/null || route -n 2>/dev/null || cat /proc/net/route";
+    // Always exit 0 so BusyBox "command not found" (127) on missing `ip`/`route`
+    // does not discard a successful fallback that already printed the table.
+    let cmd = r#"{
+  export LC_ALL=C LANG=C
+  out=`ip -4 route 2>/dev/null`
+  [ -n "$out" ] || out=`ip route 2>/dev/null`
+  [ -n "$out" ] || out=`route -n 2>/dev/null`
+  [ -n "$out" ] || out=`cat /proc/net/route 2>/dev/null`
+  printf '%s\n' "$out"
+}; true"#;
     let raw = session
         .run_command(vault.as_ref(), cmd)
         .map_err(|e| e.to_string())?;
@@ -316,12 +325,33 @@ fn parse_unix_route(raw: &str) -> Vec<RouteRow> {
         if t.is_empty()
             || t.starts_with("Kernel")
             || t.starts_with("Destination")
+            || t.starts_with("Iface")
             || t.starts_with("password")
             || t.contains("Permission denied")
         {
             continue;
         }
         let parts: Vec<&str> = t.split_whitespace().collect();
+
+        // `/proc/net/route`: Iface Destination Gateway Flags RefCnt Use Metric Mask …
+        if parts.len() >= 8 && parts[1].len() == 8 && parts[1].chars().all(|c| c.is_ascii_hexdigit())
+        {
+            if let (Some(dest), Some(gw), Some(mask)) = (
+                hex_ipv4_le(parts[1]),
+                hex_ipv4_le(parts[2]),
+                hex_ipv4_le(parts[7]),
+            ) {
+                rows.push(RouteRow {
+                    destination: dest,
+                    gateway: gw,
+                    genmask: mask,
+                    flags: parts[3].into(),
+                    iface: parts[0].into(),
+                });
+            }
+            continue;
+        }
+
         if parts.len() >= 3
             && (parts[0] == "default" || parts[0].contains('/') || parts[0].contains('.'))
         {
@@ -338,16 +368,55 @@ fn parse_unix_route(raw: &str) -> Vec<RouteRow> {
                 .copied()
                 .unwrap_or("")
                 .to_string();
+            // `route -n`: Destination Gateway Genmask Flags Metric Ref Use Iface
+            let (gateway, genmask, flags, iface) = if iface.is_empty() && parts.len() >= 8 {
+                (
+                    parts[1].to_string(),
+                    parts[2].to_string(),
+                    parts[3].to_string(),
+                    parts[7].to_string(),
+                )
+            } else {
+                (gateway, String::new(), String::new(), iface)
+            };
             rows.push(RouteRow {
                 destination: parts[0].into(),
                 gateway,
-                genmask: String::new(),
-                flags: String::new(),
+                genmask,
+                flags,
                 iface,
             });
         }
     }
     rows
+}
+
+#[cfg(test)]
+mod route_parse_tests {
+    use super::*;
+
+    #[test]
+    fn parse_debian_ip_route_onlink_ens18() {
+        let raw = "\
+default via 192.168.1.1 dev ens18 onlink \n\
+192.168.1.0/24 dev ens18 proto kernel scope link src 192.168.1.22 \n";
+        let rows = parse_unix_route(raw);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].destination, "default");
+        assert_eq!(rows[0].gateway, "192.168.1.1");
+        assert_eq!(rows[0].iface, "ens18");
+        assert_eq!(rows[1].destination, "192.168.1.0/24");
+        assert_eq!(rows[1].iface, "ens18");
+    }
+}
+
+fn hex_ipv4_le(hex: &str) -> Option<String> {
+    if hex.len() != 8 {
+        return None;
+    }
+    let n = u32::from_str_radix(hex, 16).ok()?;
+    let b = n.to_le_bytes();
+    Some(format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]))
 }
 
 fn strip_ansi(s: &str) -> String {

@@ -97,14 +97,16 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist/vsterm/share/icons/hicolor/scalable/apps
-          mkdir -p dist/vsterm/share/icons/hicolor/256x256/apps
+          for sz in 16x16 22x22 24x24 32x32 48x48 64x64 128x128 256x256 512x512; do
+            mkdir -p "dist/vsterm/share/icons/hicolor/${sz}/apps"
+            cp "assets/icons/linux/${sz}/vsterm.png" "dist/vsterm/share/icons/hicolor/${sz}/apps/vsterm.png"
+          done
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/vsterm/
           chmod +x "dist/vsterm/${{ matrix.bin }}"
           cp README.md dist/vsterm/
           cp assets/fonts/JetBrainsMono-OFL.txt dist/vsterm/
           cp assets/fonts/NotoSansSC-OFL.txt dist/vsterm/
           cp assets/icons/linux/vsterm.svg dist/vsterm/share/icons/hicolor/scalable/apps/
-          cp assets/icons/app/window_icon.png dist/vsterm/share/icons/hicolor/256x256/apps/vsterm.png
           cp assets/icons/vsterm.desktop dist/vsterm/
           tar -czvf "${{ matrix.asset }}" -C dist vsterm
 

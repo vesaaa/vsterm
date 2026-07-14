@@ -33,7 +33,7 @@ pub fn show(
         .as_ref()
         .is_some_and(|cur| !snap.nics.iter().any(|n| n.name == *cur));
     if selected_nic.is_none() || nic_stale {
-        *selected_nic = HostSnapshot::prefer_primary_nic(&snap.nics);
+        *selected_nic = HostSnapshot::prefer_primary_nic(&snap.nics, snap.default_if.as_deref());
     }
 
     // Avoid automatic item_spacing eating our fixed-height budget (was clipping storage).
@@ -197,10 +197,10 @@ fn process_table(ui: &mut Ui, snap: &HostSnapshot, w: f32) {
                 proc_row(
                     ui,
                     &col_w,
-                    RichText::new(p.pid.to_string()).monospace().size(12.0),
-                    RichText::new(truncate(&p.name, name_chars)),
-                    RichText::new(format!("{:.1}", p.cpu)),
-                    RichText::new(HostSnapshot::format_bytes(p.mem_bytes)),
+                    RichText::new(p.pid.to_string()).size(12.0),
+                    RichText::new(truncate(&p.name, name_chars)).size(12.0),
+                    RichText::new(format!("{:.1}", p.cpu)).size(12.0),
+                    RichText::new(HostSnapshot::format_bytes(p.mem_bytes)).size(12.0),
                     i % 2 == 1,
                 );
             }

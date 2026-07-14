@@ -10,7 +10,7 @@ members = [
 default-members = ["crates/app-ui"]
 
 [workspace.package]
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 license-file = "LICENSE"
 authors = ["vesaa"]
@@ -63,6 +63,8 @@ egui_plot = "0.31"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 encoding_rs = "0.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
+arboard = "3"
+iconflow = { version = "1", default-features = false, features = ["pack-lucide"] }
 
 # Internal crates
 session-tree = { path = "crates/session-tree" }
