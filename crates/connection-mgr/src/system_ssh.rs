@@ -49,7 +49,11 @@ impl SystemSshBackend {
         cols: u16,
         rows: u16,
     ) -> Result<SshIoSession, ConnError> {
-        preflight(config, vault, interactive_password.is_some())?;
+        preflight(
+            config,
+            vault,
+            PreflightOpts::connecting(interactive_password.is_some()),
+        )?;
         let auth = resolve_auth(config, vault, interactive_password)?;
         let runtime = connect_session(config, &auth).await?;
         let child = Arc::clone(&runtime.inner.lock().child);
@@ -96,7 +100,7 @@ impl Default for SystemSshBackend {
 #[async_trait]
 impl SshBackend for SystemSshBackend {
     async fn connect(&self, config: &SessionConfig) -> Result<Box<dyn SshSession>, ConnError> {
-        preflight(config, None, false)?;
+        preflight(config, None, PreflightOpts::connecting(false))?;
         let auth = AuthMaterial::default();
         let runtime = connect_session(config, &auth).await?;
         Ok(Box::new(SystemSshSessionAdapter { runtime }))
@@ -247,6 +251,18 @@ impl SshChannel for SystemSshChannel {
     }
 }
 
+fn apply_terminal_env(cmd: &mut CommandBuilder, term_type: &str) {
+    let term = if term_type.trim().is_empty() {
+        "xterm-256color"
+    } else {
+        term_type.trim()
+    };
+    // OpenSSH sends the local TERM in the pty request; without this, Windows often
+    // has no TERM and remotes fall back to monochrome (e.g. `ip` / `ls` without color).
+    cmd.env("TERM", term);
+    cmd.env("COLORTERM", "truecolor");
+}
+
 fn build_ssh_command(
     ssh: &Path,
     config: &SessionConfig,
@@ -254,6 +270,7 @@ fn build_ssh_command(
 ) -> Result<CommandBuilder, ConnError> {
     if let (Some(_pwd), Some(sshpass)) = (&auth.password, which_sshpass()) {
         let mut cmd = CommandBuilder::new(sshpass);
+        apply_terminal_env(&mut cmd, &config.term_type);
         cmd.arg("-p");
         cmd.arg(auth.password.as_deref().unwrap_or_default());
         cmd.arg(ssh);
@@ -262,6 +279,7 @@ fn build_ssh_command(
     }
 
     let mut cmd = CommandBuilder::new(ssh);
+    apply_terminal_env(&mut cmd, &config.term_type);
     push_ssh_args(&mut cmd, config, auth, false, None);
     Ok(cmd)
 }
@@ -467,10 +485,11 @@ pub fn resolve_auth(
     let mut auth = AuthMaterial::default();
     match &config.auth {
         AuthConfig::Password { password_ref } => {
-            if let Some(r) = password_ref.as_ref().filter(|r| !r.trim().is_empty()) {
-                auth.password = Some(load_secret(vault, r)?);
-            } else if let Some(pwd) = interactive_password.filter(|p| !p.is_empty()) {
+            // Interactive password wins when the user typed one in the dialog.
+            if let Some(pwd) = interactive_password.filter(|p| !p.is_empty()) {
                 auth.password = Some(pwd);
+            } else if let Some(r) = password_ref.as_ref().filter(|r| !r.trim().is_empty()) {
+                auth.password = Some(load_secret(vault, r)?);
             } else {
                 return Err(ConnError::InvalidConfig {
                     field: "password".into(),
@@ -492,7 +511,7 @@ pub fn resolve_auth(
 pub fn preflight(
     config: &SessionConfig,
     vault: Option<&Vault>,
-    has_interactive_password: bool,
+    opts: PreflightOpts,
 ) -> Result<(), ConnError> {
     if config.host.trim().is_empty() {
         return Err(ConnError::InvalidConfig {
@@ -500,7 +519,7 @@ pub fn preflight(
             reason: "host is empty".into(),
         });
     }
-    if config.username.trim().is_empty() {
+    if config.username.trim().is_empty() && !opts.allow_empty_username {
         return Err(ConnError::InvalidConfig {
             field: "username".into(),
             reason: "username is empty".into(),
@@ -511,13 +530,16 @@ pub fn preflight(
         AuthConfig::Publickey {
             private_key_path, ..
         } => {
-            let path = expand_tilde(private_key_path);
-            if !path.exists() {
-                return Err(ConnError::PrivateKeyMissing {
-                    path,
-                    configured_auth: "auth.type=publickey — switch to password if you use password login"
-                        .into(),
-                });
+            if !opts.skip_key_file_check {
+                let path = expand_tilde(private_key_path);
+                if !path.exists() {
+                    return Err(ConnError::PrivateKeyMissing {
+                        path,
+                        configured_auth:
+                            "auth.type=publickey — switch to password if you use password login"
+                                .into(),
+                    });
+                }
             }
             if let AuthConfig::Publickey {
                 passphrase_ref: Some(r),
@@ -534,12 +556,42 @@ pub fn preflight(
                 .unwrap_or(false)
             {
                 ensure_vault_secret(vault, password_ref.as_ref().unwrap())?;
-            } else if !has_interactive_password {
+            } else if !opts.has_interactive_password {
                 // UI will collect password before connect; nothing to check here.
             }
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PreflightOpts {
+    pub has_interactive_password: bool,
+    pub allow_empty_username: bool,
+    pub skip_key_file_check: bool,
+}
+
+impl PreflightOpts {
+    pub fn connecting(has_interactive_password: bool) -> Self {
+        Self {
+            has_interactive_password,
+            allow_empty_username: false,
+            skip_key_file_check: false,
+        }
+    }
+
+    pub fn before_prompt() -> Self {
+        Self {
+            has_interactive_password: false,
+            allow_empty_username: true,
+            skip_key_file_check: true,
+        }
+    }
+}
+
+/// Expand `~` in private key / home-relative paths.
+pub fn expand_user_path(path: impl AsRef<std::path::Path>) -> PathBuf {
+    expand_tilde(path.as_ref())
 }
 
 fn ensure_vault_secret(vault: Option<&Vault>, secret_ref: &str) -> Result<(), ConnError> {

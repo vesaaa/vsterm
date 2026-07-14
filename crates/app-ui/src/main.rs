@@ -9,6 +9,7 @@ mod icon;
 mod i18n;
 mod metrics;
 mod panels;
+mod term_highlight;
 mod terminal_view;
 mod theme;
 

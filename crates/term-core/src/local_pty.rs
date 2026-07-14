@@ -22,12 +22,15 @@ pub struct LocalPtySession {
 impl LocalPtySession {
     pub fn spawn_shell(cols: u16, rows: u16) -> Result<Self, TermError> {
         #[cfg(windows)]
-        let cmd = CommandBuilder::new("powershell.exe");
+        let mut cmd = CommandBuilder::new("powershell.exe");
         #[cfg(not(windows))]
-        let cmd = {
+        let mut cmd = {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
             CommandBuilder::new(shell)
         };
+        // Advertise a color-capable terminal so shells / tools emit ANSI colors.
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
         Self::spawn_command(cmd, cols, rows)
     }
 

@@ -45,7 +45,7 @@ impl AuthConfig {
         }
     }
 
-    /// True when password auth has no saved vault ref — UI should prompt before connect.
+    /// True when password auth has no saved vault ref.
     pub fn needs_password_prompt(&self) -> bool {
         if let Self::Password { password_ref } = self {
             password_ref
@@ -54,6 +54,24 @@ impl AuthConfig {
                 .unwrap_or(true)
         } else {
             false
+        }
+    }
+
+    pub fn has_vault_password(&self) -> bool {
+        matches!(
+            self,
+            Self::Password {
+                password_ref: Some(r)
+            } if !r.trim().is_empty()
+        )
+    }
+
+    pub fn private_key_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Publickey {
+                private_key_path, ..
+            } => Some(private_key_path.as_path()),
+            _ => None,
         }
     }
 }
@@ -66,6 +84,8 @@ pub struct SessionConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// May be empty — UI collects username at connect time.
+    #[serde(default)]
     pub username: String,
     #[serde(default)]
     pub backend: BackendKind,
@@ -86,10 +106,25 @@ fn default_term_type() -> String {
 
 impl SessionConfig {
     pub fn display_label(&self) -> String {
-        format!("{}@{}:{}", self.username, self.host, self.port)
+        let user = self.username.trim();
+        if user.is_empty() {
+            format!("{}:{}", self.host, self.port)
+        } else {
+            format!("{user}@{}:{}", self.host, self.port)
+        }
     }
 
     pub fn needs_password_prompt(&self) -> bool {
         self.auth.needs_password_prompt()
+    }
+
+    /// Always collect username/password interactively for password auth.
+    pub fn needs_credentials_dialog(&self) -> bool {
+        matches!(self.auth, AuthConfig::Password { .. })
+    }
+
+    /// Collect / confirm private key path for publickey auth.
+    pub fn needs_key_dialog(&self) -> bool {
+        matches!(self.auth, AuthConfig::Publickey { .. })
     }
 }

@@ -5,7 +5,10 @@ use crate::metrics::{HostSnapshot, MetricsService};
 use crate::remote_host::RemoteHostService;
 use crate::panels::bottom_panel::{self, BottomPanelState};
 use crate::panels::host_toolbar::{self, MainTab};
-use crate::panels::{connection_list, monitor, routes, session_tree_panel, status_bar, toolbar};
+use crate::panels::connect_auth::{self, AuthPromptState};
+use crate::panels::session_editor::{self, EditorMode, SessionEditorState};
+use crate::panels::session_tree_panel::{self, TreeSelection};
+use crate::panels::{connection_list, monitor, routes, status_bar, toolbar};
 use crate::terminal_view::TerminalView;
 use crate::{fonts, theme};
 use connection_mgr::{ConnectFailure, ConnectionManager, ConnError, ConnErrorKey, RemoteSession};
@@ -28,15 +31,26 @@ const MAX_PASSWORD_ATTEMPTS: u32 = 3;
 struct PendingConnect {
     config: SessionConfig,
     attempt: u32,
+    kind: connect_auth::AuthPromptKind,
     rx: mpsc::Receiver<Result<(), ConnectFailure>>,
 }
 
-struct PasswordPromptState {
-    config: SessionConfig,
-    password: String,
-    show_empty_warn: bool,
-    attempt: u32,
-    focus_password: bool,
+enum FolderDialogMode {
+    Add,
+    Rename { id: String },
+}
+
+struct FolderDialogState {
+    mode: FolderDialogMode,
+    name: String,
+    error: Option<String>,
+    focus: bool,
+}
+
+#[derive(Clone)]
+enum DeleteTarget {
+    Session { session_ref: String, name: String },
+    Folder { id: String, name: String },
 }
 
 pub struct VsTermApp {
@@ -57,8 +71,12 @@ pub struct VsTermApp {
     locale: Locale,
     pending_connect: Option<PendingConnect>,
     error_dialog: Option<ConnErrorDisplay>,
-    password_prompt: Option<PasswordPromptState>,
+    auth_prompt: Option<AuthPromptState>,
     host_bind_gen: u64,
+    tree_selection: Option<TreeSelection>,
+    session_editor: Option<SessionEditorState>,
+    folder_dialog: Option<FolderDialogState>,
+    delete_confirm: Option<DeleteTarget>,
 }
 
 impl VsTermApp {
@@ -105,8 +123,12 @@ impl VsTermApp {
             locale,
             pending_connect: None,
             error_dialog: None,
-            password_prompt: None,
+            auth_prompt: None,
             host_bind_gen: 0,
+            tree_selection: None,
+            session_editor: None,
+            folder_dialog: None,
+            delete_confirm: None,
         }
     }
 
@@ -163,24 +185,29 @@ impl VsTermApp {
             .store
             .as_ref()
             .and_then(|s| Vault::open(s.paths().vault_path()).ok());
-        if let Err(err) = connection_mgr::preflight(&config, vault.as_ref(), false) {
+        if let Err(err) =
+            connection_mgr::preflight(&config, vault.as_ref(), connection_mgr::PreflightOpts::before_prompt())
+        {
             self.error_dialog = Some(format_conn_error(&err));
             self.status = i18n::t("status.open_failed");
             return;
         }
 
-        if config.needs_password_prompt() {
-            self.password_prompt = Some(PasswordPromptState {
-                config,
-                password: String::new(),
-                show_empty_warn: false,
-                attempt: 1,
-                focus_password: true,
-            });
-            return;
-        }
+        // Password and public-key sessions always go through an interactive prompt.
+        self.auth_prompt = Some(AuthPromptState::for_session(config, 1));
+    }
 
-        self.start_ssh_session(config, None, 1);
+    fn submit_auth_prompt(&mut self, prompt: AuthPromptState) {
+        match prompt.build_connect() {
+            Ok((config, interactive_password)) => {
+                let kind = prompt.kind;
+                self.auth_prompt = None;
+                self.start_ssh_session(config, interactive_password, prompt.attempt, kind);
+            }
+            Err(err) => {
+                self.auth_prompt = Some(prompt.with_error(err));
+            }
+        }
     }
 
     fn start_ssh_session(
@@ -188,6 +215,7 @@ impl VsTermApp {
         config: SessionConfig,
         interactive_password: Option<String>,
         attempt: u32,
+        kind: connect_auth::AuthPromptKind,
     ) {
         if self.pending_connect.is_some() {
             self.status = i18n::t("status.connecting");
@@ -214,9 +242,25 @@ impl VsTermApp {
             .store
             .as_ref()
             .and_then(|s| Vault::open(s.paths().vault_path()).ok());
-        if let Err(err) =
-            connection_mgr::preflight(&config, vault.as_ref(), interactive_password.is_some())
-        {
+        if let Err(err) = connection_mgr::preflight(
+            &config,
+            vault.as_ref(),
+            connection_mgr::PreflightOpts::connecting(interactive_password.is_some()),
+        ) {
+            // Key missing / vault issues for pubkey → back to key dialog.
+            if matches!(
+                err,
+                ConnError::PrivateKeyMissing { .. } | ConnError::VaultSecretMissing { .. }
+            ) && kind == connect_auth::AuthPromptKind::PublicKey
+                && attempt <= MAX_PASSWORD_ATTEMPTS
+            {
+                self.auth_prompt = Some(
+                    AuthPromptState::for_session(config, attempt)
+                        .with_error(format_conn_error(&err).title),
+                );
+                self.status = i18n::t("dialog.auth.verify_failed");
+                return;
+            }
             self.error_dialog = Some(format_conn_error(&err));
             self.status = i18n::t("status.open_failed");
             return;
@@ -275,6 +319,7 @@ impl VsTermApp {
         self.pending_connect = Some(PendingConnect {
             config: config_for_pending,
             attempt,
+            kind,
             rx,
         });
     }
@@ -329,16 +374,32 @@ impl VsTermApp {
             }
             Ok(Err(failure)) => {
                 self.sync_host_binding();
-                if failure.key == ConnErrorKey::AuthFailed && pending.attempt < MAX_PASSWORD_ATTEMPTS
-                {
-                    self.password_prompt = Some(PasswordPromptState {
-                        config: pending.config,
-                        password: String::new(),
-                        show_empty_warn: false,
-                        attempt: pending.attempt + 1,
-                        focus_password: true,
-                    });
-                    self.status = i18n::t("dialog.password.wrong");
+                let retryable = matches!(
+                    failure.key,
+                    ConnErrorKey::AuthFailed | ConnErrorKey::PrivateKeyMissing
+                ) && pending.attempt < MAX_PASSWORD_ATTEMPTS;
+                if retryable {
+                    let msg = match pending.kind {
+                        connect_auth::AuthPromptKind::Password => i18n::t("dialog.auth.wrong_password"),
+                        connect_auth::AuthPromptKind::PublicKey => {
+                            i18n::t("dialog.auth.verify_failed")
+                        }
+                    };
+                    let username = pending.config.username.clone();
+                    let key_path = pending
+                        .config
+                        .auth
+                        .private_key_path()
+                        .map(|p| p.to_string_lossy().into_owned());
+                    let mut prompt =
+                        AuthPromptState::for_session(pending.config, pending.attempt + 1)
+                            .with_error(msg);
+                    prompt.username = username;
+                    if let Some(path) = key_path {
+                        prompt.key_path = path;
+                    }
+                    self.auth_prompt = Some(prompt);
+                    self.status = i18n::t("dialog.auth.retry");
                 } else {
                     self.error_dialog =
                         Some(crate::conn_error::format_connect_failure(&failure));
@@ -359,90 +420,34 @@ impl VsTermApp {
         }
     }
 
-    fn show_password_dialog(&mut self, ctx: &egui::Context) {
-        let mut connect = false;
-        let mut cancel = false;
-
-        if let Some(prompt) = &mut self.password_prompt {
-            let mut open = true;
-            let attempt = prompt.attempt;
-            egui::Window::new(format!(
-                "{} ({}/{})",
-                i18n::t("dialog.password.title"),
-                attempt,
-                MAX_PASSWORD_ATTEMPTS
-            ))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .default_width(360.0)
-            .show(ctx, |ui| {
-                ui.label(format!(
-                    "{}: {}",
-                    i18n::t("dialog.password.host"),
-                    prompt.config.display_label()
-                ));
-                if attempt > 1 {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(220, 80, 80),
-                        i18n::t("dialog.password.wrong"),
-                    );
-                    ui.add_space(4.0);
+    fn show_auth_prompt(&mut self, ctx: &egui::Context) {
+        let mut action = None;
+        if let Some(prompt) = &mut self.auth_prompt {
+            action = connect_auth::show(ctx, prompt);
+        }
+        // After the dialog has been shown, auto-start the first public-key verification.
+        let mut auto_connect = None;
+        if action.is_none() {
+            if let Some(prompt) = &mut self.auth_prompt {
+                if prompt.can_auto_verify() {
+                    prompt.auto_tried = true;
+                    auto_connect = Some(prompt.clone());
                 }
-                ui.add_space(6.0);
-                ui.label(i18n::t("dialog.password.hint"));
-                ui.add_space(8.0);
-                ui.label(i18n::t("dialog.password.field"));
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut prompt.password)
-                        .password(true)
-                        .desired_width(f32::INFINITY),
-                );
-                if prompt.focus_password {
-                    resp.request_focus();
-                    prompt.focus_password = false;
-                }
-                if prompt.show_empty_warn {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(220, 80, 80),
-                        i18n::t("dialog.password.empty"),
-                    );
-                }
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button(i18n::t("dialog.password.connect")).clicked() {
-                        if prompt.password.is_empty() {
-                            prompt.show_empty_warn = true;
-                        } else {
-                            connect = true;
-                        }
-                    }
-                    if ui.button(i18n::t("dialog.password.cancel")).clicked() {
-                        cancel = true;
-                    }
-                });
-                // egui: Enter typically causes lost_focus; also accept Enter while focused.
-                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if enter && (resp.has_focus() || resp.lost_focus()) {
-                    if prompt.password.is_empty() {
-                        prompt.show_empty_warn = true;
-                    } else {
-                        connect = true;
-                    }
-                }
-            });
-            if !open {
-                cancel = true;
             }
         }
-
-        if connect {
-            let prompt = self.password_prompt.take().unwrap();
-            self.start_ssh_session(prompt.config, Some(prompt.password), prompt.attempt);
-        } else if cancel {
-            self.password_prompt = None;
-            self.status = i18n::t("status.open_failed");
+        if let Some(prompt) = auto_connect {
+            self.submit_auth_prompt(prompt);
+            return;
+        }
+        match action {
+            Some(connect_auth::AuthPromptAction::Connect(prompt)) => {
+                self.submit_auth_prompt(prompt);
+            }
+            Some(connect_auth::AuthPromptAction::Cancel) => {
+                self.auth_prompt = None;
+                self.status = i18n::t("status.open_failed");
+            }
+            None => {}
         }
     }
 
@@ -486,6 +491,383 @@ impl VsTermApp {
         save_locale(locale);
         self.status = i18n::t("status.lang_changed");
     }
+
+    fn begin_add_server(&mut self, folder_id: Option<String>) {
+        self.left_tab = LeftTab::Servers;
+        self.session_editor = Some(SessionEditorState::new_add(folder_id));
+    }
+
+    fn begin_edit_server(&mut self, session_ref: &str) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        match store.load_session(session_ref) {
+            Ok(cfg) => {
+                let folder_id = self.tree.folder_of_session(session_ref);
+                self.session_editor = Some(SessionEditorState::from_config(&cfg, folder_id));
+            }
+            Err(err) => {
+                self.error_dialog = Some(format_conn_error(&ConnError::NotFound(err.to_string())));
+                self.status = i18n::t("status.open_failed");
+            }
+        }
+    }
+
+    fn persist_session_editor(&mut self, mut state: SessionEditorState) {
+        let Some(store) = self.store.as_ref() else {
+            self.status = i18n::t("status.save_failed");
+            return;
+        };
+
+        if state.mode == EditorMode::Add {
+            state.id = session_editor::allocate_session_id(&self.tree, &state.name);
+        }
+
+        let built = match session_editor::build_session(&state) {
+            Ok(b) => b,
+            Err(err) => {
+                if let Some(ed) = &mut self.session_editor {
+                    ed.error = Some(err);
+                } else {
+                    self.session_editor = Some(state);
+                    if let Some(ed) = &mut self.session_editor {
+                        ed.error = Some(err);
+                    }
+                }
+                return;
+            }
+        };
+
+        let session_ref = format!("{}.yaml", built.config.id);
+        let folder_id = built.folder_id.clone();
+
+        // Vault updates first so a failed vault write doesn't leave orphan config claims.
+        if let Ok(mut vault) = Vault::open(store.paths().vault_path()) {
+            if let Some((id, secret)) = &built.password_to_save {
+                if let Err(err) = vault.set(id, secret) {
+                    self.status = format!("{}: {err}", i18n::t("status.save_failed"));
+                    self.session_editor = Some(state);
+                    return;
+                }
+            }
+            if let Some((id, secret)) = &built.passphrase_to_save {
+                if let Err(err) = vault.set(id, secret) {
+                    self.status = format!("{}: {err}", i18n::t("status.save_failed"));
+                    self.session_editor = Some(state);
+                    return;
+                }
+            }
+            if built.clear_password_ref {
+                let _ = vault.remove(&format!("{}-pwd", built.config.id));
+            }
+            if matches!(
+                built.config.auth,
+                session_tree::AuthConfig::Password { .. }
+            ) {
+                // switching to password: drop passphrase entry if any leftover
+            }
+            if matches!(
+                built.config.auth,
+                session_tree::AuthConfig::Publickey { .. }
+            ) {
+                let _ = vault.remove(&format!("{}-pwd", built.config.id));
+            }
+        }
+
+        if let Err(err) = store.save_session(&built.config) {
+            self.status = format!("{}: {err}", i18n::t("status.save_failed"));
+            self.session_editor = Some(state);
+            return;
+        }
+
+        let tree_result = match state.mode {
+            EditorMode::Add => self.tree.insert_session(
+                folder_id.as_deref(),
+                built.config.name.clone(),
+                session_ref.clone(),
+            ),
+            EditorMode::Edit => self.tree.relocate_session(
+                &session_ref,
+                built.config.name.clone(),
+                folder_id.as_deref(),
+            ),
+        };
+        if let Err(err) = tree_result {
+            self.status = format!("{}: {err}", i18n::t("status.save_failed"));
+            self.session_editor = Some(state);
+            return;
+        }
+
+        if let Err(err) = store.save_tree(&self.tree) {
+            self.status = format!("{}: {err}", i18n::t("status.save_failed"));
+            self.session_editor = Some(state);
+            return;
+        }
+
+        self.session_editor = None;
+        self.tree_selection = Some(TreeSelection::Session {
+            name: built.config.name.clone(),
+            session_ref,
+        });
+        self.status = i18n::t("status.session_saved");
+    }
+
+    fn delete_session(&mut self, session_ref: &str) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let id = session_ref
+            .trim_end_matches(".yaml")
+            .trim_end_matches(".yml");
+        if let Ok(mut vault) = Vault::open(store.paths().vault_path()) {
+            let _ = vault.remove(&format!("{id}-pwd"));
+            let _ = vault.remove(&format!("{id}-passphrase"));
+        }
+        let _ = store.delete_session_file(session_ref);
+        self.tree.remove_session_node(session_ref);
+        if let Err(err) = store.save_tree(&self.tree) {
+            self.status = format!("{}: {err}", i18n::t("status.save_failed"));
+            return;
+        }
+        if matches!(
+            &self.tree_selection,
+            Some(TreeSelection::Session { session_ref: r, .. }) if r == session_ref
+        ) {
+            self.tree_selection = None;
+        }
+        self.status = i18n::t("status.session_deleted");
+    }
+
+    fn save_folder_dialog(&mut self) {
+        let Some(dialog) = self.folder_dialog.take() else {
+            return;
+        };
+        let name = dialog.name.trim().to_string();
+        if name.is_empty() {
+            self.folder_dialog = Some(FolderDialogState {
+                error: Some(i18n::t("dialog.folder.err_name")),
+                focus: true,
+                ..dialog
+            });
+            return;
+        }
+        let Some(store) = self.store.as_ref() else {
+            self.status = i18n::t("status.save_failed");
+            return;
+        };
+        match dialog.mode {
+            FolderDialogMode::Add => {
+                let id = format!("f-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                if let Err(err) = self.tree.add_folder(name.clone(), id.clone()) {
+                    self.status = format!("{}: {err}", i18n::t("status.save_failed"));
+                    return;
+                }
+                self.tree_selection = Some(TreeSelection::Folder { id, name });
+            }
+            FolderDialogMode::Rename { id } => {
+                if !self.tree.rename_folder(&id, name.clone()) {
+                    self.status = i18n::t("status.save_failed");
+                    return;
+                }
+                self.tree_selection = Some(TreeSelection::Folder { id, name });
+            }
+        }
+        if let Err(err) = store.save_tree(&self.tree) {
+            self.status = format!("{}: {err}", i18n::t("status.save_failed"));
+            return;
+        }
+        self.status = i18n::t("status.folder_saved");
+    }
+
+    fn delete_folder(&mut self, id: &str) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        match self.tree.remove_folder(id) {
+            Ok(()) => {
+                if let Err(err) = store.save_tree(&self.tree) {
+                    self.status = format!("{}: {err}", i18n::t("status.save_failed"));
+                    return;
+                }
+                if matches!(
+                    &self.tree_selection,
+                    Some(TreeSelection::Folder { id: fid, .. }) if fid == id
+                ) {
+                    self.tree_selection = None;
+                }
+                self.status = i18n::t("status.folder_deleted");
+            }
+            Err(_) => {
+                self.status = i18n::t("status.folder_not_empty");
+            }
+        }
+    }
+
+    fn show_session_editor(&mut self, ctx: &egui::Context) {
+        let mut taken = None;
+        if let Some(state) = &mut self.session_editor {
+            if let Some(action) = session_editor::show(ctx, state, &self.tree) {
+                taken = Some(action);
+            }
+        }
+        if let Some(action) = taken {
+            match action {
+                session_editor::EditorAction::Save(state) => self.persist_session_editor(state),
+                session_editor::EditorAction::Cancel => self.session_editor = None,
+            }
+        }
+    }
+
+    fn show_folder_dialog(&mut self, ctx: &egui::Context) {
+        let mut save = false;
+        let mut cancel = false;
+        if let Some(dialog) = &mut self.folder_dialog {
+            let mut open = true;
+            let title = match dialog.mode {
+                FolderDialogMode::Add => i18n::t("dialog.folder.add_title"),
+                FolderDialogMode::Rename { .. } => i18n::t("dialog.folder.rename_title"),
+            };
+            egui::Window::new(title)
+                .id(egui::Id::new("folder_dialog"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .default_width(320.0)
+                .show(ctx, |ui| {
+                    ui.label(i18n::t("dialog.folder.name"));
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut dialog.name).desired_width(f32::INFINITY),
+                    );
+                    if dialog.focus {
+                        resp.request_focus();
+                        dialog.focus = false;
+                    }
+                    if let Some(err) = &dialog.error {
+                        ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
+                    }
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(i18n::t("dialog.folder.save")).clicked() {
+                            save = true;
+                        }
+                        if ui.button(i18n::t("dialog.folder.cancel")).clicked() {
+                            cancel = true;
+                        }
+                    });
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        save = true;
+                    }
+                });
+            if !open {
+                cancel = true;
+            }
+        }
+        if save {
+            self.save_folder_dialog();
+        } else if cancel {
+            self.folder_dialog = None;
+        }
+    }
+
+    fn show_delete_confirm(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.delete_confirm.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        let body = match &target {
+            DeleteTarget::Session { name, .. } => {
+                i18n::t("dialog.delete.session").replace("{name}", name)
+            }
+            DeleteTarget::Folder { name, .. } => {
+                i18n::t("dialog.delete.folder").replace("{name}", name)
+            }
+        };
+        egui::Window::new(i18n::t("dialog.delete.title"))
+            .id(egui::Id::new("delete_confirm"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                ui.label(body);
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button(i18n::t("dialog.delete.confirm")).clicked() {
+                        confirm = true;
+                    }
+                    if ui.button(i18n::t("dialog.delete.cancel")).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if !open {
+            cancel = true;
+        }
+        if confirm {
+            match target {
+                DeleteTarget::Session { session_ref, .. } => self.delete_session(&session_ref),
+                DeleteTarget::Folder { id, .. } => self.delete_folder(&id),
+            }
+            self.delete_confirm = None;
+        } else if cancel {
+            self.delete_confirm = None;
+        }
+    }
+
+    fn handle_tree_action(&mut self, action: session_tree_panel::TreeAction) {
+        match action {
+            session_tree_panel::TreeAction::OpenLocalDemo => {
+                self.open_local_shell("Local Shell");
+            }
+            session_tree_panel::TreeAction::OpenSession {
+                name: _,
+                session_ref,
+            } => {
+                if let Some(store) = &self.store {
+                    match store.load_session(&session_ref) {
+                        Ok(cfg) => self.request_open_session(cfg),
+                        Err(err) => {
+                            self.error_dialog =
+                                Some(format_conn_error(&ConnError::NotFound(err.to_string())));
+                            self.status = i18n::t("status.open_failed");
+                        }
+                    }
+                }
+            }
+            session_tree_panel::TreeAction::AddServer { folder_id } => {
+                self.begin_add_server(folder_id);
+            }
+            session_tree_panel::TreeAction::EditServer { session_ref } => {
+                self.begin_edit_server(&session_ref);
+            }
+            session_tree_panel::TreeAction::DeleteServer { session_ref, name } => {
+                self.delete_confirm = Some(DeleteTarget::Session { session_ref, name });
+            }
+            session_tree_panel::TreeAction::AddFolder => {
+                self.folder_dialog = Some(FolderDialogState {
+                    mode: FolderDialogMode::Add,
+                    name: String::new(),
+                    error: None,
+                    focus: true,
+                });
+            }
+            session_tree_panel::TreeAction::RenameFolder { id, name } => {
+                self.folder_dialog = Some(FolderDialogState {
+                    mode: FolderDialogMode::Rename { id },
+                    name,
+                    error: None,
+                    focus: true,
+                });
+            }
+            session_tree_panel::TreeAction::DeleteFolder { id, name } => {
+                self.delete_confirm = Some(DeleteTarget::Folder { id, name });
+            }
+        }
+    }
 }
 
 impl eframe::App for VsTermApp {
@@ -507,12 +889,36 @@ impl eframe::App for VsTermApp {
             self.host_bind_gen = gen;
             self.sync_host_binding();
         }
-        self.show_password_dialog(ctx);
+        self.show_auth_prompt(ctx);
         self.show_error_dialog(ctx);
+        self.show_session_editor(ctx);
+        self.show_folder_dialog(ctx);
+        self.show_delete_confirm(ctx);
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button(i18n::t("menu.file"), |ui| {
+                    if ui.button(i18n::t("menu.file.add_server")).clicked() {
+                        let folder_id = match &self.tree_selection {
+                            Some(TreeSelection::Folder { id, .. }) => Some(id.clone()),
+                            Some(TreeSelection::Session { session_ref, .. }) => {
+                                self.tree.folder_of_session(session_ref)
+                            }
+                            None => None,
+                        };
+                        self.begin_add_server(folder_id);
+                        ui.close_menu();
+                    }
+                    if ui.button(i18n::t("menu.file.add_folder")).clicked() {
+                        self.folder_dialog = Some(FolderDialogState {
+                            mode: FolderDialogMode::Add,
+                            name: String::new(),
+                            error: None,
+                            focus: true,
+                        });
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button(i18n::t("menu.file.refresh_tree")).clicked() {
                         self.reload_tree();
                         ui.close_menu();
@@ -621,39 +1027,13 @@ impl eframe::App for VsTermApp {
 
                                     match self.left_tab {
                                         LeftTab::Servers => {
-                                            let action =
-                                                session_tree_panel::show(ui, &self.tree);
+                                            let action = session_tree_panel::show(
+                                                ui,
+                                                &self.tree,
+                                                &mut self.tree_selection,
+                                            );
                                             if let Some(action) = action {
-                                                match action {
-                                                    session_tree_panel::TreeAction::OpenLocalDemo => {
-                                                        self.open_local_shell("Local Shell");
-                                                    }
-                                                    session_tree_panel::TreeAction::OpenSession {
-                                                        name: _,
-                                                        session_ref,
-                                                    } => {
-                                                        if let Some(store) = &self.store {
-                                                            match store.load_session(&session_ref)
-                                                            {
-                                                                Ok(cfg) => {
-                                                                    self.request_open_session(cfg);
-                                                                }
-                                                                Err(err) => {
-                                                                    self.error_dialog = Some(
-                                                                        format_conn_error(
-                                                                            &ConnError::NotFound(
-                                                                                err.to_string(),
-                                                                            ),
-                                                                        ),
-                                                                    );
-                                                                    self.status = i18n::t(
-                                                                        "status.open_failed",
-                                                                    );
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                                self.handle_tree_action(action);
                                             }
                                         }
                                         LeftTab::Monitor => {

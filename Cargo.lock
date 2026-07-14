@@ -283,7 +283,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "app-ui"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -294,7 +294,9 @@ dependencies = [
  "egui_plot",
  "encoding_rs",
  "image",
+ "once_cell",
  "parking_lot",
+ "regex",
  "serde",
  "serde_yaml",
  "session-tree",
@@ -955,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "connection-mgr"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4329,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "session-tree"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "dirs",
  "serde",
@@ -4708,7 +4710,7 @@ dependencies = [
 
 [[package]]
 name = "term-core"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -5106,7 +5108,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vault"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "aes-gcm",
  "age",

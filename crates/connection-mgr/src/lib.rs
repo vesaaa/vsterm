@@ -16,8 +16,8 @@ pub use manager::{
 };
 pub use remote_exec::RemoteSession;
 pub use system_ssh::{
-    auth_failure_text, backend_unavailable_error, preflight, resolve_auth, resolve_backend,
-    system_ssh_install_hint, AuthMaterial, SystemSshBackend,
+    auth_failure_text, backend_unavailable_error, expand_user_path, preflight, resolve_auth,
+    resolve_backend, system_ssh_install_hint, AuthMaterial, PreflightOpts, SystemSshBackend,
 };
 pub use user_error::{ConnErrorKey, ConnectFailure};
 

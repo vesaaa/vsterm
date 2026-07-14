@@ -6,6 +6,7 @@ use term_core::Rgb;
 
 const CELL_W: f32 = 8.4;
 const CELL_H: f32 = 16.0;
+const TERM_BG: Color32 = Color32::BLACK;
 
 pub struct TerminalView;
 
@@ -17,8 +18,7 @@ impl TerminalView {
         let rows = ((avail.y / CELL_H).floor() as u16).max(5);
 
         let (rect, resp) = ui.allocate_exact_size(avail, Sense::click_and_drag());
-        ui.painter()
-            .rect_filled(rect, 0.0, Color32::from_rgb(40, 42, 54));
+        ui.painter().rect_filled(rect, 0.0, TERM_BG);
 
         let snapshot = mgr
             .with_active(|c| {
@@ -29,7 +29,7 @@ impl TerminalView {
             })
             .flatten();
 
-        let Some(snapshot) = snapshot else {
+        let Some(mut snapshot) = snapshot else {
             if let Some(state) = mgr.with_active(|c| c.state) {
                 let (msg, color) = match state {
                     ConnectionState::Connecting => (
@@ -66,6 +66,8 @@ impl TerminalView {
             return (cols, rows);
         };
 
+        crate::term_highlight::apply_semantic(&mut snapshot);
+
         let font = FontId::monospace(13.0);
         let max_rows = snapshot.rows.min(rows as usize);
         let max_cols = snapshot.cols.min(cols as usize);
@@ -93,7 +95,7 @@ impl TerminalView {
                     rect.min + Vec2::new(col as f32 * CELL_W, row as f32 * CELL_H),
                     Vec2::new(CELL_W, CELL_H),
                 );
-                if bg != Color32::from_rgb(40, 42, 54) {
+                if bg != TERM_BG {
                     ui.painter().rect_filled(cell_rect, 0.0, bg);
                 }
                 if cell.ch != ' ' {

@@ -130,7 +130,9 @@ impl TerminalHandle {
                 let cell = &state.term.grid()[point];
                 let ch = cell.c;
                 let flags = cell.flags;
-                let fg = resolve_color(cell.fg, false);
+                // Many CLI tools use bold as "bright color"; map that when rendering.
+                let fg_color = brighten_if_bold(cell.fg, flags.contains(Flags::BOLD));
+                let fg = resolve_color(fg_color, false);
                 let bg = resolve_color(cell.bg, true);
                 cells.push(CellAttr {
                     ch: if ch == '\0' { ' ' } else { ch },
@@ -174,17 +176,39 @@ fn resolve_color(color: Color, is_bg: bool) -> Rgb {
     }
 }
 
+fn brighten_if_bold(color: Color, bold: bool) -> Color {
+    if !bold {
+        return color;
+    }
+    match color {
+        Color::Named(named) => Color::Named(match named {
+            NamedColor::Black => NamedColor::BrightBlack,
+            NamedColor::Red => NamedColor::BrightRed,
+            NamedColor::Green => NamedColor::BrightGreen,
+            NamedColor::Yellow => NamedColor::BrightYellow,
+            NamedColor::Blue => NamedColor::BrightBlue,
+            NamedColor::Magenta => NamedColor::BrightMagenta,
+            NamedColor::Cyan => NamedColor::BrightCyan,
+            NamedColor::White => NamedColor::BrightWhite,
+            other => other,
+        }),
+        Color::Indexed(idx) if idx < 8 => Color::Indexed(idx + 8),
+        other => other,
+    }
+}
+
 fn named_to_rgb(named: NamedColor, is_bg: bool) -> Rgb {
     match named {
-        NamedColor::Black | NamedColor::Background if is_bg => Rgb::new(40, 42, 54),
-        NamedColor::Black => Rgb::new(33, 34, 44),
+        // Pure black terminal background (WindTerm-style).
+        NamedColor::Black | NamedColor::Background if is_bg => Rgb::new(0, 0, 0),
+        NamedColor::Black => Rgb::new(80, 80, 80), // visible "black" text on black bg
         NamedColor::Red => Rgb::new(255, 85, 85),
         NamedColor::Green => Rgb::new(80, 250, 123),
         NamedColor::Yellow => Rgb::new(241, 250, 140),
         NamedColor::Blue => Rgb::new(139, 233, 253),
         NamedColor::Magenta => Rgb::new(255, 121, 198),
         NamedColor::Cyan => Rgb::new(139, 233, 253),
-        NamedColor::White | NamedColor::Foreground => Rgb::new(248, 248, 242),
+        NamedColor::White | NamedColor::Foreground => Rgb::new(230, 230, 230),
         NamedColor::BrightBlack => Rgb::new(98, 114, 164),
         NamedColor::BrightRed => Rgb::new(255, 110, 110),
         NamedColor::BrightGreen => Rgb::new(105, 255, 150),
@@ -195,9 +219,9 @@ fn named_to_rgb(named: NamedColor, is_bg: bool) -> Rgb {
         NamedColor::BrightWhite => Rgb::new(255, 255, 255),
         _ => {
             if is_bg {
-                Rgb::new(40, 42, 54)
+                Rgb::new(0, 0, 0)
             } else {
-                Rgb::new(248, 248, 242)
+                Rgb::new(230, 230, 230)
             }
         }
     }
@@ -205,14 +229,14 @@ fn named_to_rgb(named: NamedColor, is_bg: bool) -> Rgb {
 
 fn indexed_to_rgb(idx: u8) -> Rgb {
     match idx {
-        0 => Rgb::new(33, 34, 44),
+        0 => Rgb::new(0, 0, 0),
         1 => Rgb::new(255, 85, 85),
         2 => Rgb::new(80, 250, 123),
         3 => Rgb::new(241, 250, 140),
         4 => Rgb::new(139, 233, 253),
         5 => Rgb::new(255, 121, 198),
         6 => Rgb::new(139, 233, 253),
-        7 => Rgb::new(248, 248, 242),
+        7 => Rgb::new(230, 230, 230),
         8..=15 => named_to_rgb(
             match idx {
                 8 => NamedColor::BrightBlack,
