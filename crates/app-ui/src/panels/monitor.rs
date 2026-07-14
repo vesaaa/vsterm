@@ -11,6 +11,8 @@ const NET_BLOCK_H: f32 = NET_HEADER_H + NET_PLOT_H;
 const DISK_BLOCK_H: f32 = 118.0;
 const PROC_ROW_H: f32 = 18.0;
 const GAP: f32 = 4.0;
+const LABEL_COLOR: Color32 = Color32::from_rgb(52, 56, 62);
+const HEADER_COLOR: Color32 = Color32::from_rgb(100, 105, 115);
 
 pub fn show(ui: &mut Ui, metrics: &MetricsService, has_connection: bool) {
     if !has_connection {
@@ -96,7 +98,7 @@ fn resource_row(ui: &mut Ui, title: &str, pct: f32, tail: String, color: Color32
             ui.set_clip_rect(row_rect);
             ui.add_sized(
                 [label_w, GAUGE_ROW_H],
-                egui::Label::new(RichText::new(title).strong().size(13.0)),
+                egui::Label::new(RichText::new(title).size(12.0).color(LABEL_COLOR)),
             );
             let bar_w = (ui.available_width()).max(40.0);
             let (rect, _) =
@@ -156,10 +158,10 @@ fn process_table(ui: &mut Ui, snap: &HostSnapshot, w: f32) {
             proc_row(
                 ui,
                 &col_w,
-                RichText::new(i18n::t("monitor.pid")).strong(),
-                RichText::new(i18n::t("monitor.name")).strong(),
-                RichText::new(i18n::t("monitor.cpu_pct")).strong(),
-                RichText::new(i18n::t("monitor.mem")).strong(),
+                header_text(i18n::t("monitor.pid")),
+                header_text(i18n::t("monitor.name")),
+                header_text(i18n::t("monitor.cpu_pct")),
+                header_text(i18n::t("monitor.mem")),
                 true,
             );
             for (i, p) in snap.processes.iter().take(rows_fit).enumerate() {
@@ -246,11 +248,15 @@ fn network_section(
                 let combo_w = (w * 0.40).clamp(72.0, 130.0);
                 egui::ComboBox::from_id_salt("nic_combo")
                     .width(combo_w)
-                    .selected_text(preview)
+                    .selected_text(RichText::new(preview).size(12.0).color(LABEL_COLOR))
                     .show_ui(ui, |ui| {
                         for nic in &snap.nics {
                             if ui
-                                .selectable_value(selected, Some(nic.name.clone()), &nic.name)
+                                .selectable_value(
+                                    selected,
+                                    Some(nic.name.clone()),
+                                    RichText::new(&nic.name).size(12.0),
+                                )
                                 .clicked()
                             {
                                 metrics.set_selected_nic(Some(nic.name.clone()));
@@ -337,9 +343,9 @@ fn storage_section(ui: &mut Ui, snap: &HostSnapshot, w: f32) {
             disk_row(
                 ui,
                 &col_w,
-                RichText::new(i18n::t("monitor.fs")).strong(),
-                RichText::new(i18n::t("monitor.capacity")).strong().size(11.0),
-                RichText::new(i18n::t("monitor.use_pct")).strong(),
+                header_text(i18n::t("monitor.fs")),
+                header_text(i18n::t("monitor.capacity")).size(11.0),
+                header_text(i18n::t("monitor.use_pct")),
                 true,
             );
             for (i, d) in snap.disks.iter().take(rows_fit).enumerate() {
@@ -392,6 +398,10 @@ fn disk_row(
             ui.add_sized([col_w[2], PROC_ROW_H], egui::Label::new(c).truncate());
         },
     );
+}
+
+fn header_text(text: impl Into<String>) -> RichText {
+    RichText::new(text).size(12.0).color(HEADER_COLOR)
 }
 
 fn truncate(s: &str, max: usize) -> String {

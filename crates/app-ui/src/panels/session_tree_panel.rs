@@ -41,7 +41,7 @@ pub fn show(ui: &mut Ui, tree: &SessionTree) -> Option<TreeAction> {
 fn render_node(ui: &mut Ui, node: &TreeNode) -> Option<TreeAction> {
     match node {
         TreeNode::Folder { name, children, .. } => {
-            let response = egui::CollapsingHeader::new(RichText::new(format!("📁 {name}")).strong())
+            let response = egui::CollapsingHeader::new(RichText::new(format!("📁 {name}")).size(13.0))
                 .default_open(true)
                 .show(ui, |ui| {
                     let mut action = None;

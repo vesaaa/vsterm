@@ -154,21 +154,16 @@ fn host_tab(
     let text_w = (text_right - x).max(24.0);
     let max_chars = ((text_w / 7.5).floor() as usize).clamp(4, 48);
     let title = truncate(&meta.title, max_chars);
-    let title_color = if is_active {
-        Color32::from_rgb(20, 40, 90)
-    } else {
-        Color32::from_rgb(32, 34, 40)
-    };
     ui.painter().text(
         egui::pos2(x, y),
         egui::Align2::LEFT_CENTER,
         title,
+        FontId::proportional(13.0),
         if is_active {
-            FontId::proportional(13.5)
+            Color32::from_rgb(30, 50, 90)
         } else {
-            FontId::proportional(13.0)
+            Color32::from_rgb(52, 56, 62)
         },
-        title_color,
     );
 
     // Close button

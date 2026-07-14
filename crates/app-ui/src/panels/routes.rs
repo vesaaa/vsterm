@@ -1,10 +1,12 @@
 //! Routing table panel.
 
 use crate::i18n;
-use egui::{RichText, Ui};
+use egui::{Color32, RichText, Ui};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+const HEADER_COLOR: Color32 = Color32::from_rgb(100, 105, 115);
 
 #[derive(Debug, Clone, Default)]
 pub struct RouteRow {
@@ -54,11 +56,11 @@ pub fn show_panel(ui: &mut Ui) {
                     .striped(true)
                     .spacing([12.0, 4.0])
                     .show(ui, |ui| {
-                        ui.label(RichText::new(i18n::t("routes.destination")).strong());
-                        ui.label(RichText::new(i18n::t("routes.gateway")).strong());
-                        ui.label(RichText::new(i18n::t("routes.mask")).strong());
-                        ui.label(RichText::new(i18n::t("routes.flags")).strong());
-                        ui.label(RichText::new(i18n::t("routes.iface")).strong());
+                        header_cell(ui, &i18n::t("routes.destination"));
+                        header_cell(ui, &i18n::t("routes.gateway"));
+                        header_cell(ui, &i18n::t("routes.mask"));
+                        header_cell(ui, &i18n::t("routes.flags"));
+                        header_cell(ui, &i18n::t("routes.iface"));
                         ui.end_row();
                         for r in &guard.rows {
                             ui.label(&r.destination);
@@ -73,12 +75,16 @@ pub fn show_panel(ui: &mut Ui) {
                 ui.label(RichText::new(i18n::t("routes.raw")).weak());
                 ui.add_space(6.0);
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.monospace(&guard.raw);
+                    ui.label(RichText::new(&guard.raw).size(12.0));
                 });
             } else {
                 ui.label(i18n::t("routes.empty"));
             }
         });
+}
+
+fn header_cell(ui: &mut Ui, text: &str) {
+    ui.label(RichText::new(text).size(12.0).color(HEADER_COLOR));
 }
 
 fn refresh(force: bool) {
@@ -105,6 +111,20 @@ fn refresh(force: bool) {
     }
 }
 
+/// Console tools on Chinese Windows emit GBK (CP936), not UTF-8.
+fn decode_command_output(bytes: &[u8]) -> String {
+    #[cfg(windows)]
+    {
+        use encoding_rs::GBK;
+        let (decoded, _, _) = GBK.decode(bytes);
+        decoded.into_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
 fn fetch_routes() -> Result<(Vec<RouteRow>, String), String> {
     #[cfg(windows)]
     {
@@ -112,7 +132,7 @@ fn fetch_routes() -> Result<(Vec<RouteRow>, String), String> {
             .arg("print")
             .output()
             .map_err(|e| e.to_string())?;
-        let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+        let raw = decode_command_output(&output.stdout);
         let rows = parse_windows_route(&raw);
         Ok((rows, raw))
     }
@@ -122,7 +142,7 @@ fn fetch_routes() -> Result<(Vec<RouteRow>, String), String> {
             .args(["-c", "ip route 2>/dev/null || netstat -rn 2>/dev/null || route -n"])
             .output()
             .map_err(|e| e.to_string())?;
-        let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+        let raw = decode_command_output(&output.stdout);
         let rows = parse_unix_route(&raw);
         Ok((rows, raw))
     }
@@ -134,16 +154,27 @@ fn parse_windows_route(raw: &str) -> Vec<RouteRow> {
     let mut in_ipv4 = false;
     for line in raw.lines() {
         let t = line.trim();
-        if t.starts_with("Active Routes:") || t.contains("网络目标") || t.contains("Network Destination")
+        if t.starts_with("Active Routes:")
+            || t.contains("网络目标")
+            || t.contains("Network Destination")
+            || t.contains("活动路由")
         {
             in_ipv4 = true;
             continue;
         }
-        if t.starts_with("Persistent Routes:") || t.starts_with("IPv6 Route Table") {
+        if t.starts_with("Persistent Routes:")
+            || t.starts_with("IPv6 Route Table")
+            || t.contains("永久路由")
+            || t.contains("IPv6 路由表")
+        {
             in_ipv4 = false;
             continue;
         }
-        if !in_ipv4 || t.is_empty() || t.starts_with("Network Destination") || t.starts_with("网络目标")
+        if !in_ipv4
+            || t.is_empty()
+            || t.starts_with("Network Destination")
+            || t.starts_with("网络目标")
+            || t.starts_with("网络地址")
         {
             continue;
         }
@@ -171,7 +202,6 @@ fn parse_unix_route(raw: &str) -> Vec<RouteRow> {
         }
         let parts: Vec<&str> = t.split_whitespace().collect();
         if parts.len() >= 3 {
-            // `ip route`: "default via 1.2.3.4 dev eth0"
             if parts[0] == "default" || parts[0].contains('/') || parts[0].contains('.') {
                 let gateway = parts
                     .iter()

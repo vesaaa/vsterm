@@ -1,6 +1,6 @@
 use crate::i18n;
 use crate::metrics::HostSnapshot;
-use egui::{RichText, Ui};
+use egui::{Color32, RichText, Ui};
 
 /// Full-panel system information (fills the main column).
 pub fn show_panel(ui: &mut Ui, snap: Option<&HostSnapshot>) {
@@ -68,9 +68,9 @@ pub fn show_panel(ui: &mut Ui, snap: Option<&HostSnapshot>) {
                     .num_columns(3)
                     .striped(true)
                     .show(ui, |ui| {
-                        ui.label(RichText::new(i18n::t("monitor.interface")).strong());
-                        ui.label(RichText::new("RX").strong());
-                        ui.label(RichText::new("TX").strong());
+                        ui.label(RichText::new(i18n::t("monitor.interface")).size(12.0).color(Color32::from_rgb(100, 105, 115)));
+                        ui.label(RichText::new("RX").size(12.0).color(Color32::from_rgb(100, 105, 115)));
+                        ui.label(RichText::new("TX").size(12.0).color(Color32::from_rgb(100, 105, 115)));
                         ui.end_row();
                         for nic in &snap.nics {
                             ui.label(&nic.name);
@@ -114,7 +114,7 @@ pub fn show_panel(ui: &mut Ui, snap: Option<&HostSnapshot>) {
 }
 
 fn row(ui: &mut Ui, key: &str, value: &str) {
-    ui.label(RichText::new(key).strong());
+    ui.label(RichText::new(key).size(12.0).color(Color32::from_rgb(100, 105, 115)));
     ui.label(value);
     ui.end_row();
 }

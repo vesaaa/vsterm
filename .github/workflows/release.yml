@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  # Manual re-run only; no builds on main branch pushes.
   workflow_dispatch:
 
 permissions:
@@ -59,6 +60,8 @@ jobs:
           sudo apt-get install -y \
             libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
             libxi-dev libxrandr-dev libxss-dev libvulkan-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shm0-dev libx11-xcb-dev \
+            libxcb-keysyms1-dev libdrm-dev libgbm-dev \
             pkg-config
 
       - name: Build release

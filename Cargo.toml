@@ -33,8 +33,8 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# GUI — DX12 (Windows) + Metal (macOS); Vulkan enabled via wgpu target deps on Linux
-eframe = { version = "0.31", default-features = false, features = ["accesskit", "default_fonts", "wgpu"] }
+# GUI — wgpu; x11+wayland needed on Linux (default-features=false drops them)
+eframe = { version = "0.31", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "x11", "wayland"] }
 egui = "0.31"
 wgpu = { version = "24", default-features = false, features = ["dx12", "metal", "wgsl"] }
 
@@ -61,6 +61,7 @@ once_cell = "1"
 sysinfo = "0.33"
 egui_plot = "0.31"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+encoding_rs = "0.8"
 
 # Internal crates
 session-tree = { path = "crates/session-tree" }

@@ -160,7 +160,7 @@ impl eframe::App for VsTermApp {
                         ui.close_menu();
                     }
                 });
-                ui.label(egui::RichText::new(i18n::t("app.name")).strong());
+                ui.label(egui::RichText::new(i18n::t("app.name")).size(13.0));
             });
         });
 

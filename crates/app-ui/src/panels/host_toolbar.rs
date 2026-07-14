@@ -35,7 +35,7 @@ fn tab_chip(ui: &mut Ui, current: &mut MainTab, value: MainTab, icon: &str, labe
     };
     let text_color = Color32::from_rgb(32, 34, 40);
     let text = format!("{icon}  {label}");
-    let btn = egui::Button::new(RichText::new(text).strong().color(text_color))
+    let btn = egui::Button::new(RichText::new(text).size(13.0).color(text_color))
         .fill(fill)
         .stroke(egui::Stroke::new(1.0_f32, stroke))
         .corner_radius(4.0)

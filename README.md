@@ -3,7 +3,7 @@
 跨平台 SSH 终端管理工具（Rust 原生），对标 WindTerm / Termius。
 
 - GUI：`egui` + `eframe`（`wgpu`：Windows DX12 / macOS Metal / Linux Vulkan）
-- 字体：内嵌 JetBrains Mono（终端）+ Noto Sans SC（界面中文）
+- 字体：内嵌 JetBrains Mono（终端）+ Noto Sans SC Light（界面中文，细体）
 - 终端仿真：`alacritty_terminal`
 - SSH：双内核 `russh`（内置）+ 系统 `ssh`（`portable-pty`）
 - 配置：YAML；凭据：系统 keyring + 加密 vault
@@ -71,7 +71,9 @@ git push origin v1.0.0
 - `vsterm-macos-arm64.tar.gz`
 - `vsterm-linux-x64.tar.gz`
 
-也可在 Actions 里手动触发 `Release` 工作流打出 artifact（不发 Release）。
+也可在 Actions 里手动触发 `Release` 工作流（`workflow_dispatch`）打出 artifact。
+
+> 仅 **推送 `v*` 标签** 或 **手动触发** 会运行 Release 构建；`main` 分支 push 不会触发。
 
 ## 数据目录
 

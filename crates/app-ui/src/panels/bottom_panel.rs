@@ -1,6 +1,6 @@
 use crate::commands::CommandBook;
 use crate::i18n;
-use egui::{RichText, Ui};
+use egui::{Color32, RichText, Ui};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BottomTab {
@@ -52,12 +52,12 @@ pub fn show(ui: &mut Ui, state: &mut BottomPanelState, book: &CommandBook) -> Op
                 let list_h = (fixed_h - 70.0).max(60.0);
                 ui.columns(2, |cols| {
                     cols[0].group(|ui| {
-                        ui.label(RichText::new(i18n::t("bottom.files.local")).strong());
+                        ui.label(RichText::new(i18n::t("bottom.files.local")).size(12.0).color(Color32::from_rgb(100, 105, 115)));
                         ui.text_edit_singleline(&mut state.local_path);
                         list_dir_preview(ui, &state.local_path, list_h - 40.0);
                     });
                     cols[1].group(|ui| {
-                        ui.label(RichText::new(i18n::t("bottom.files.remote")).strong());
+                        ui.label(RichText::new(i18n::t("bottom.files.remote")).size(12.0).color(Color32::from_rgb(100, 105, 115)));
                         ui.text_edit_singleline(&mut state.remote_path);
                         ui.set_min_height(list_h - 40.0);
                         ui.label(RichText::new("SFTP …").weak());
