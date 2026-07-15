@@ -1,5 +1,6 @@
 use crate::commands::CommandBook;
 use crate::conn_error::{format_conn_error, ConnErrorDisplay};
+use crate::fx::FxLayer;
 use crate::i18n::{self, Locale};
 use crate::metrics::{HostSnapshot, MetricsService};
 use crate::remote_host::RemoteHostService;
@@ -83,6 +84,14 @@ pub struct VsTermApp {
     delete_confirm: Option<DeleteTarget>,
     /// Whether `set_repaint_wake` has been bound to this egui context.
     repaint_wake_bound: bool,
+    /// Soft-glow / connect-ripple motion layer.
+    fx: FxLayer,
+    /// Last painted auth dialog rect (for suck-in / spit-out FX).
+    last_auth_dialog_rect: Option<egui::Rect>,
+    /// Session waiting for spit-out morph to finish before showing the auth dialog.
+    pending_spit_auth: Option<SessionConfig>,
+    /// Status-light rect queued until the next frame has a screen size for spit target.
+    pending_spit_from: Option<egui::Rect>,
 }
 
 impl VsTermApp {
@@ -137,6 +146,10 @@ impl VsTermApp {
             folder_dialog: None,
             delete_confirm: None,
             repaint_wake_bound: false,
+            fx: FxLayer::default(),
+            last_auth_dialog_rect: None,
+            pending_spit_auth: None,
+            pending_spit_from: None,
         }
     }
 
@@ -172,8 +185,12 @@ impl VsTermApp {
         self.begin_auth_for_session(config);
     }
 
-    fn request_reconnect(&mut self, id: connection_mgr::ConnectionId) {
-        if self.pending_connect.is_some() {
+    fn request_reconnect(
+        &mut self,
+        id: connection_mgr::ConnectionId,
+        light: Option<egui::Rect>,
+    ) {
+        if self.pending_connect.is_some() || self.pending_spit_auth.is_some() {
             self.status = i18n::t("status.connecting");
             return;
         }
@@ -206,7 +223,11 @@ impl VsTermApp {
                 self.left_tab = LeftTab::Monitor;
                 self.main_tab = MainTab::Terminal;
                 self.reconnect_target = Some(id);
-                self.begin_auth_for_session(cfg);
+                if let Some(light) = light.filter(|r| r.is_positive()) {
+                    self.begin_auth_with_spit(cfg, light);
+                } else {
+                    self.begin_auth_for_session(cfg);
+                }
             }
             Err(err) => {
                 self.error_dialog =
@@ -222,16 +243,42 @@ impl VsTermApp {
             return;
         }
 
+        if let Err(()) = self.preflight_before_auth(&config) {
+            return;
+        }
+
+        // Password and public-key sessions always go through an interactive prompt.
+        self.pending_spit_auth = None;
+        self.auth_prompt = Some(AuthPromptState::for_session(config, 1));
+    }
+
+    /// Gray status-light reconnect: morph card out of the light, then show the dialog.
+    fn begin_auth_with_spit(&mut self, config: SessionConfig, from_light: egui::Rect) {
+        if self.pending_connect.is_some() {
+            self.status = i18n::t("status.connecting");
+            return;
+        }
+        if let Err(()) = self.preflight_before_auth(&config) {
+            return;
+        }
+        self.auth_prompt = None;
+        self.pending_spit_auth = Some(config);
+        self.pending_spit_from = Some(from_light);
+    }
+
+    /// Returns `Err(())` after surfacing an error dialog / clearing reconnect.
+    fn preflight_before_auth(&mut self, config: &SessionConfig) -> Result<(), ()> {
         let resolved = connection_mgr::resolve_backend(config.backend);
         if resolved == BackendKind::System
             && !connection_mgr::SystemSshBackend::is_available()
         {
             self.reconnect_target = None;
+            self.pending_spit_auth = None;
             self.error_dialog = Some(format_conn_error(
                 &connection_mgr::backend_unavailable_error(BackendKind::System),
             ));
             self.status = i18n::t("status.open_failed");
-            return;
+            return Err(());
         }
 
         let vault = self
@@ -239,24 +286,34 @@ impl VsTermApp {
             .as_ref()
             .and_then(|s| Vault::open(s.paths().vault_path()).ok());
         if let Err(err) =
-            connection_mgr::preflight(&config, vault.as_ref(), connection_mgr::PreflightOpts::before_prompt())
+            connection_mgr::preflight(config, vault.as_ref(), connection_mgr::PreflightOpts::before_prompt())
         {
             self.reconnect_target = None;
+            self.pending_spit_auth = None;
             self.error_dialog = Some(format_conn_error(&err));
             self.status = i18n::t("status.open_failed");
-            return;
+            return Err(());
         }
-
-        // Password and public-key sessions always go through an interactive prompt.
-        self.auth_prompt = Some(AuthPromptState::for_session(config, 1));
+        Ok(())
     }
 
-    fn submit_auth_prompt(&mut self, prompt: AuthPromptState) {
+    fn submit_auth_prompt(&mut self, mut prompt: AuthPromptState) {
         match prompt.build_connect() {
             Ok((config, interactive_password)) => {
                 let kind = prompt.kind;
-                self.auth_prompt = None;
-                self.start_ssh_session(config, interactive_password, prompt.attempt, kind);
+                let attempt = prompt.attempt;
+                prompt.verifying = true;
+                prompt.warn = None;
+                self.auth_prompt = Some(prompt);
+                self.start_ssh_session(config, interactive_password, attempt, kind);
+                // If handshake never started, drop verifying chrome.
+                if self.pending_connect.is_none() {
+                    if self.error_dialog.is_some() {
+                        self.auth_prompt = None;
+                    } else if let Some(p) = &mut self.auth_prompt {
+                        p.verifying = false;
+                    }
+                }
             }
             Err(err) => {
                 self.auth_prompt = Some(prompt.with_error(err));
@@ -438,6 +495,10 @@ impl VsTermApp {
                 self.main_tab = MainTab::Terminal;
                 self.sync_host_binding();
                 self.status = i18n::t("status.connected");
+                if let Some(rect) = self.last_auth_dialog_rect.take() {
+                    self.fx.begin_auth_suck(rect);
+                }
+                self.auth_prompt = None;
             }
             Ok(Err(failure)) => {
                 self.sync_host_binding();
@@ -477,6 +538,7 @@ impl VsTermApp {
                             .unwrap_or_else(|| i18n::t("status.open_failed"));
                         self.connections.mark_failed(id, msg);
                     }
+                    self.auth_prompt = None;
                     self.error_dialog =
                         Some(crate::conn_error::format_connect_failure(&failure));
                     if failure.key == ConnErrorKey::AuthFailed {
@@ -503,7 +565,11 @@ impl VsTermApp {
     fn show_auth_prompt(&mut self, ctx: &egui::Context) {
         let mut action = None;
         if let Some(prompt) = &mut self.auth_prompt {
-            action = connect_auth::show(ctx, prompt);
+            let (act, rect) = connect_auth::show(ctx, prompt);
+            action = act;
+            if let Some(r) = rect {
+                self.last_auth_dialog_rect = Some(r);
+            }
         }
         // After the dialog has been shown, auto-start the first public-key verification.
         let mut auto_connect = None;
@@ -525,6 +591,7 @@ impl VsTermApp {
             }
             Some(connect_auth::AuthPromptAction::Cancel) => {
                 self.auth_prompt = None;
+                self.last_auth_dialog_rect = None;
                 if let Some(id) = self.reconnect_target.take() {
                     if matches!(
                         self.connections.connection_state(id),
@@ -1049,7 +1116,10 @@ impl eframe::App for VsTermApp {
                 self.main_tab,
                 MainTab::SystemInfo | MainTab::Routes
             );
-        schedule_repaint(ctx, connecting, wants_metrics);
+        let auth_animating = self.auth_prompt.is_some()
+            || self.pending_spit_auth.is_some()
+            || self.fx.is_active();
+        schedule_repaint(ctx, connecting, wants_metrics, auth_animating);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(i18n::t("app.name")));
 
         self.poll_pending_connect();
@@ -1059,6 +1129,20 @@ impl eframe::App for VsTermApp {
             self.host_bind_gen = gen;
             self.sync_host_binding();
         }
+
+        if let Some(from) = self.pending_spit_from.take() {
+            let to = self
+                .last_auth_dialog_rect
+                .filter(|r| r.width() > 40.0 && r.height() > 40.0)
+                .unwrap_or_else(|| crate::fx::estimated_auth_dialog_rect(ctx.screen_rect()));
+            self.fx.begin_auth_spit(from, to);
+        }
+        if self.fx.take_spit_finished() {
+            if let Some(cfg) = self.pending_spit_auth.take() {
+                self.auth_prompt = Some(AuthPromptState::for_session(cfg, 1));
+            }
+        }
+
         self.show_auth_prompt(ctx);
         self.show_error_dialog(ctx);
         self.show_session_editor(ctx);
@@ -1288,10 +1372,13 @@ impl eframe::App for VsTermApp {
                                 .show(ui, |ui| {
                                     ui.set_min_width(list_w);
                                     ui.set_max_width(list_w);
-                                    let (conn_action, tab_rect) =
+                                    let (conn_action, tab_rect, light_rect) =
                                         connection_list::show(ui, &self.connections);
                                     if let Some(rect) = tab_rect {
                                         active_tab_screen_rect = Some(rect);
+                                    }
+                                    if let Some(rect) = light_rect {
+                                        self.fx.settle_auth_target(rect);
                                     }
                                     match conn_action {
                                         Some(connection_list::ConnAction::Select(id)) => {
@@ -1305,8 +1392,8 @@ impl eframe::App for VsTermApp {
                                             self.sync_host_binding();
                                             self.status = i18n::t("status.closed");
                                         }
-                                        Some(connection_list::ConnAction::Reconnect(id)) => {
-                                            self.request_reconnect(id);
+                                        Some(connection_list::ConnAction::Reconnect { id, light }) => {
+                                            self.request_reconnect(id, Some(light));
                                         }
                                         None => {}
                                     }
@@ -1424,6 +1511,8 @@ impl eframe::App for VsTermApp {
                 }
             }
         });
+
+        self.fx.paint_overlay(ctx);
     }
 }
 
@@ -1537,7 +1626,7 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
 
 /// Event-driven painting: wake on input / terminal output; slow timer only for
 /// cursor blink, connecting polls, and metrics panels. Avoids a fixed ~30 FPS loop.
-fn schedule_repaint(ctx: &egui::Context, connecting: bool, wants_metrics: bool) {
+fn schedule_repaint(ctx: &egui::Context, connecting: bool, wants_metrics: bool, fx_active: bool) {
     use std::time::Duration;
 
     let interactive = ctx.input(|i| {
@@ -1557,11 +1646,13 @@ fn schedule_repaint(ctx: &egui::Context, connecting: bool, wants_metrics: bool) 
             })
     });
 
-    if interactive {
+    if interactive || fx_active {
         ctx.request_repaint();
     }
 
-    let ms = if connecting {
+    let ms = if fx_active {
+        16
+    } else if connecting {
         200
     } else if wants_metrics {
         400

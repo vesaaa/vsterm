@@ -9,6 +9,7 @@ mod commands;
 mod conn_error;
 mod remote_host;
 mod fonts;
+mod fx;
 mod icon;
 mod i18n;
 mod metrics;

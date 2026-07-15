@@ -6,6 +6,7 @@ mod known_hosts;
 mod manager;
 mod process;
 mod remote_exec;
+mod ssh_ident;
 mod ssh_io;
 mod system_ssh;
 mod user_error;
@@ -18,6 +19,7 @@ pub use manager::{
 };
 pub use process::{command as gui_command, hide_console};
 pub use remote_exec::RemoteSession;
+pub use ssh_ident::probe_ssh_software_ident;
 pub use system_ssh::{
     auth_failure_text, backend_unavailable_error, expand_user_path, preflight, resolve_auth,
     resolve_backend, system_ssh_install_hint, AuthMaterial, PreflightOpts, SystemSshBackend,

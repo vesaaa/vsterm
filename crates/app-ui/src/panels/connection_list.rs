@@ -1,3 +1,4 @@
+use crate::fx;
 use crate::i18n;
 use connection_mgr::{ConnectionId, ConnectionManager, ConnectionState};
 use egui::{Color32, FontId, Sense, Ui};
@@ -9,12 +10,20 @@ pub enum ConnAction {
     Select(ConnectionId),
     Close(ConnectionId),
     /// Click the status light on a dead/failed tab to reconnect in place.
-    Reconnect(ConnectionId),
+    Reconnect {
+        id: ConnectionId,
+        /// Screen-space status bead (spit-out morph origin).
+        light: egui::Rect,
+    },
 }
 
-pub fn show(ui: &mut Ui, mgr: &Arc<ConnectionManager>) -> (Option<ConnAction>, Option<egui::Rect>) {
+pub fn show(
+    ui: &mut Ui,
+    mgr: &Arc<ConnectionManager>,
+) -> (Option<ConnAction>, Option<egui::Rect>, Option<egui::Rect>) {
     let mut action = None;
     let mut active_tab_rect = None;
+    let mut active_light_rect = None;
     let active = mgr.active_id();
     let list = mgr.list_meta();
 
@@ -37,15 +46,21 @@ pub fn show(ui: &mut Ui, mgr: &Arc<ConnectionManager>) -> (Option<ConnAction>, O
 
             for meta in &list {
                 let is_active = Some(meta.id) == active;
-                match host_tab(ui, w, meta, is_active) {
+                let tab_action = host_tab(ui, w, meta, is_active);
+                match tab_action {
                     Some(ConnAction::Close(id)) => action = Some(ConnAction::Close(id)),
                     Some(ConnAction::Select(id)) => action = Some(ConnAction::Select(id)),
-                    Some(ConnAction::Reconnect(id)) => action = Some(ConnAction::Reconnect(id)),
+                    Some(ConnAction::Reconnect { id, light }) => {
+                        action = Some(ConnAction::Reconnect { id, light })
+                    }
                     None => {}
                 }
                 if is_active {
                     active_tab_rect = ui.ctx().data(|d| {
                         d.get_temp::<egui::Rect>(ui.id().with(("tab_rect", meta.id.0)))
+                    });
+                    active_light_rect = ui.ctx().data(|d| {
+                        d.get_temp::<egui::Rect>(ui.id().with(("light_rect", meta.id.0)))
                     });
                 }
             }
@@ -57,7 +72,11 @@ pub fn show(ui: &mut Ui, mgr: &Arc<ConnectionManager>) -> (Option<ConnAction>, O
             }
         });
 
-    (action, active_tab_rect.filter(|r| r.is_positive()))
+    (
+        action,
+        active_tab_rect.filter(|r| r.is_positive()),
+        active_light_rect.filter(|r| r.is_positive()),
+    )
 }
 
 fn host_tab(
@@ -148,9 +167,40 @@ fn host_tab(
         ConnectionState::Failed => Color32::from_rgb(200, 60, 60),
     };
     let light_center = egui::pos2(x + 3.5, y);
-    ui.painter().circle_filled(light_center, 3.5, state_color);
+    match meta.state {
+        ConnectionState::Connecting => {
+            let t = (ui.input(|i| i.time) as f32 * 2.4).fract();
+            fx::soft_glow_pulse(ui.painter(), light_center, 3.5, state_color, t);
+        }
+        ConnectionState::Connected => {
+            fx::soft_glow(ui.painter(), light_center, 3.5, state_color);
+        }
+        ConnectionState::Disconnected | ConnectionState::Failed => {
+            // Quiet chrome — thin soft rim only, no loud bloom.
+            ui.painter().circle_filled(
+                light_center,
+                5.0,
+                Color32::from_rgba_unmultiplied(
+                    state_color.r(),
+                    state_color.g(),
+                    state_color.b(),
+                    36,
+                ),
+            );
+            ui.painter().circle_filled(light_center, 3.5, state_color);
+        }
+    }
     // Generous hit target: gray/red light reconnects without needing a tiny click.
     let light_rect = egui::Rect::from_center_size(light_center, egui::vec2(16.0, 16.0));
+    let light_screen = if let Some(to_global) = ui.ctx().layer_transform_to_global(ui.layer_id()) {
+        // Tight target for suck-in / ripple origin (status bead, not the hit pad).
+        to_global * egui::Rect::from_center_size(light_center, egui::vec2(8.0, 8.0))
+    } else {
+        egui::Rect::from_center_size(light_center, egui::vec2(8.0, 8.0))
+    };
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(ui.id().with(("light_rect", meta.id.0)), light_screen);
+    });
     let light_resp = ui.interact(
         light_rect,
         ui.id().with("status").with(meta.id.0),
@@ -206,19 +256,22 @@ fn host_tab(
         Color32::from_rgb(80, 84, 92),
     );
 
-    if close_resp.clicked() {
-        return Some(ConnAction::Close(meta.id));
-    }
-    if can_reconnect && light_resp.clicked() {
-        return Some(ConnAction::Reconnect(meta.id));
-    }
-    if resp.clicked() && !close_resp.clicked() && !light_resp.clicked() {
-        return Some(ConnAction::Select(meta.id));
-    }
+    let action = if close_resp.clicked() {
+        Some(ConnAction::Close(meta.id))
+    } else if can_reconnect && light_resp.clicked() {
+        Some(ConnAction::Reconnect {
+            id: meta.id,
+            light: light_screen,
+        })
+    } else if resp.clicked() && !close_resp.clicked() && !light_resp.clicked() {
+        Some(ConnAction::Select(meta.id))
+    } else {
+        None
+    };
     if resp.hovered() || close_resp.hovered() || (can_reconnect && light_resp.hovered()) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    None
+    action
 }
 
 fn truncate(s: &str, max: usize) -> String {
