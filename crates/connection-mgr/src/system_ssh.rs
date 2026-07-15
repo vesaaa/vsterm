@@ -746,23 +746,19 @@ fn dirs_home() -> Option<PathBuf> {
 /// Resolve backend kind including `auto` probing.
 pub fn resolve_backend(kind: BackendKind) -> BackendKind {
     match kind {
-        BackendKind::Auto => {
-            if SystemSshBackend::is_available() {
-                BackendKind::System
-            } else {
-                BackendKind::Builtin
-            }
-        }
+        // Product default: built-in session (shared shell + exec). System OpenSSH
+        // is an explicit escape hatch for unusual hosts / enterprise configs.
+        BackendKind::Auto => BackendKind::Builtin,
         other => other,
     }
 }
 
 pub fn backend_unavailable_error(resolved: BackendKind) -> ConnError {
     match resolved {
-        BackendKind::Builtin => ConnError::Backend(
-            "BUILTIN_UNAVAILABLE:Built-in SSH engine (russh) is not ready yet.".into(),
-        ),
         BackendKind::System => system_ssh_missing(),
+        BackendKind::Builtin => ConnError::Backend(
+            "BUILTIN_UNAVAILABLE:Built-in SSH engine failed to start.".into(),
+        ),
         BackendKind::Auto => ConnError::Backend(format!(
             "BOTH_BACKENDS_UNAVAILABLE:Neither system OpenSSH nor the built-in engine is available. {}",
             system_ssh_install_hint()

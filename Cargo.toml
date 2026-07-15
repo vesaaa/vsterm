@@ -10,7 +10,7 @@ members = [
 default-members = ["crates/app-ui"]
 
 [workspace.package]
-version = "1.0.6"
+version = "1.0.7"
 edition = "2021"
 license-file = "LICENSE"
 authors = ["vesaa"]
@@ -19,7 +19,7 @@ description = "Cross-platform SSH terminal manager built with Rust (egui + alacr
 
 [workspace.dependencies]
 # Async
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process", "net"] }
 async-trait = "0.1"
 futures = "0.3"
 

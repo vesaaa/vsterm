@@ -1,23 +1,70 @@
-//! Builtin SSH engine based on `russh` (fully wired in stage 4).
+//! Builtin SSH engine based on [`russh`].
 //!
-//! When ready:
-//! 1. Implement [`SshBackend`] / [`SshSession`] for interactive PTY.
-//! 2. Implement [`crate::RemoteExec`] for one-shot metrics/routes over an `exec`
-//!    channel on the same authenticated client (no `ssh.exe`, no console).
-//! 3. Attach with [`crate::RemoteSession::from_exec`] `(username, host, exec)`.
+//! Interactive shell and one-shot [`RemoteExec`] share one authenticated
+//! [`client::Handle`] living on a process-global multi-thread Tokio runtime
+//! (so the UI connect thread can return without dropping the session).
 
-use crate::backend::{SshBackend, SshChannel, SshSession};
+use crate::backend::RemoteExec;
+use crate::known_hosts::{self, HostKeyCheck};
+use crate::remote_exec::RemoteSession;
+use crate::ssh_io::SshIoSession;
+use crate::system_ssh::{expand_user_path, preflight, resolve_auth, AuthMaterial, PreflightOpts};
 use crate::ConnError;
-use async_trait::async_trait;
-use session_tree::SessionConfig;
-use std::io;
+use parking_lot::Mutex as ParkingMutex;
+use russh::client::{AuthResult, Handle, KeyboardInteractiveAuthResponse};
+use russh::keys::{load_secret_key, PrivateKeyWithHashAlg, PublicKey};
+use russh::MethodKind;
+use russh::{client, ChannelMsg};
+use session_tree::{AuthConfig, SessionConfig};
+use std::io::{self, Cursor, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+use tokio::sync::mpsc as tmpsc;
+use vault::Vault;
 
-/// Placeholder russh backend. Stage 4 will implement TCP connect, auth, and shell channel.
+/// Result of a successful builtin connect.
+pub struct RusshEstablished {
+    pub io: SshIoSession,
+    pub remote: RemoteSession,
+}
+
 pub struct RusshBackend;
 
 impl RusshBackend {
     pub fn new() -> Self {
         Self
+    }
+
+    pub fn is_available() -> bool {
+        true
+    }
+
+    /// Authenticate and open an interactive shell + shared [`RemoteExec`].
+    pub async fn open_interactive(
+        config: &SessionConfig,
+        vault: Option<&Vault>,
+        interactive_password: Option<String>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<RusshEstablished, ConnError> {
+        preflight(
+            config,
+            vault,
+            PreflightOpts::connecting(interactive_password.is_some()),
+        )?;
+        let auth = resolve_auth(config, vault, interactive_password)?;
+
+        // Run the whole connect + shell bootstrap on the dedicated runtime so
+        // channels keep alive after the UI's current-thread runtime is gone.
+        let cfg = config.clone();
+        let auth = auth.clone();
+        tokio::task::spawn_blocking(move || {
+            runtime().block_on(connect_and_shell(cfg, auth, cols, rows))
+        })
+        .await
+        .map_err(|e| ConnError::Backend(format!("russh worker join: {e}")))?
     }
 }
 
@@ -27,54 +74,456 @@ impl Default for RusshBackend {
     }
 }
 
-#[async_trait]
-impl SshBackend for RusshBackend {
-    async fn connect(&self, config: &SessionConfig) -> Result<Box<dyn SshSession>, ConnError> {
-        Err(ConnError::Backend(format!(
-            "russh builtin backend not yet implemented (host={}:{}) — use system backend or local shell for now",
-            config.host, config.port
-        )))
-    }
+fn runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .thread_name("vsterm-russh")
+            .build()
+            .expect("vsterm russh runtime")
+    })
 }
 
-/// Reserved for stage 4 channel adapter.
-#[allow(dead_code)]
-struct RusshChannelStub;
+async fn connect_and_shell(
+    config: SessionConfig,
+    auth: AuthMaterial,
+    cols: u16,
+    rows: u16,
+) -> Result<RusshEstablished, ConnError> {
+    let host_key_err: Arc<ParkingMutex<Option<ConnError>>> = Arc::new(ParkingMutex::new(None));
+    let handler = ClientHandler {
+        host: config.host.clone(),
+        port: config.port,
+        host_key_err: Arc::clone(&host_key_err),
+    };
 
-impl SshChannel for RusshChannelStub {
-    fn reader(&mut self) -> &mut dyn io::Read {
-        unreachable!("russh channel stub")
-    }
+    let conf = Arc::new(client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        ..Default::default()
+    });
 
-    fn writer(&mut self) -> &mut dyn io::Write {
-        unreachable!("russh channel stub")
-    }
+    let mut handle = client::connect(conf, (config.host.as_str(), config.port), handler)
+        .await
+        .map_err(|e| {
+            if let Some(err) = host_key_err.lock().take() {
+                return err;
+            }
+            ConnError::Connect(format!("{e}"))
+        })?;
+
+    authenticate(&mut handle, &config, &auth).await?;
+
+    let session = Arc::new(handle);
+    let exec = Arc::new(RusshRemoteExec {
+        session: Arc::clone(&session),
+        host: config.host.clone(),
+    });
+    let remote = RemoteSession::from_exec(
+        config.username.clone(),
+        config.host.clone(),
+        exec as Arc<dyn RemoteExec>,
+    );
+
+    let io = open_shell_io(Arc::clone(&session), &config.term_type, cols, rows).await?;
+    Ok(RusshEstablished { io, remote })
 }
 
-#[allow(dead_code)]
-struct RusshSessionStub {
-    alive: bool,
+struct ClientHandler {
+    host: String,
+    port: u16,
+    host_key_err: Arc<ParkingMutex<Option<ConnError>>>,
 }
 
-#[async_trait]
-impl SshSession for RusshSessionStub {
-    async fn open_shell(
+impl client::Handler for ClientHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
         &mut self,
-        _term_size: (u16, u16),
-    ) -> Result<Box<dyn SshChannel>, ConnError> {
-        Err(ConnError::Backend("russh session stub".into()))
+        server_public_key: &PublicKey,
+    ) -> Result<bool, Self::Error> {
+        match known_hosts::check(&self.host, self.port, server_public_key) {
+            Ok(HostKeyCheck::Match) => Ok(true),
+            Ok(HostKeyCheck::Unknown) => {
+                if let Err(e) = known_hosts::learn(&self.host, self.port, server_public_key) {
+                    *self.host_key_err.lock() = Some(e);
+                    return Ok(false);
+                }
+                tracing::info!(
+                    host = %self.host,
+                    port = self.port,
+                    fingerprint = %known_hosts::fingerprint_sha256(server_public_key),
+                    "accepted new host key (trust on first use)"
+                );
+                Ok(true)
+            }
+            Ok(HostKeyCheck::Mismatch) => {
+                *self.host_key_err.lock() = Some(ConnError::HostKeyMismatch(format!(
+                    "{}:{} fingerprint {}",
+                    self.host,
+                    self.port,
+                    known_hosts::fingerprint_sha256(server_public_key)
+                )));
+                Ok(false)
+            }
+            Err(e) => {
+                *self.host_key_err.lock() = Some(e);
+                Ok(false)
+            }
+        }
+    }
+}
+
+async fn authenticate(
+    handle: &mut Handle<ClientHandler>,
+    config: &SessionConfig,
+    auth: &AuthMaterial,
+) -> Result<(), ConnError> {
+    let user = config.username.as_str();
+    match &config.auth {
+        AuthConfig::Password { .. } => {
+            let password = auth
+                .password
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ConnError::AuthFailed("password required".into()))?;
+            auth_with_password(handle, user, password).await
+        }
+        AuthConfig::Publickey {
+            private_key_path, ..
+        } => {
+            let path = expand_user_path(private_key_path);
+            let passphrase = auth.passphrase.as_deref();
+            let key = load_secret_key(&path, passphrase).map_err(|e| {
+                let msg = e.to_string();
+                if msg.to_ascii_lowercase().contains("password")
+                    || msg.to_ascii_lowercase().contains("passphrase")
+                    || msg.to_ascii_lowercase().contains("encrypted")
+                {
+                    ConnError::AuthFailed(format!("private key passphrase: {e}"))
+                } else {
+                    ConnError::AuthFailed(format!("load private key {}: {e}", path.display()))
+                }
+            })?;
+            let hash = handle
+                .best_supported_rsa_hash()
+                .await
+                .map_err(|e| ConnError::Connect(format!("{e}")))?
+                .flatten();
+            let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
+            match handle
+                .authenticate_publickey(user, key)
+                .await
+                .map_err(|e| ConnError::Connect(format!("{e}")))?
+            {
+                AuthResult::Success => Ok(()),
+                AuthResult::Failure { .. } => {
+                    Err(ConnError::AuthFailed("publickey authentication failed".into()))
+                }
+            }
+        }
+    }
+}
+
+async fn auth_with_password(
+    handle: &mut Handle<ClientHandler>,
+    user: &str,
+    password: &str,
+) -> Result<(), ConnError> {
+    match handle
+        .authenticate_password(user, password)
+        .await
+        .map_err(|e| ConnError::Connect(format!("{e}")))?
+    {
+        AuthResult::Success => return Ok(()),
+        AuthResult::Failure { remaining_methods } => {
+            if !remaining_methods
+                .iter()
+                .any(|m| *m == MethodKind::KeyboardInteractive)
+            {
+                return Err(ConnError::AuthFailed("password authentication failed".into()));
+            }
+        }
     }
 
-    async fn resize_pty(&mut self, _cols: u16, _rows: u16) -> Result<(), ConnError> {
+    let mut resp = handle
+        .authenticate_keyboard_interactive_start(user, None)
+        .await
+        .map_err(|e| ConnError::Connect(format!("{e}")))?;
+
+    for _ in 0..8 {
+        match resp {
+            KeyboardInteractiveAuthResponse::Success => return Ok(()),
+            KeyboardInteractiveAuthResponse::Failure { .. } => {
+                return Err(ConnError::AuthFailed(
+                    "keyboard-interactive authentication failed".into(),
+                ));
+            }
+            KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+                let answers = prompts.iter().map(|_| password.to_string()).collect();
+                resp = handle
+                    .authenticate_keyboard_interactive_respond(answers)
+                    .await
+                    .map_err(|e| ConnError::Connect(format!("{e}")))?;
+            }
+        }
+    }
+    Err(ConnError::AuthFailed(
+        "keyboard-interactive authentication incomplete".into(),
+    ))
+}
+
+enum ShellCtrl {
+    Data(Vec<u8>),
+    Resize { cols: u16, rows: u16 },
+}
+
+async fn open_shell_io(
+    session: Arc<Handle<ClientHandler>>,
+    term_type: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<SshIoSession, ConnError> {
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| ConnError::Connect(format!("open shell channel: {e}")))?;
+
+    channel
+        .request_pty(
+            true,
+            if term_type.is_empty() {
+                "xterm-256color"
+            } else {
+                term_type
+            },
+            cols.max(1) as u32,
+            rows.max(1) as u32,
+            0,
+            0,
+            &[],
+        )
+        .await
+        .map_err(|e| ConnError::Connect(format!("request pty: {e}")))?;
+    channel
+        .request_shell(true)
+        .await
+        .map_err(|e| ConnError::Connect(format!("request shell: {e}")))?;
+
+    let (out_tx, out_rx) = mpsc::sync_channel::<Vec<u8>>(512);
+    let (ctrl_tx, mut ctrl_rx) = tmpsc::unbounded_channel::<ShellCtrl>();
+    let alive = Arc::new(AtomicBool::new(true));
+    let alive_bridge = Arc::clone(&alive);
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                ctrl = ctrl_rx.recv() => {
+                    match ctrl {
+                        Some(ShellCtrl::Data(buf)) => {
+                            if buf.is_empty() {
+                                continue;
+                            }
+                            if let Err(err) = channel.data(Cursor::new(buf)).await {
+                                tracing::debug!("russh shell write: {err}");
+                                break;
+                            }
+                        }
+                        Some(ShellCtrl::Resize { cols, rows }) => {
+                            let _ = channel
+                                .window_change(cols.max(1) as u32, rows.max(1) as u32, 0, 0)
+                                .await;
+                        }
+                        None => break,
+                    }
+                }
+                msg = channel.wait() => {
+                    match msg {
+                        Some(ChannelMsg::Data { ref data }) => {
+                            if out_tx.send(data.to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                        Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                            let bytes: &[u8] = data.as_ref();
+                            if out_tx.send(bytes.to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                        Some(ChannelMsg::Eof) | None => break,
+                        Some(ChannelMsg::ExitStatus { .. }) => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        alive_bridge.store(false, Ordering::SeqCst);
+        let _ = channel.eof().await;
+        let _ = channel.close().await;
+    });
+
+    let reader: Box<dyn Read + Send> = Box::new(PipeReader {
+        rx: out_rx,
+        leftover: Vec::new(),
+        pos: 0,
+        alive: Arc::clone(&alive),
+    });
+    let writer: Box<dyn Write + Send> = Box::new(PipeWriter {
+        tx: ctrl_tx.clone(),
+        alive: Arc::clone(&alive),
+    });
+
+    let resize_tx = ctrl_tx;
+    let resize = Arc::new(move |c: u16, r: u16| -> Result<(), ConnError> {
+        resize_tx
+            .send(ShellCtrl::Resize { cols: c, rows: r })
+            .map_err(|_| ConnError::NotConnected)?;
+        Ok(())
+    });
+
+    SshIoSession::spawn(reader, writer, cols, rows, Some(resize), Vec::new(), None)
+}
+
+struct PipeReader {
+    rx: mpsc::Receiver<Vec<u8>>,
+    leftover: Vec<u8>,
+    pos: usize,
+    alive: Arc<AtomicBool>,
+}
+
+impl Read for PipeReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos < self.leftover.len() {
+            let n = (self.leftover.len() - self.pos).min(buf.len());
+            buf[..n].copy_from_slice(&self.leftover[self.pos..self.pos + n]);
+            self.pos += n;
+            if self.pos >= self.leftover.len() {
+                self.leftover.clear();
+                self.pos = 0;
+            }
+            return Ok(n);
+        }
+        match self.rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(chunk) => {
+                if chunk.is_empty() {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                let n = chunk.len().min(buf.len());
+                buf[..n].copy_from_slice(&chunk[..n]);
+                if n < chunk.len() {
+                    self.leftover = chunk[n..].to_vec();
+                    self.pos = 0;
+                }
+                Ok(n)
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if !self.alive.load(Ordering::SeqCst) {
+                    Ok(0)
+                } else {
+                    Err(io::ErrorKind::WouldBlock.into())
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => Ok(0),
+        }
+    }
+}
+
+struct PipeWriter {
+    tx: tmpsc::UnboundedSender<ShellCtrl>,
+    alive: Arc<AtomicBool>,
+}
+
+impl Write for PipeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !self.alive.load(Ordering::SeqCst) {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "shell closed"));
+        }
+        self.tx
+            .send(ShellCtrl::Data(buf.to_vec()))
+            .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
 
-    async fn disconnect(&mut self) -> Result<(), ConnError> {
-        self.alive = false;
-        Ok(())
-    }
+struct RusshRemoteExec {
+    session: Arc<Handle<ClientHandler>>,
+    host: String,
+}
 
-    fn is_alive(&self) -> bool {
-        self.alive
+impl RemoteExec for RusshRemoteExec {
+    fn run_command(
+        &self,
+        _vault: Option<&Vault>,
+        remote_cmd: &str,
+    ) -> Result<String, ConnError> {
+        let session = Arc::clone(&self.session);
+        let wrapped = wrap_sh_c(remote_cmd);
+        let host = self.host.clone();
+        runtime()
+            .block_on(async move {
+                let mut channel = session.channel_open_session().await.map_err(|e| {
+                    ConnError::Connect(format!("exec channel {host}: {e}"))
+                })?;
+                channel
+                    .exec(true, wrapped)
+                    .await
+                    .map_err(|e| ConnError::Connect(format!("exec: {e}")))?;
+
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let mut status = None;
+                loop {
+                    match channel.wait().await {
+                        Some(ChannelMsg::Data { ref data }) => stdout.extend_from_slice(data),
+                        Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                            stderr.extend_from_slice(data)
+                        }
+                        Some(ChannelMsg::ExitStatus { exit_status }) => status = Some(exit_status),
+                        Some(ChannelMsg::Eof) | None => break,
+                        _ => {}
+                    }
+                }
+                let _ = channel.close().await;
+
+                let text = String::from_utf8_lossy(&stdout).into_owned();
+                let err_s = String::from_utf8_lossy(&stderr);
+                let body = if text.contains("VSTERM_BEGIN") {
+                    text
+                } else if err_s.contains("VSTERM_BEGIN") {
+                    err_s.into_owned()
+                } else {
+                    let mut combined = text;
+                    if !err_s.is_empty() {
+                        if !combined.is_empty() {
+                            combined.push('\n');
+                        }
+                        combined.push_str(&err_s);
+                    }
+                    combined
+                };
+
+                if let Some(code) = status {
+                    if code != 0 && !body.contains("VSTERM_BEGIN") && body.trim().is_empty() {
+                        return Err(ConnError::Connect(format!(
+                            "remote command exit {code}"
+                        )));
+                    }
+                }
+                Ok(body)
+            })
     }
+}
+
+fn wrap_sh_c(script: &str) -> String {
+    format!(
+        "sh -s <<'VSTERM_EOF'\n{}\nVSTERM_EOF",
+        script.trim()
+    )
 }

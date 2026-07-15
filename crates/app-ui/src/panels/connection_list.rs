@@ -8,6 +8,8 @@ const TAB_H: f32 = 40.0;
 pub enum ConnAction {
     Select(ConnectionId),
     Close(ConnectionId),
+    /// Click the status light on a dead/failed tab to reconnect in place.
+    Reconnect(ConnectionId),
 }
 
 pub fn show(ui: &mut Ui, mgr: &Arc<ConnectionManager>) -> (Option<ConnAction>, Option<egui::Rect>) {
@@ -38,6 +40,7 @@ pub fn show(ui: &mut Ui, mgr: &Arc<ConnectionManager>) -> (Option<ConnAction>, O
                 match host_tab(ui, w, meta, is_active) {
                     Some(ConnAction::Close(id)) => action = Some(ConnAction::Close(id)),
                     Some(ConnAction::Select(id)) => action = Some(ConnAction::Select(id)),
+                    Some(ConnAction::Reconnect(id)) => action = Some(ConnAction::Reconnect(id)),
                     None => {}
                 }
                 if is_active {
@@ -144,7 +147,31 @@ fn host_tab(
         ConnectionState::Disconnected => Color32::from_rgb(150, 154, 162),
         ConnectionState::Failed => Color32::from_rgb(200, 60, 60),
     };
-    ui.painter().circle_filled(egui::pos2(x + 3.5, y), 3.5, state_color);
+    let light_center = egui::pos2(x + 3.5, y);
+    ui.painter().circle_filled(light_center, 3.5, state_color);
+    // Generous hit target: gray/red light reconnects without needing a tiny click.
+    let light_rect = egui::Rect::from_center_size(light_center, egui::vec2(16.0, 16.0));
+    let light_resp = ui.interact(
+        light_rect,
+        ui.id().with("status").with(meta.id.0),
+        Sense::click(),
+    );
+    let can_reconnect = matches!(
+        meta.state,
+        ConnectionState::Disconnected | ConnectionState::Failed
+    );
+    let light_resp = if can_reconnect {
+        light_resp.on_hover_text(i18n::t("conn.reconnect_hint"))
+    } else {
+        light_resp
+    };
+    if can_reconnect && light_resp.hovered() {
+        ui.painter().circle_stroke(
+            light_center,
+            5.5,
+            egui::Stroke::new(1.0, Color32::from_rgb(90, 100, 120)),
+        );
+    }
     x += 12.0;
 
     let text_right = close_rect.min.x - 4.0;
@@ -182,10 +209,13 @@ fn host_tab(
     if close_resp.clicked() {
         return Some(ConnAction::Close(meta.id));
     }
-    if resp.clicked() && !close_resp.clicked() {
+    if can_reconnect && light_resp.clicked() {
+        return Some(ConnAction::Reconnect(meta.id));
+    }
+    if resp.clicked() && !close_resp.clicked() && !light_resp.clicked() {
         return Some(ConnAction::Select(meta.id));
     }
-    if resp.hovered() || close_resp.hovered() {
+    if resp.hovered() || close_resp.hovered() || (can_reconnect && light_resp.hovered()) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     None

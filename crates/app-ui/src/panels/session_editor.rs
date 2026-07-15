@@ -20,6 +20,7 @@ pub struct SessionEditorState {
     pub port: String,
     pub username: String,
     pub auth_type: AuthType,
+    pub backend: BackendKind,
     pub password: String,
     pub save_password: bool,
     /// Edit mode: already has a vault password ref.
@@ -45,6 +46,7 @@ impl SessionEditorState {
             port: "22".into(),
             username: String::new(),
             auth_type: AuthType::Password,
+            backend: BackendKind::Auto,
             password: String::new(),
             save_password: false,
             has_saved_password: false,
@@ -85,6 +87,7 @@ impl SessionEditorState {
             port: cfg.port.to_string(),
             username: cfg.username.clone(),
             auth_type,
+            backend: cfg.backend,
             password: String::new(),
             save_password: password_ref
                 .as_ref()
@@ -194,7 +197,32 @@ pub fn show(
                         );
                     });
                     ui.end_row();
+
+                    ui.label(i18n::t("dialog.session.backend"));
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(
+                            &mut state.backend,
+                            BackendKind::Auto,
+                            i18n::t("dialog.session.backend_auto"),
+                        );
+                        ui.selectable_value(
+                            &mut state.backend,
+                            BackendKind::System,
+                            i18n::t("dialog.session.backend_system"),
+                        );
+                        ui.selectable_value(
+                            &mut state.backend,
+                            BackendKind::Builtin,
+                            i18n::t("dialog.session.backend_builtin"),
+                        );
+                    });
+                    ui.end_row();
                 });
+                ui.label(
+                    RichText::new(i18n::t("dialog.session.backend_hint"))
+                        .size(11.0)
+                        .color(Color32::from_rgb(100, 105, 115)),
+                );
 
             ui.add_space(6.0);
             match state.auth_type {
@@ -451,7 +479,7 @@ pub fn build_session(state: &SessionEditorState) -> Result<BuiltSession, String>
             host: state.host.trim().to_string(),
             port,
             username: state.username.trim().to_string(),
-            backend: BackendKind::System,
+            backend: state.backend,
             auth,
             color_tag: state.color_tag.clone(),
             term_type: "xterm-256color".into(),

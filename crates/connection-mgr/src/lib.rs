@@ -2,6 +2,7 @@
 
 mod backend;
 mod error;
+mod known_hosts;
 mod manager;
 mod process;
 mod remote_exec;
@@ -13,7 +14,7 @@ pub use backend::{RemoteExec, SshBackend, SshChannel, SshSession};
 pub use error::ConnError;
 pub use manager::{
     ActiveConnection, ConnectionId, ConnectionManager, ConnectionMeta, ConnectionState,
-    SharedConnectionManager,
+    EstablishedSsh, SharedConnectionManager,
 };
 pub use process::{command as gui_command, hide_console};
 pub use remote_exec::RemoteSession;
@@ -23,6 +24,5 @@ pub use system_ssh::{
 };
 pub use user_error::{ConnErrorKey, ConnectFailure};
 
-// Russh backend will be fully wired in stage 4; stub is exported for the trait surface.
 pub mod russh_backend;
 pub use russh_backend::RusshBackend;

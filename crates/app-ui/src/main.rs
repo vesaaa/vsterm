@@ -17,6 +17,7 @@ mod term_highlight;
 mod terminal_view;
 mod theme;
 mod ui_icon;
+mod ctx_menu;
 
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;

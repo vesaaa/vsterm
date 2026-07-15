@@ -14,26 +14,39 @@ pub const COLOR_ACCENT: Color32 = Color32::from_rgb(30, 80, 160);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Icon {
     Folder,
+    FolderPlus,
     Server,
     File,
     Copy,
     Paste,
+    Terminal,
+    Pencil,
+    Trash,
+    Plus,
 }
 
 impl Icon {
     fn lucide_name(self) -> &'static str {
         match self {
             Icon::Folder => "folder",
+            Icon::FolderPlus => "folder-plus",
             Icon::Server => "server",
             Icon::File => "file",
             Icon::Copy => "copy",
             Icon::Paste => "clipboard-paste",
+            Icon::Terminal => "terminal",
+            Icon::Pencil => "pencil",
+            Icon::Trash => "trash-2",
+            Icon::Plus => "plus",
         }
     }
 
     fn fallback_name(self) -> Option<&'static str> {
         match self {
             Icon::Paste => Some("clipboard"),
+            Icon::Trash => Some("trash"),
+            Icon::FolderPlus => Some("folder"),
+            Icon::Pencil => Some("pen-line"),
             _ => None,
         }
     }
@@ -76,6 +89,22 @@ fn resolve_uncached(icon: Icon) -> Option<Resolved> {
 #[allow(dead_code)]
 pub fn family_name(icon: Icon) -> Option<String> {
     resolve(icon).map(|r| r.family)
+}
+
+/// Glyph char or a simple fallback.
+pub fn glyph_or_dot(icon: Icon) -> String {
+    match resolve(icon) {
+        Some(r) => r.glyph.to_string(),
+        None => "·".into(),
+    }
+}
+
+/// FontId for icon painting (Lucide family when available).
+pub fn font_id(icon: Icon, size: f32) -> FontId {
+    match resolve(icon) {
+        Some(r) => FontId::new(size, FontFamily::Name(r.family.into())),
+        None => FontId::proportional(size),
+    }
 }
 
 /// RichText for the icon glyph alone.

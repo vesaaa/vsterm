@@ -79,10 +79,11 @@ impl SessionTree {
             .any(|n| matches!(n, TreeNode::Folder { id, .. } if id == folder_id))
     }
 
-    /// `(folder_id, folder_name)` for every folder, depth-first.
+    /// `(folder_id, display_label)` for every folder, depth-first.
+    /// Nested folders use a `Parent / Child` label.
     pub fn list_folders(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        collect_folders(&self.root, &mut out);
+        collect_folders(&self.root, None, &mut out);
         out
     }
 
@@ -134,15 +135,55 @@ impl SessionTree {
         rename_session_in_list(&mut self.root, session_ref, new_name)
     }
 
-    pub fn add_folder(&mut self, name: String, id: String) -> Result<(), crate::SessionTreeError> {
+    /// Maximum folder nesting depth (root children = 1, their children = 2).
+    pub const MAX_FOLDER_DEPTH: usize = 2;
+
+    /// Depth of a folder: `1` = top-level under root, `2` = nested once. `None` if missing.
+    pub fn folder_depth(&self, folder_id: &str) -> Option<usize> {
+        find_folder_depth(&self.root, folder_id, 1)
+    }
+
+    /// True when `parent_id` is a top-level folder (may receive a subfolder).
+    pub fn can_nest_under(&self, parent_id: &str) -> bool {
+        matches!(self.folder_depth(parent_id), Some(d) if d < Self::MAX_FOLDER_DEPTH)
+    }
+
+    /// Create a folder under `parent_id`, or at root when `parent_id` is `None`.
+    /// Nesting deeper than [`Self::MAX_FOLDER_DEPTH`] is rejected.
+    pub fn add_folder(
+        &mut self,
+        name: String,
+        id: String,
+        parent_id: Option<&str>,
+    ) -> Result<(), crate::SessionTreeError> {
         if self.contains_folder_id(&id) {
             return Err(crate::SessionTreeError::DuplicateId(id));
         }
-        self.root.push(TreeNode::Folder {
+        let node = TreeNode::Folder {
             name,
             id,
             children: Vec::new(),
-        });
+        };
+        match parent_id {
+            None => {
+                self.root.push(node);
+            }
+            Some(pid) => {
+                let depth = self.folder_depth(pid).ok_or_else(|| {
+                    crate::SessionTreeError::NotFound(format!("folder:{pid}"))
+                })?;
+                if depth >= Self::MAX_FOLDER_DEPTH {
+                    return Err(crate::SessionTreeError::InvalidPath(format!(
+                        "folder nesting limited to {} levels",
+                        Self::MAX_FOLDER_DEPTH
+                    )));
+                }
+                let children = find_folder_children_mut(&mut self.root, pid).ok_or_else(|| {
+                    crate::SessionTreeError::NotFound(format!("folder:{pid}"))
+                })?;
+                children.push(node);
+            }
+        }
         Ok(())
     }
 
@@ -164,13 +205,33 @@ impl SessionTree {
     }
 }
 
-fn collect_folders(nodes: &[TreeNode], out: &mut Vec<(String, String)>) {
+/// Collect folders as `(id, display_label)` depth-first.
+/// Nested folders use `Parent / Child` labels for combo boxes.
+fn collect_folders(nodes: &[TreeNode], parent_label: Option<&str>, out: &mut Vec<(String, String)>) {
     for n in nodes {
         if let TreeNode::Folder { name, id, children } = n {
-            out.push((id.clone(), name.clone()));
-            collect_folders(children, out);
+            let label = match parent_label {
+                Some(p) => format!("{p} / {name}"),
+                None => name.clone(),
+            };
+            out.push((id.clone(), label.clone()));
+            collect_folders(children, Some(&label), out);
         }
     }
+}
+
+fn find_folder_depth(nodes: &[TreeNode], folder_id: &str, depth: usize) -> Option<usize> {
+    for n in nodes {
+        if let TreeNode::Folder { id, children, .. } = n {
+            if id == folder_id {
+                return Some(depth);
+            }
+            if let Some(d) = find_folder_depth(children, folder_id, depth + 1) {
+                return Some(d);
+            }
+        }
+    }
+    None
 }
 
 fn find_folder_of_session(nodes: &[TreeNode], session_ref: &str) -> Option<String> {
@@ -362,7 +423,7 @@ root:
     #[test]
     fn insert_relocate_remove() {
         let mut tree = SessionTree::new();
-        tree.add_folder("Prod".into(), "f1".into()).unwrap();
+        tree.add_folder("Prod".into(), "f1".into(), None).unwrap();
         tree.insert_session(Some("f1"), "web".into(), "web.yaml".into())
             .unwrap();
         assert!(tree.contains_session_ref("web.yaml"));
@@ -373,5 +434,26 @@ root:
         assert!(tree.remove_session_node("web.yaml").is_some());
         assert!(!tree.contains_session_ref("web.yaml"));
         tree.remove_folder("f1").unwrap();
+    }
+
+    #[test]
+    fn nested_folder_one_level_only() {
+        let mut tree = SessionTree::new();
+        tree.add_folder("Prod".into(), "f1".into(), None).unwrap();
+        assert_eq!(tree.folder_depth("f1"), Some(1));
+        assert!(tree.can_nest_under("f1"));
+        tree.add_folder("Web".into(), "f2".into(), Some("f1"))
+            .unwrap();
+        assert_eq!(tree.folder_depth("f2"), Some(2));
+        assert!(!tree.can_nest_under("f2"));
+        assert!(tree
+            .add_folder("TooDeep".into(), "f3".into(), Some("f2"))
+            .is_err());
+        let labels = tree.list_folders();
+        assert_eq!(labels[0].1, "Prod");
+        assert_eq!(labels[1].1, "Prod / Web");
+        tree.insert_session(Some("f2"), "app".into(), "app.yaml".into())
+            .unwrap();
+        assert_eq!(tree.folder_of_session("app.yaml").as_deref(), Some("f2"));
     }
 }

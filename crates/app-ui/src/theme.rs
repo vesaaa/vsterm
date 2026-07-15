@@ -12,10 +12,14 @@ pub fn apply(ctx: &Context) {
     visuals.widgets.active.bg_fill = Color32::from_rgb(200, 210, 230);
     visuals.selection.bg_fill = Color32::from_rgb(200, 220, 250);
     visuals.override_text_color = Some(Color32::from_rgb(52, 56, 62));
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(52, 56, 62));
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(52, 56, 62));
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(42, 46, 52));
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(38, 42, 48));
+    visuals.widgets.noninteractive.fg_stroke =
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(52, 56, 62));
+    visuals.widgets.inactive.fg_stroke =
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(52, 56, 62));
+    visuals.widgets.hovered.fg_stroke =
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(42, 46, 52));
+    visuals.widgets.active.fg_stroke =
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(38, 42, 48));
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();

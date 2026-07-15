@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BackendKind {
-    /// Prefer system `ssh` if available, else fall back to builtin russh.
+    /// Prefer builtin russh; users may pick system OpenSSH for special hosts.
     #[default]
     Auto,
     /// Pure Rust russh engine.

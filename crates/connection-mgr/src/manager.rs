@@ -1,6 +1,7 @@
 use crate::backend::SshSession;
 use crate::error::ConnError;
 use crate::remote_exec::RemoteSession;
+use crate::russh_backend::RusshBackend;
 use crate::ssh_io::SshIoSession;
 use crate::system_ssh::{backend_unavailable_error, resolve_backend, SystemSshBackend};
 use parking_lot::Mutex;
@@ -39,6 +40,12 @@ pub enum ConnectionState {
     Connected,
     Disconnected,
     Failed,
+}
+
+/// Authenticated SSH session ready to insert into the manager.
+pub struct EstablishedSsh {
+    pub io: SshIoSession,
+    pub remote: RemoteSession,
 }
 
 enum ConnectionIo {
@@ -255,11 +262,10 @@ impl ConnectionManager {
     pub fn insert_ssh_connected(
         &self,
         config: &SessionConfig,
-        remote: RemoteSession,
-        io: SshIoSession,
+        established: EstablishedSsh,
     ) -> ConnectionId {
         let id = ConnectionId::new();
-        let terminal = io.terminal().clone();
+        let terminal = established.io.terminal().clone();
         let conn = ActiveConnection {
             id,
             title: config.name.clone(),
@@ -267,10 +273,10 @@ impl ConnectionManager {
             state: ConnectionState::Connected,
             session_id: Some(config.id.clone()),
             terminal,
-            io: Some(ConnectionIo::Ssh(io)),
+            io: Some(ConnectionIo::Ssh(established.io)),
             ssh_session: None,
             error_message: None,
-            remote: Some(remote),
+            remote: Some(established.remote),
             is_local_shell: false,
         };
         self.insert(conn);
@@ -284,20 +290,38 @@ impl ConnectionManager {
         interactive_password: Option<String>,
         cols: u16,
         rows: u16,
-    ) -> Result<SshIoSession, ConnError> {
+    ) -> Result<EstablishedSsh, ConnError> {
         let resolved = resolve_backend(config.backend);
         match resolved {
             BackendKind::System => {
-                SystemSshBackend::open_interactive(
+                let io = SystemSshBackend::open_interactive(
+                    config,
+                    vault,
+                    interactive_password.clone(),
+                    cols,
+                    rows,
+                )
+                .await?;
+                Ok(EstablishedSsh {
+                    io,
+                    remote: RemoteSession::system(config.clone(), interactive_password),
+                })
+            }
+            BackendKind::Builtin => {
+                let est = RusshBackend::open_interactive(
                     config,
                     vault,
                     interactive_password,
                     cols,
                     rows,
                 )
-                .await
+                .await?;
+                Ok(EstablishedSsh {
+                    io: est.io,
+                    remote: est.remote,
+                })
             }
-            BackendKind::Builtin | BackendKind::Auto => Err(backend_unavailable_error(resolved)),
+            BackendKind::Auto => Err(backend_unavailable_error(resolved)),
         }
     }
 
@@ -307,24 +331,8 @@ impl ConnectionManager {
         config: &SessionConfig,
         vault: Option<&Vault>,
     ) -> Result<ConnectionId, ConnError> {
-        let io = Self::establish_ssh(config, vault, None, 80, 24).await?;
-        let id = ConnectionId::new();
-        let terminal = io.terminal().clone();
-        let conn = ActiveConnection {
-            id,
-            title: config.name.clone(),
-            color_tag: config.color_tag.clone(),
-            state: ConnectionState::Connected,
-            session_id: Some(config.id.clone()),
-            terminal,
-            io: Some(ConnectionIo::Ssh(io)),
-            ssh_session: None,
-            error_message: None,
-            remote: Some(RemoteSession::system(config.clone(), None)),
-            is_local_shell: false,
-        };
-        self.insert(conn);
-        Ok(id)
+        let established = Self::establish_ssh(config, vault, None, 80, 24).await?;
+        Ok(self.insert_ssh_connected(config, established))
     }
 
     fn insert(&self, conn: ActiveConnection) {
@@ -447,7 +455,7 @@ impl ConnectionManager {
         conn.resize(cols, rows)
     }
 
-    /// Drop dead connections (SSH process exited).
+    /// Drop dead connections (SSH process exited). Keep the tab for reconnect.
     pub fn reap_dead(&self) {
         let dead: Vec<ConnectionId> = {
             let conns = self.connections.lock();
@@ -464,9 +472,104 @@ impl ConnectionManager {
             if let Some(conn) = self.connections.lock().get_mut(&id) {
                 conn.state = ConnectionState::Disconnected;
                 conn.io = None;
+                conn.remote = None;
+                conn.ssh_session = None;
             }
             self.bump();
         }
+    }
+
+    pub fn session_id_of(&self, id: ConnectionId) -> Option<String> {
+        self.connections
+            .lock()
+            .get(&id)
+            .and_then(|c| c.session_id.clone())
+    }
+
+    pub fn connection_state(&self, id: ConnectionId) -> Option<ConnectionState> {
+        self.connections.lock().get(&id).map(|c| c.state)
+    }
+
+    /// Mark an existing host tab as connecting (used by in-place reconnect).
+    pub fn mark_connecting(&self, id: ConnectionId) -> bool {
+        let mut conns = self.connections.lock();
+        let Some(conn) = conns.get_mut(&id) else {
+            return false;
+        };
+        if conn.is_local_shell {
+            return false;
+        }
+        conn.state = ConnectionState::Connecting;
+        conn.error_message = None;
+        conn.io = None;
+        conn.remote = None;
+        conn.ssh_session = None;
+        drop(conns);
+        self.bump();
+        true
+    }
+
+    pub fn mark_failed(&self, id: ConnectionId, message: impl Into<String>) {
+        let mut conns = self.connections.lock();
+        let Some(conn) = conns.get_mut(&id) else {
+            return;
+        };
+        conn.state = ConnectionState::Failed;
+        conn.error_message = Some(message.into());
+        conn.io = None;
+        conn.remote = None;
+        conn.ssh_session = None;
+        drop(conns);
+        self.bump();
+    }
+
+    pub fn mark_disconnected(&self, id: ConnectionId) {
+        let mut conns = self.connections.lock();
+        let Some(conn) = conns.get_mut(&id) else {
+            return;
+        };
+        if conn.is_local_shell {
+            return;
+        }
+        conn.state = ConnectionState::Disconnected;
+        conn.error_message = None;
+        conn.io = None;
+        conn.remote = None;
+        conn.ssh_session = None;
+        drop(conns);
+        self.bump();
+    }
+
+    /// Replace I/O on an existing tab after a successful reconnect.
+    /// Returns the established session if the tab no longer exists (caller may insert fresh).
+    pub fn replace_ssh_connected(
+        &self,
+        id: ConnectionId,
+        config: &SessionConfig,
+        established: EstablishedSsh,
+    ) -> Result<(), EstablishedSsh> {
+        let hook = self.repaint_wake.lock().clone();
+        let mut conns = self.connections.lock();
+        let Some(conn) = conns.get_mut(&id) else {
+            return Err(established);
+        };
+        conn.title = config.name.clone();
+        conn.color_tag = config.color_tag.clone();
+        conn.session_id = Some(config.id.clone());
+        conn.terminal = established.io.terminal().clone();
+        if let Some(h) = hook {
+            conn.terminal.set_output_hook(Some(h));
+        }
+        conn.io = Some(ConnectionIo::Ssh(established.io));
+        conn.remote = Some(established.remote);
+        conn.ssh_session = None;
+        conn.state = ConnectionState::Connected;
+        conn.error_message = None;
+        conn.is_local_shell = false;
+        drop(conns);
+        *self.active.lock() = Some(id);
+        self.bump();
+        Ok(())
     }
 }
 

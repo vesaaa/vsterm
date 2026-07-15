@@ -116,6 +116,11 @@ impl TerminalView {
             .unwrap_or(false);
         let menu_open = resp.context_menu_opened();
 
+        // I-beam only over the terminal cell grid (not chrome / scrollbar).
+        if resp.hovered() && !menu_open {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
+
         // Mouse wheel → scrollback (positive wheel = into history).
         if resp.hovered() {
             let scroll_y = ui.input(|i| {
@@ -259,29 +264,33 @@ impl TerminalView {
         let can_copy = selected_text.is_some();
 
         resp.context_menu(|ui| {
-            ui.set_min_width(128.0);
-            let copy_resp = crate::ui_icon::button(
+            crate::ctx_menu::prepare(ui);
+            let copy_sc = crate::ctx_menu::shortcut_ctrl("C");
+            let paste_sc = crate::ctx_menu::shortcut_ctrl("V");
+            if crate::ctx_menu::item(
                 ui,
                 crate::ui_icon::Icon::Copy,
                 &crate::i18n::t("term.ctx.copy"),
-                14.0,
+                Some(&copy_sc),
                 can_copy,
-            );
-            if copy_resp.clicked_by(PointerButton::Primary) {
+            )
+            .clicked()
+            {
                 if let Some(text) = &selected_text {
                     ui.ctx().copy_text(text.clone());
                 }
                 ui.close_menu();
             }
 
-            let paste_resp = crate::ui_icon::button(
+            if crate::ctx_menu::item(
                 ui,
                 crate::ui_icon::Icon::Paste,
                 &crate::i18n::t("term.ctx.paste"),
-                14.0,
+                Some(&paste_sc),
                 can_input,
-            );
-            if paste_resp.clicked_by(PointerButton::Primary) {
+            )
+            .clicked()
+            {
                 if let Some(text) = read_clipboard_text() {
                     paste_to_session(mgr, &text);
                 }

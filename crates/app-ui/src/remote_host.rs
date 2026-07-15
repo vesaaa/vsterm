@@ -133,6 +133,18 @@ struct RemoteState {
     last_tick: Instant,
     selected_nic: Option<String>,
     last_error: Option<String>,
+    /// Per-host last view so tab switches keep charts instead of blanking.
+    cache: HashMap<String, CachedHostView>,
+    /// After a host switch, first successful poll only baselines counters (no bps).
+    rate_baseline_pending: bool,
+}
+
+#[derive(Clone)]
+struct CachedHostView {
+    snapshot: HostSnapshot,
+    selected_nic: Option<String>,
+    last_error: Option<String>,
+    last_tick: Instant,
 }
 
 #[derive(Clone)]
@@ -149,6 +161,8 @@ impl RemoteHostService {
             last_tick: Instant::now(),
             selected_nic: None,
             last_error: None,
+            cache: HashMap::new(),
+            rate_baseline_pending: false,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let worker = Arc::clone(&inner);
@@ -165,31 +179,53 @@ impl RemoteHostService {
                         match poll_once(&worker) {
                             Ok(snap) => {
                                 let mut g = worker.lock();
-                                if g.target.is_some() {
-                                    let elapsed = g.last_tick.elapsed().as_secs_f64().max(0.05);
-                                    let prev: HashMap<String, (u64, u64)> = g
-                                        .snapshot
-                                        .nics
-                                        .iter()
-                                        .map(|n| (n.name.clone(), (n.rx_bytes, n.tx_bytes)))
-                                        .collect();
+                                if let Some(key) = g.target.as_ref().map(|t| t.session.display_key())
+                                {
                                     let mut snap = snap;
-                                    let mut rates = HashMap::new();
-                                    for nic in &mut snap.nics {
-                                        if let Some(&(prx, ptx)) = prev.get(&nic.name) {
-                                            nic.rx_bps =
-                                                nic.rx_bytes.saturating_sub(prx) as f64 / elapsed;
-                                            nic.tx_bps =
-                                                nic.tx_bytes.saturating_sub(ptx) as f64 / elapsed;
+                                    let baseline = g.rate_baseline_pending;
+                                    if baseline {
+                                        // Keep prior chart history; do not invent bps from stale counters.
+                                        for nic in &mut snap.nics {
+                                            nic.rx_bps = 0.0;
+                                            nic.tx_bps = 0.0;
                                         }
-                                        rates.insert(nic.name.clone(), {
-                                            let mut q = VecDeque::new();
-                                            q.push_back((nic.rx_bps, nic.tx_bps));
-                                            q
-                                        });
+                                        snap.net_history =
+                                            std::mem::take(&mut g.snapshot.net_history);
+                                        g.rate_baseline_pending = false;
+                                    } else {
+                                        let elapsed =
+                                            g.last_tick.elapsed().as_secs_f64().max(0.05);
+                                        let prev: HashMap<String, (u64, u64)> = g
+                                            .snapshot
+                                            .nics
+                                            .iter()
+                                            .map(|n| {
+                                                (n.name.clone(), (n.rx_bytes, n.tx_bytes))
+                                            })
+                                            .collect();
+                                        let mut rates = HashMap::new();
+                                        for nic in &mut snap.nics {
+                                            if let Some(&(prx, ptx)) = prev.get(&nic.name) {
+                                                nic.rx_bps = nic.rx_bytes.saturating_sub(prx)
+                                                    as f64
+                                                    / elapsed;
+                                                nic.tx_bps = nic.tx_bytes.saturating_sub(ptx)
+                                                    as f64
+                                                    / elapsed;
+                                            }
+                                            rates.insert(nic.name.clone(), {
+                                                let mut q = VecDeque::new();
+                                                q.push_back((nic.rx_bps, nic.tx_bps));
+                                                q
+                                            });
+                                        }
+                                        merge_net_history(
+                                            &mut g.snapshot.net_history,
+                                            &rates,
+                                        );
+                                        snap.net_history =
+                                            std::mem::take(&mut g.snapshot.net_history);
                                     }
-                                    merge_net_history(&mut g.snapshot.net_history, &rates);
-                                    snap.net_history = std::mem::take(&mut g.snapshot.net_history);
                                     if g.selected_nic.is_none()
                                         || g.selected_nic.as_ref().is_some_and(|cur| {
                                             !snap.nics.iter().any(|n| n.name == *cur)
@@ -203,12 +239,15 @@ impl RemoteHostService {
                                     g.snapshot = snap;
                                     g.last_tick = Instant::now();
                                     g.last_error = None;
+                                    store_cache(&mut g, &key);
                                 }
                             }
                             Err(err) => {
                                 let mut g = worker.lock();
-                                if g.target.is_some() {
+                                if let Some(key) = g.target.as_ref().map(|t| t.session.display_key())
+                                {
                                     g.last_error = Some(err);
+                                    store_cache(&mut g, &key);
                                 }
                             }
                         }
@@ -237,15 +276,41 @@ impl RemoteHostService {
             .as_ref()
             .map(|t| t.session.display_key());
         let next_key = remote.as_ref().map(|r| r.display_key());
+        if prev_key == next_key {
+            // Same host — keep live snapshot; only refresh target handle / vault path.
+            g.target = remote.map(|session| RemoteTarget {
+                session,
+                vault_path: vault_path.unwrap_or_default(),
+            });
+            return;
+        }
+
+        if let Some(key) = prev_key.as_ref() {
+            store_cache(&mut g, key);
+        }
+
         g.target = remote.map(|session| RemoteTarget {
             session,
             vault_path: vault_path.unwrap_or_default(),
         });
-        if g.target.is_none() || prev_key != next_key {
-            g.snapshot = HostSnapshot::default();
-            g.selected_nic = None;
-            g.last_error = None;
+
+        if let Some(key) = next_key.as_ref() {
+            if let Some(cached) = g.cache.get(key).cloned() {
+                g.snapshot = cached.snapshot;
+                g.selected_nic = cached.selected_nic;
+                g.last_error = cached.last_error;
+                g.last_tick = Instant::now();
+                g.rate_baseline_pending = true;
+                return;
+            }
         }
+
+        // First visit to this host — blank until the worker fills it.
+        g.snapshot = HostSnapshot::default();
+        g.selected_nic = None;
+        g.last_error = None;
+        g.last_tick = Instant::now();
+        g.rate_baseline_pending = true;
     }
 
     pub fn snapshot(&self) -> Option<HostSnapshot> {
@@ -265,7 +330,11 @@ impl RemoteHostService {
     }
 
     pub fn set_selected_nic(&self, name: Option<String>) {
-        self.inner.lock().selected_nic = name;
+        let mut g = self.inner.lock();
+        g.selected_nic = name;
+        if let Some(key) = g.target.as_ref().map(|t| t.session.display_key()) {
+            store_cache(&mut g, &key);
+        }
     }
 }
 
@@ -273,6 +342,25 @@ impl Drop for RemoteHostService {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+fn store_cache(g: &mut RemoteState, key: &str) {
+    // Skip caching empty placeholders so a brief blank tab does not wipe a good view.
+    if g.snapshot.hostname.is_empty()
+        && g.snapshot.nics.is_empty()
+        && g.snapshot.cpu_usage == 0.0
+    {
+        return;
+    }
+    g.cache.insert(
+        key.to_string(),
+        CachedHostView {
+            snapshot: g.snapshot.clone(),
+            selected_nic: g.selected_nic.clone(),
+            last_error: g.last_error.clone(),
+            last_tick: g.last_tick,
+        },
+    );
 }
 
 fn poll_once(state: &Arc<Mutex<RemoteState>>) -> Result<HostSnapshot, String> {

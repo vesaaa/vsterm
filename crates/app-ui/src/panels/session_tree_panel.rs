@@ -1,6 +1,6 @@
 use crate::i18n;
 use crate::ui_icon::{self, Icon};
-use egui::{Color32, Ui};
+use egui::{Color32, Sense, Ui};
 use session_tree::{SessionTree, TreeNode};
 
 #[derive(Debug, Clone)]
@@ -15,9 +15,22 @@ pub enum TreeAction {
     AddServer { folder_id: Option<String> },
     EditServer { session_ref: String },
     DeleteServer { session_ref: String, name: String },
-    AddFolder,
+    /// `parent_id = None` → top-level; `Some` → under a first-level folder.
+    AddFolder { parent_id: Option<String> },
     RenameFolder { id: String, name: String },
     DeleteFolder { id: String, name: String },
+    /// Move an existing session into `folder_id` (`None` = root).
+    MoveSession {
+        session_ref: String,
+        name: String,
+        folder_id: Option<String>,
+    },
+}
+
+#[derive(Clone)]
+struct SessionDragPayload {
+    session_ref: String,
+    name: String,
 }
 
 pub fn show(
@@ -44,9 +57,16 @@ pub fn show(
         }
         if ui
             .button(egui::RichText::new(i18n::t("tree.add_folder")).size(12.0))
+            .on_hover_text(i18n::t("tree.add_folder_hint"))
             .clicked()
         {
-            action = Some(TreeAction::AddFolder);
+            let parent_id = match selection {
+                Some(TreeSelection::Folder { id, .. }) if tree.can_nest_under(id) => {
+                    Some(id.clone())
+                }
+                _ => None,
+            };
+            action = Some(TreeAction::AddFolder { parent_id });
         }
     });
     ui.add_space(4.0);
@@ -62,12 +82,22 @@ pub fn show(
     }
 
     ui.add_space(6.0);
+
+    let dragging =
+        egui::DragAndDrop::has_payload_of_type::<SessionDragPayload>(ui.ctx());
+    if dragging {
+        if let Some(a) = root_drop_zone(ui) {
+            action = Some(a);
+        }
+        ui.add_space(4.0);
+    }
+
     egui::ScrollArea::vertical()
         .id_salt("session_tree_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for node in &tree.root {
-                if let Some(a) = render_node(ui, node, selection) {
+                if let Some(a) = render_node(ui, tree, node, selection) {
                     action = Some(a);
                 }
             }
@@ -79,8 +109,36 @@ pub fn show(
     action
 }
 
+fn root_drop_zone(ui: &mut Ui) -> Option<TreeAction> {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(1.0), 26.0),
+        Sense::hover(),
+    );
+    let hovered = resp.dnd_hover_payload::<SessionDragPayload>().is_some();
+    let fill = if hovered {
+        Color32::from_rgba_unmultiplied(60, 120, 210, 40)
+    } else {
+        Color32::from_rgba_unmultiplied(100, 105, 115, 28)
+    };
+    ui.painter().rect_filled(rect, 3.0, fill);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        i18n::t("tree.drop_root"),
+        egui::FontId::proportional(12.0),
+        Color32::from_rgb(70, 74, 82),
+    );
+    resp.dnd_release_payload::<SessionDragPayload>()
+        .map(|p| TreeAction::MoveSession {
+            session_ref: p.session_ref.clone(),
+            name: p.name.clone(),
+            folder_id: None,
+        })
+}
+
 fn render_node(
     ui: &mut Ui,
+    tree: &SessionTree,
     node: &TreeNode,
     selection: &mut Option<TreeSelection>,
 ) -> Option<TreeAction> {
@@ -106,36 +164,92 @@ fn render_node(
                 .show(ui, |ui| {
                     let mut action = None;
                     for child in children {
-                        if let Some(a) = render_node(ui, child, selection) {
+                        if let Some(a) = render_node(ui, tree, child, selection) {
                             action = Some(a);
                         }
                     }
                     action
                 });
 
+            let header = &response.header_response;
+            if header.dnd_hover_payload::<SessionDragPayload>().is_some() {
+                ui.painter().rect_filled(
+                    header.rect,
+                    2.0,
+                    Color32::from_rgba_unmultiplied(60, 120, 210, 36),
+                );
+            }
+            let mut action = header
+                .dnd_release_payload::<SessionDragPayload>()
+                .map(|p| TreeAction::MoveSession {
+                    session_ref: p.session_ref.clone(),
+                    name: p.name.clone(),
+                    folder_id: Some(id.clone()),
+                });
+
             // Click folder header row to select.
-            if response.header_response.clicked() {
+            if header.clicked() {
                 *selection = Some(TreeSelection::Folder {
                     id: id.clone(),
                     name: name.clone(),
                 });
             }
-            let mut action = None;
-            response.header_response.context_menu(|ui| {
-                if ui.button(i18n::t("tree.ctx.add_server")).clicked() {
+            header.context_menu(|ui| {
+                crate::ctx_menu::prepare(ui);
+                if crate::ctx_menu::item(
+                    ui,
+                    Icon::Server,
+                    &i18n::t("tree.ctx.add_server"),
+                    None,
+                    true,
+                )
+                .clicked()
+                {
                     action = Some(TreeAction::AddServer {
                         folder_id: Some(id.clone()),
                     });
                     ui.close_menu();
                 }
-                if ui.button(i18n::t("tree.ctx.rename_folder")).clicked() {
+                if tree.can_nest_under(id)
+                    && crate::ctx_menu::item(
+                        ui,
+                        Icon::FolderPlus,
+                        &i18n::t("tree.ctx.add_subfolder"),
+                        None,
+                        true,
+                    )
+                    .clicked()
+                {
+                    action = Some(TreeAction::AddFolder {
+                        parent_id: Some(id.clone()),
+                    });
+                    ui.close_menu();
+                }
+                crate::ctx_menu::separator(ui);
+                if crate::ctx_menu::item(
+                    ui,
+                    Icon::Pencil,
+                    &i18n::t("tree.ctx.rename_folder"),
+                    None,
+                    true,
+                )
+                .clicked()
+                {
                     action = Some(TreeAction::RenameFolder {
                         id: id.clone(),
                         name: name.clone(),
                     });
                     ui.close_menu();
                 }
-                if ui.button(i18n::t("tree.ctx.delete_folder")).clicked() {
+                if crate::ctx_menu::item(
+                    ui,
+                    Icon::Trash,
+                    &i18n::t("tree.ctx.delete_folder"),
+                    None,
+                    true,
+                )
+                .clicked()
+                {
                     action = Some(TreeAction::DeleteFolder {
                         id: id.clone(),
                         name: name.clone(),
@@ -159,8 +273,13 @@ fn render_node(
             let resp = ui.add(
                 egui::Button::new(label)
                     .frame(false)
+                    .sense(Sense::click_and_drag())
                     .min_size([ui.available_width(), 22.0].into()),
             );
+            resp.dnd_set_drag_payload(SessionDragPayload {
+                session_ref: session_ref.clone(),
+                name: name.clone(),
+            });
             if resp.clicked() {
                 *selection = Some(TreeSelection::Session {
                     name: name.clone(),
@@ -174,21 +293,47 @@ fn render_node(
                 });
             }
             let mut action = None;
-            resp.clone().context_menu(|ui| {
-                if ui.button(i18n::t("tree.ctx.connect")).clicked() {
+            resp.context_menu(|ui| {
+                crate::ctx_menu::prepare(ui);
+                if crate::ctx_menu::item(
+                    ui,
+                    Icon::Terminal,
+                    &i18n::t("tree.ctx.connect"),
+                    None,
+                    true,
+                )
+                .clicked()
+                {
                     action = Some(TreeAction::OpenSession {
                         name: name.clone(),
                         session_ref: session_ref.clone(),
                     });
                     ui.close_menu();
                 }
-                if ui.button(i18n::t("tree.ctx.edit")).clicked() {
+                if crate::ctx_menu::item(
+                    ui,
+                    Icon::Pencil,
+                    &i18n::t("tree.ctx.edit"),
+                    None,
+                    true,
+                )
+                .clicked()
+                {
                     action = Some(TreeAction::EditServer {
                         session_ref: session_ref.clone(),
                     });
                     ui.close_menu();
                 }
-                if ui.button(i18n::t("tree.ctx.delete")).clicked() {
+                crate::ctx_menu::separator(ui);
+                if crate::ctx_menu::item(
+                    ui,
+                    Icon::Trash,
+                    &i18n::t("tree.ctx.delete"),
+                    None,
+                    true,
+                )
+                .clicked()
+                {
                     action = Some(TreeAction::DeleteServer {
                         session_ref: session_ref.clone(),
                         name: name.clone(),
@@ -196,9 +341,7 @@ fn render_node(
                     ui.close_menu();
                 }
             });
-            if resp.hovered() {
-                resp.on_hover_text(i18n::t("tree.open_hint"));
-            }
+            resp.on_hover_text(i18n::t("tree.open_hint"));
             action
         }
     }

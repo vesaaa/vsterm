@@ -11,7 +11,7 @@ use crate::panels::session_tree_panel::{self, TreeSelection};
 use crate::panels::{connection_list, monitor, routes, status_bar, toolbar};
 use crate::terminal_view::TerminalView;
 use crate::{fonts, theme};
-use connection_mgr::{ConnectFailure, ConnectionManager, ConnError, ConnErrorKey, RemoteSession};
+use connection_mgr::{ConnectFailure, ConnectionManager, ConnError, ConnErrorKey};
 use session_tree::BackendKind;
 use eframe::egui;
 use session_tree::{AppPaths, SessionConfig, SessionStore, SessionTree};
@@ -33,10 +33,12 @@ struct PendingConnect {
     attempt: u32,
     kind: connect_auth::AuthPromptKind,
     rx: mpsc::Receiver<Result<(), ConnectFailure>>,
+    /// When set, success replaces this host tab instead of opening a new one.
+    replace_id: Option<connection_mgr::ConnectionId>,
 }
 
 enum FolderDialogMode {
-    Add,
+    Add { parent_id: Option<String> },
     Rename { id: String },
 }
 
@@ -72,6 +74,8 @@ pub struct VsTermApp {
     pending_connect: Option<PendingConnect>,
     error_dialog: Option<ConnErrorDisplay>,
     auth_prompt: Option<AuthPromptState>,
+    /// Host tab to replace after auth succeeds (status-light reconnect).
+    reconnect_target: Option<connection_mgr::ConnectionId>,
     host_bind_gen: u64,
     tree_selection: Option<TreeSelection>,
     session_editor: Option<SessionEditorState>,
@@ -126,6 +130,7 @@ impl VsTermApp {
             pending_connect: None,
             error_dialog: None,
             auth_prompt: None,
+            reconnect_target: None,
             host_bind_gen: 0,
             tree_selection: None,
             session_editor: None,
@@ -163,20 +168,65 @@ impl VsTermApp {
     }
 
     fn request_open_session(&mut self, config: SessionConfig) {
+        self.reconnect_target = None;
+        self.begin_auth_for_session(config);
+    }
+
+    fn request_reconnect(&mut self, id: connection_mgr::ConnectionId) {
+        if self.pending_connect.is_some() {
+            self.status = i18n::t("status.connecting");
+            return;
+        }
+        let Some(session_id) = self.connections.session_id_of(id) else {
+            self.status = i18n::t("conn.reconnect_unavailable");
+            return;
+        };
+        let state = self.connections.connection_state(id);
+        if !matches!(
+            state,
+            Some(connection_mgr::ConnectionState::Disconnected)
+                | Some(connection_mgr::ConnectionState::Failed)
+        ) {
+            return;
+        }
+
+        let Some(store) = &self.store else {
+            self.status = i18n::t("status.open_failed");
+            return;
+        };
+        let file = if session_id.ends_with(".yaml") {
+            session_id.clone()
+        } else {
+            format!("{session_id}.yaml")
+        };
+        match store.load_session(&file) {
+            Ok(cfg) => {
+                self.connections.set_active(id);
+                self.sync_host_binding();
+                self.left_tab = LeftTab::Monitor;
+                self.main_tab = MainTab::Terminal;
+                self.reconnect_target = Some(id);
+                self.begin_auth_for_session(cfg);
+            }
+            Err(err) => {
+                self.error_dialog =
+                    Some(format_conn_error(&ConnError::NotFound(err.to_string())));
+                self.status = i18n::t("status.open_failed");
+            }
+        }
+    }
+
+    fn begin_auth_for_session(&mut self, config: SessionConfig) {
         if self.pending_connect.is_some() {
             self.status = i18n::t("status.connecting");
             return;
         }
 
         let resolved = connection_mgr::resolve_backend(config.backend);
-        if resolved != BackendKind::System {
-            self.error_dialog = Some(format_conn_error(
-                &connection_mgr::backend_unavailable_error(resolved),
-            ));
-            self.status = i18n::t("status.open_failed");
-            return;
-        }
-        if !connection_mgr::SystemSshBackend::is_available() {
+        if resolved == BackendKind::System
+            && !connection_mgr::SystemSshBackend::is_available()
+        {
+            self.reconnect_target = None;
             self.error_dialog = Some(format_conn_error(
                 &connection_mgr::backend_unavailable_error(BackendKind::System),
             ));
@@ -191,6 +241,7 @@ impl VsTermApp {
         if let Err(err) =
             connection_mgr::preflight(&config, vault.as_ref(), connection_mgr::PreflightOpts::before_prompt())
         {
+            self.reconnect_target = None;
             self.error_dialog = Some(format_conn_error(&err));
             self.status = i18n::t("status.open_failed");
             return;
@@ -226,14 +277,10 @@ impl VsTermApp {
         }
 
         let resolved = connection_mgr::resolve_backend(config.backend);
-        if resolved != BackendKind::System {
-            self.error_dialog = Some(format_conn_error(
-                &connection_mgr::backend_unavailable_error(resolved),
-            ));
-            self.status = i18n::t("status.open_failed");
-            return;
-        }
-        if !connection_mgr::SystemSshBackend::is_available() {
+        if resolved == BackendKind::System
+            && !connection_mgr::SystemSshBackend::is_available()
+        {
+            self.reconnect_target = None;
             self.error_dialog = Some(format_conn_error(
                 &connection_mgr::backend_unavailable_error(BackendKind::System),
             ));
@@ -264,21 +311,32 @@ impl VsTermApp {
                 self.status = i18n::t("dialog.auth.verify_failed");
                 return;
             }
+            self.reconnect_target = None;
             self.error_dialog = Some(format_conn_error(&err));
             self.status = i18n::t("status.open_failed");
             return;
         }
 
-        // Do not add a host tab / switch panels until authentication succeeds.
+        let replace_id = self.reconnect_target.take();
+        if let Some(id) = replace_id {
+            if !self.connections.mark_connecting(id) {
+                self.status = i18n::t("conn.reconnect_unavailable");
+                return;
+            }
+            self.connections.set_active(id);
+        }
+
+        // Do not add a host tab / switch panels until authentication succeeds
+        // (reconnect keeps the existing tab and only flips its state).
         self.status = format!("{} — {}", i18n::t("status.connecting"), config.display_label());
 
         let mgr = Arc::clone(&self.connections);
         let vault_path = self.store.as_ref().map(|s| s.paths().vault_path());
         let (tx, rx) = mpsc::channel();
-        let remote = RemoteSession::system(config.clone(), interactive_password.clone());
 
         let config_for_thread = config.clone();
         let config_for_pending = config.clone();
+        let replace_for_thread = replace_id;
         std::thread::Builder::new()
             .name("vsterm-ssh-connect".into())
             .spawn(move || {
@@ -305,8 +363,19 @@ impl VsTermApp {
                     .await
                 });
                 match result {
-                    Ok(io) => {
-                        mgr.insert_ssh_connected(&config_for_thread, remote, io);
+                    Ok(established) => {
+                        match replace_for_thread {
+                            Some(id) => {
+                                if let Err(est) =
+                                    mgr.replace_ssh_connected(id, &config_for_thread, established)
+                                {
+                                    mgr.insert_ssh_connected(&config_for_thread, est);
+                                }
+                            }
+                            None => {
+                                mgr.insert_ssh_connected(&config_for_thread, established);
+                            }
+                        }
                         let _ = tx.send(Ok(()));
                     }
                     Err(err) => {
@@ -321,6 +390,7 @@ impl VsTermApp {
             attempt,
             kind,
             rx,
+            replace_id,
         });
     }
 
@@ -328,20 +398,15 @@ impl VsTermApp {
         let vault_path = self.store.as_ref().map(|s| s.paths().vault_path());
         if let Some(remote) = self.connections.active_remote() {
             self.remote_host.bind(Some(remote), vault_path);
-            if self.selected_nic.is_none() {
-                self.selected_nic = self
-                    .remote_host
-                    .selected_nic()
-                    .or_else(|| {
-                        self.remote_host
-                            .snapshot()
-                            .as_ref()
-                            .map(|s| {
-                                HostSnapshot::prefer_primary_nic(&s.nics, s.default_if.as_deref())
-                            })
-                            .flatten()
-                    });
-            }
+            // Always follow the bound host's nic (cache or freshly preferred).
+            self.selected_nic = self.remote_host.selected_nic().or_else(|| {
+                self.remote_host
+                    .snapshot()
+                    .as_ref()
+                    .and_then(|s| {
+                        HostSnapshot::prefer_primary_nic(&s.nics, s.default_if.as_deref())
+                    })
+            });
         } else {
             self.remote_host.bind(None, None);
             if self.connections.active_local_metrics() {
@@ -381,6 +446,8 @@ impl VsTermApp {
                     ConnErrorKey::AuthFailed | ConnErrorKey::PrivateKeyMissing
                 ) && pending.attempt < MAX_PASSWORD_ATTEMPTS;
                 if retryable {
+                    // Keep in-place reconnect target across password retries.
+                    self.reconnect_target = pending.replace_id;
                     let msg = match pending.kind {
                         connect_auth::AuthPromptKind::Password => i18n::t("dialog.auth.wrong_password"),
                         connect_auth::AuthPromptKind::PublicKey => {
@@ -403,6 +470,13 @@ impl VsTermApp {
                     self.auth_prompt = Some(prompt);
                     self.status = i18n::t("dialog.auth.retry");
                 } else {
+                    if let Some(id) = pending.replace_id {
+                        let msg = failure
+                            .detail
+                            .clone()
+                            .unwrap_or_else(|| i18n::t("status.open_failed"));
+                        self.connections.mark_failed(id, msg);
+                    }
                     self.error_dialog =
                         Some(crate::conn_error::format_connect_failure(&failure));
                     if failure.key == ConnErrorKey::AuthFailed {
@@ -417,6 +491,10 @@ impl VsTermApp {
                 self.pending_connect = Some(pending);
             }
             Err(mpsc::TryRecvError::Disconnected) => {
+                if let Some(id) = pending.replace_id {
+                    self.connections
+                        .mark_failed(id, i18n::t("status.open_failed"));
+                }
                 self.status = i18n::t("status.open_failed");
             }
         }
@@ -447,6 +525,14 @@ impl VsTermApp {
             }
             Some(connect_auth::AuthPromptAction::Cancel) => {
                 self.auth_prompt = None;
+                if let Some(id) = self.reconnect_target.take() {
+                    if matches!(
+                        self.connections.connection_state(id),
+                        Some(connection_mgr::ConnectionState::Connecting)
+                    ) {
+                        self.connections.mark_disconnected(id);
+                    }
+                }
                 self.status = i18n::t("status.open_failed");
             }
             None => {}
@@ -658,9 +744,12 @@ impl VsTermApp {
             return;
         };
         match dialog.mode {
-            FolderDialogMode::Add => {
+            FolderDialogMode::Add { parent_id } => {
                 let id = format!("f-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                if let Err(err) = self.tree.add_folder(name.clone(), id.clone()) {
+                if let Err(err) =
+                    self.tree
+                        .add_folder(name.clone(), id.clone(), parent_id.as_deref())
+                {
                     self.status = format!("{}: {err}", i18n::t("status.save_failed"));
                     return;
                 }
@@ -725,9 +814,23 @@ impl VsTermApp {
         let mut cancel = false;
         if let Some(dialog) = &mut self.folder_dialog {
             let mut open = true;
-            let title = match dialog.mode {
-                FolderDialogMode::Add => i18n::t("dialog.folder.add_title"),
+            let title = match &dialog.mode {
+                FolderDialogMode::Add { parent_id } if parent_id.is_some() => {
+                    i18n::t("dialog.folder.add_sub_title")
+                }
+                FolderDialogMode::Add { .. } => i18n::t("dialog.folder.add_title"),
                 FolderDialogMode::Rename { .. } => i18n::t("dialog.folder.rename_title"),
+            };
+            let parent_label = match &dialog.mode {
+                FolderDialogMode::Add {
+                    parent_id: Some(pid),
+                } => self
+                    .tree
+                    .list_folders()
+                    .into_iter()
+                    .find(|(id, _)| id == pid)
+                    .map(|(_, label)| label),
+                _ => None,
             };
             egui::Window::new(title)
                 .id(egui::Id::new("folder_dialog"))
@@ -737,6 +840,16 @@ impl VsTermApp {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .default_width(320.0)
                 .show(ctx, |ui| {
+                    if let Some(parent) = &parent_label {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}: {parent}",
+                                i18n::t("dialog.folder.parent")
+                            ))
+                            .weak(),
+                        );
+                        ui.add_space(4.0);
+                    }
                     ui.label(i18n::t("dialog.folder.name"));
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut dialog.name).desired_width(f32::INFINITY),
@@ -849,9 +962,9 @@ impl VsTermApp {
             session_tree_panel::TreeAction::DeleteServer { session_ref, name } => {
                 self.delete_confirm = Some(DeleteTarget::Session { session_ref, name });
             }
-            session_tree_panel::TreeAction::AddFolder => {
+            session_tree_panel::TreeAction::AddFolder { parent_id } => {
                 self.folder_dialog = Some(FolderDialogState {
-                    mode: FolderDialogMode::Add,
+                    mode: FolderDialogMode::Add { parent_id },
                     name: String::new(),
                     error: None,
                     focus: true,
@@ -868,7 +981,41 @@ impl VsTermApp {
             session_tree_panel::TreeAction::DeleteFolder { id, name } => {
                 self.delete_confirm = Some(DeleteTarget::Folder { id, name });
             }
+            session_tree_panel::TreeAction::MoveSession {
+                session_ref,
+                name,
+                folder_id,
+            } => {
+                self.move_session(&session_ref, &name, folder_id.as_deref());
+            }
         }
+    }
+
+    fn move_session(&mut self, session_ref: &str, name: &str, folder_id: Option<&str>) {
+        let current = self.tree.folder_of_session(session_ref);
+        if current.as_deref() == folder_id {
+            return;
+        }
+        let Some(store) = self.store.as_ref() else {
+            self.status = i18n::t("status.save_failed");
+            return;
+        };
+        if let Err(err) = self
+            .tree
+            .relocate_session(session_ref, name.to_string(), folder_id)
+        {
+            self.status = format!("{}: {err}", i18n::t("status.save_failed"));
+            return;
+        }
+        if let Err(err) = store.save_tree(&self.tree) {
+            self.status = format!("{}: {err}", i18n::t("status.save_failed"));
+            return;
+        }
+        self.tree_selection = Some(TreeSelection::Session {
+            name: name.to_string(),
+            session_ref: session_ref.to_string(),
+        });
+        self.status = i18n::t("status.session_moved");
     }
 }
 
@@ -933,8 +1080,16 @@ impl eframe::App for VsTermApp {
                         ui.close_menu();
                     }
                     if ui.button(i18n::t("menu.file.add_folder")).clicked() {
+                        let parent_id = match &self.tree_selection {
+                            Some(TreeSelection::Folder { id, .. })
+                                if self.tree.can_nest_under(id) =>
+                            {
+                                Some(id.clone())
+                            }
+                            _ => None,
+                        };
                         self.folder_dialog = Some(FolderDialogState {
-                            mode: FolderDialogMode::Add,
+                            mode: FolderDialogMode::Add { parent_id },
                             name: String::new(),
                             error: None,
                             focus: true,
@@ -1149,6 +1304,9 @@ impl eframe::App for VsTermApp {
                                             self.connections.close(id);
                                             self.sync_host_binding();
                                             self.status = i18n::t("status.closed");
+                                        }
+                                        Some(connection_list::ConnAction::Reconnect(id)) => {
+                                            self.request_reconnect(id);
                                         }
                                         None => {}
                                     }
