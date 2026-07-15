@@ -13,3 +13,4 @@ bytes = { workspace = true }
 parking_lot = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+chrono = { workspace = true }

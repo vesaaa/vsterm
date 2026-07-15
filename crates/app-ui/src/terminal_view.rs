@@ -1,13 +1,32 @@
 use connection_mgr::ConnectionManager;
 use connection_mgr::ConnectionState;
-use egui::{Color32, FontId, Id, PointerButton, Pos2, Rect, Sense, Ui, Vec2};
+use egui::{Color32, FontId, Id, PointerButton, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use std::sync::Arc;
-use term_core::{Rgb, TerminalSnapshot};
+use term_core::{FoldControl, FoldGuide, Rgb, TerminalSnapshot};
 
 const CELL_W: f32 = 8.4;
 const CELL_H: f32 = 16.0;
 const TERM_BG: Color32 = Color32::BLACK;
 const SCROLL_W: f32 = 12.0;
+/// Left chrome: `[HH:MM:SS]` + lineno + fold control (WindTerm-style).
+const GUTTER_TIME_CHARS: f32 = 10.0;
+const GUTTER_LINENO_CHARS: f32 = 5.0;
+const GUTTER_FOLD_CHARS: f32 = 2.5;
+const GUTTER_PAD: f32 = 6.0;
+const GUTTER_W: f32 =
+    CELL_W * (GUTTER_TIME_CHARS + GUTTER_LINENO_CHARS + GUTTER_FOLD_CHARS) + GUTTER_PAD;
+/// Muted teal line numbers (WindTerm reference).
+const GUTTER_LINENO: Color32 = Color32::from_rgb(78, 158, 168);
+/// Active / cursor line number.
+const GUTTER_LINENO_ACTIVE: Color32 = Color32::from_rgb(236, 110, 180);
+const GUTTER_TIME: Color32 = Color32::from_rgb(110, 140, 148);
+/// Fold box border, stem, hook, and expanded − (WindTerm medium-dark grey — not white).
+const GUTTER_FOLD_CHROME: Color32 = Color32::from_rgb(100, 108, 118);
+/// Collapsed (+) chip fill (same family as chrome).
+const GUTTER_FOLD_FILL: Color32 = Color32::from_rgb(100, 108, 118);
+const GUTTER_ACTIVE_BG: Color32 = Color32::from_rgb(28, 26, 34);
+const ELLIPSIS_FG: Color32 = Color32::from_rgb(180, 186, 198);
+const FOLD_BOX_SIZE: f32 = 11.0;
 
 #[derive(Clone, Copy, Default)]
 struct TermSelection {
@@ -67,23 +86,29 @@ impl TerminalView {
         let outer_max = ui.max_rect();
         ui.set_clip_rect(outer_max);
         let avail = ui.available_size().min(outer_max.size());
-        let term_w = (avail.x - SCROLL_W).max(CELL_W * 20.0);
-        let cols = ((term_w / CELL_W).floor() as u16).max(20);
+        let content_w = (avail.x - SCROLL_W - GUTTER_W).max(CELL_W * 20.0);
+        let cols = ((content_w / CELL_W).floor() as u16).max(20);
         let rows = ((avail.y / CELL_H).floor() as u16).max(5);
 
         let (outer, _) = ui.allocate_exact_size(avail, Sense::hover());
         let outer = outer.intersect(outer_max);
-        let term_rect = Rect::from_min_size(
+        let gutter_rect = Rect::from_min_size(
             outer.min,
-            Vec2::new(term_w.min(outer.width()), outer.height()),
+            Vec2::new(GUTTER_W.min(outer.width()), outer.height()),
+        );
+        let grid_rect = Rect::from_min_size(
+            Pos2::new(gutter_rect.max.x, outer.min.y),
+            Vec2::new(content_w.min(outer.width() - GUTTER_W).max(0.0), outer.height()),
         );
         let scroll_rect = Rect::from_min_max(
-            Pos2::new(term_rect.max.x, outer.min.y),
+            Pos2::new(grid_rect.max.x, outer.min.y),
             outer.max,
         );
 
-        let resp = ui.interact(term_rect, ui.id().with("term_grid"), Sense::click_and_drag());
-        ui.painter().rect_filled(term_rect, 0.0, TERM_BG);
+        let gutter_resp = ui.interact(gutter_rect, ui.id().with("term_gutter"), Sense::click());
+        let resp = ui.interact(grid_rect, ui.id().with("term_grid"), Sense::click_and_drag());
+        ui.painter().rect_filled(gutter_rect, 0.0, Color32::from_rgb(12, 12, 14));
+        ui.painter().rect_filled(grid_rect, 0.0, TERM_BG);
 
         let sel_id = Id::new("vsterm_term_selection");
         let mut selection = ui
@@ -102,13 +127,14 @@ impl TerminalView {
         let Some(mut snapshot) = snapshot else {
             selection.clear();
             ui.ctx().data_mut(|d| d.insert_temp(sel_id, selection));
-            paint_status(ui, term_rect, mgr);
+            paint_status(ui, grid_rect, mgr);
             return (cols, rows);
         };
 
         crate::term_highlight::apply_semantic(&mut snapshot);
 
         let font = FontId::monospace(13.0);
+        let gutter_font = FontId::monospace(11.0);
         let max_rows = snapshot.rows.min(rows as usize);
         let max_cols = snapshot.cols.min(cols as usize);
         let can_input = mgr
@@ -116,13 +142,15 @@ impl TerminalView {
             .unwrap_or(false);
         let menu_open = resp.context_menu_opened();
 
-        // I-beam only over the terminal cell grid (not chrome / scrollbar).
-        if resp.hovered() && !menu_open {
+        // Default cursor on gutter chrome; I-beam only over the cell grid.
+        if gutter_resp.hovered() && !menu_open {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+        } else if resp.hovered() && !menu_open {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
         }
 
-        // Mouse wheel → scrollback (positive wheel = into history).
-        if resp.hovered() {
+        // Mouse wheel on grid or gutter → scrollback (positive = into history).
+        if resp.hovered() || gutter_resp.hovered() {
             let scroll_y = ui.input(|i| {
                 i.events.iter().fold(0.0_f32, |acc, e| match e {
                     egui::Event::MouseWheel {
@@ -153,12 +181,33 @@ impl TerminalView {
             }
         }
 
-        // Primary-button selection only; leave range intact while the context menu is open.
+        // Fold control clicks (gutter only) — before selection handling.
+        if !menu_open && gutter_resp.clicked_by(PointerButton::Primary) {
+            if let Some(pos) = gutter_resp.interact_pointer_pos() {
+                if let Some(row) = pos_to_row(pos, gutter_rect, max_rows) {
+                    if let Some(g) = snapshot.gutters.get(row) {
+                        if g.fold.is_some() {
+                            if let Some(id) = g.block_id {
+                                let _ = mgr.with_active(|c| c.terminal.toggle_fold(id));
+                                selection.clear();
+                                ui.ctx().request_repaint();
+                                if let Some(s) = mgr.with_active(|c| c.terminal.snapshot()) {
+                                    snapshot = s;
+                                    crate::term_highlight::apply_semantic(&mut snapshot);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Primary-button selection only on the cell grid.
         if !menu_open {
             let pointer_cell = resp
                 .interact_pointer_pos()
                 .or_else(|| ui.input(|i| i.pointer.interact_pos()))
-                .and_then(|pos| pos_to_cell(pos, term_rect, max_cols, max_rows));
+                .and_then(|pos| pos_to_cell(pos, grid_rect, max_cols, max_rows));
 
             if let Some(cell) = pointer_cell {
                 if ui.input(|i| i.pointer.primary_pressed()) {
@@ -178,6 +227,24 @@ impl TerminalView {
         }
 
         for row in 0..max_rows {
+            let is_cursor_row = snapshot.cursor_visible && snapshot.cursor.1 == row;
+            if is_cursor_row {
+                let row_bg = Rect::from_min_size(
+                    Pos2::new(gutter_rect.min.x, gutter_rect.min.y + row as f32 * CELL_H),
+                    Vec2::new(gutter_rect.width() + grid_rect.width(), CELL_H),
+                );
+                ui.painter().rect_filled(row_bg, 0.0, GUTTER_ACTIVE_BG);
+            }
+
+            paint_gutter_row(
+                ui,
+                gutter_rect,
+                row,
+                snapshot.gutters.get(row),
+                &gutter_font,
+                is_cursor_row,
+            );
+
             for col in 0..max_cols {
                 let idx = row * snapshot.cols + col;
                 let Some(cell) = snapshot.cells.get(idx) else {
@@ -197,7 +264,7 @@ impl TerminalView {
                 }
 
                 let cell_rect = Rect::from_min_size(
-                    term_rect.min + Vec2::new(col as f32 * CELL_W, row as f32 * CELL_H),
+                    grid_rect.min + Vec2::new(col as f32 * CELL_W, row as f32 * CELL_H),
                     Vec2::new(CELL_W, CELL_H),
                 );
                 if selection.contains(col, row) {
@@ -219,13 +286,22 @@ impl TerminalView {
                     );
                 }
             }
+
+            // Collapsed block: boxed "···" after the command text.
+            if snapshot
+                .gutters
+                .get(row)
+                .is_some_and(|g| g.collapsed_mark)
+            {
+                paint_collapsed_ellipsis(ui, &snapshot, grid_rect, row, max_cols, &font);
+            }
         }
 
         if snapshot.cursor_visible && !selection.has_range() {
             let (cx, cy) = snapshot.cursor;
             if cy < max_rows && cx < max_cols {
                 let cursor_rect = Rect::from_min_size(
-                    term_rect.min + Vec2::new(cx as f32 * CELL_W, cy as f32 * CELL_H),
+                    grid_rect.min + Vec2::new(cx as f32 * CELL_W, cy as f32 * CELL_H),
                     Vec2::new(CELL_W, CELL_H),
                 );
                 ui.painter().rect_filled(
@@ -236,10 +312,11 @@ impl TerminalView {
             }
         }
 
-        // Scrollbar for scrollback history.
-        if snapshot.history_size > 0 {
+        // Scrollbar over the virtual (fold-aware) line list.
+        let scroll_max = snapshot.virtual_len.saturating_sub(max_rows);
+        if scroll_max > 0 {
             if let Some(new_offset) =
-                paint_scrollbar(ui, scroll_rect, snapshot.display_offset, snapshot.history_size, max_rows)
+                paint_scrollbar(ui, scroll_rect, snapshot.display_offset, scroll_max, max_rows)
             {
                 let _ = mgr.with_active(|c| c.terminal.set_display_offset(new_offset));
                 selection.clear();
@@ -361,6 +438,10 @@ impl TerminalView {
                             other => {
                                 if let Some(bytes) = event_to_bytes(other) {
                                     let _ = mgr.with_active(|c| c.terminal.scroll_to_bottom());
+                                    // Stamp command blocks before the PTY advances past the line.
+                                    if bytes.iter().any(|&b| b == b'\r' || b == b'\n') {
+                                        let _ = mgr.with_active(|c| c.terminal.on_client_enter());
+                                    }
                                     let _ = mgr.write_to_active(&bytes);
                                 }
                             }
@@ -396,14 +477,15 @@ impl TerminalView {
 }
 
 /// Returns a new display_offset when the user drags the thumb.
+/// `scroll_max` is the maximum virtual offset (virtual_len − screen_rows).
 fn paint_scrollbar(
     ui: &mut Ui,
     rect: Rect,
     display_offset: usize,
-    history_size: usize,
+    scroll_max: usize,
     screen_rows: usize,
 ) -> Option<usize> {
-    if history_size == 0 || rect.width() < 2.0 {
+    if scroll_max == 0 || rect.width() < 2.0 {
         return None;
     }
 
@@ -411,15 +493,11 @@ fn paint_scrollbar(
         .rect_filled(rect, 0.0, Color32::from_rgb(28, 28, 32));
 
     let track = rect.shrink2(Vec2::new(2.0, 3.0));
-    let total = (history_size + screen_rows) as f32;
+    let total = (scroll_max + screen_rows) as f32;
     let thumb_h = ((screen_rows as f32 / total) * track.height()).clamp(18.0, track.height());
     let travel = (track.height() - thumb_h).max(0.0);
-    // offset=history → thumb at top; offset=0 → thumb at bottom.
-    let t = if history_size == 0 {
-        1.0
-    } else {
-        1.0 - (display_offset as f32 / history_size as f32)
-    };
+    // offset=scroll_max → thumb at top; offset=0 → thumb at bottom.
+    let t = 1.0 - (display_offset as f32 / scroll_max as f32);
     let thumb_y = track.min.y + travel * t;
     let thumb = Rect::from_min_size(
         Pos2::new(track.min.x, thumb_y),
@@ -437,14 +515,14 @@ fn paint_scrollbar(
     if resp.dragged() {
         if let Some(pos) = resp.interact_pointer_pos() {
             let rel = ((pos.y - track.min.y - thumb_h * 0.5) / travel.max(1.0)).clamp(0.0, 1.0);
-            let offset = ((1.0 - rel) * history_size as f32).round() as usize;
-            return Some(offset.min(history_size));
+            let offset = ((1.0 - rel) * scroll_max as f32).round() as usize;
+            return Some(offset.min(scroll_max));
         }
     }
     if resp.clicked() && !resp.dragged() {
         if let Some(pos) = resp.interact_pointer_pos() {
             if pos.y < thumb.min.y {
-                return Some(display_offset.saturating_add(screen_rows).min(history_size));
+                return Some(display_offset.saturating_add(screen_rows).min(scroll_max));
             }
             if pos.y > thumb.max.y {
                 return Some(display_offset.saturating_sub(screen_rows));
@@ -452,6 +530,196 @@ fn paint_scrollbar(
         }
     }
     None
+}
+
+fn paint_gutter_row(
+    ui: &mut Ui,
+    gutter_rect: Rect,
+    row: usize,
+    info: Option<&term_core::GutterInfo>,
+    font: &FontId,
+    is_cursor_row: bool,
+) {
+    let Some(info) = info else {
+        return;
+    };
+    let row_top = gutter_rect.min.y + row as f32 * CELL_H;
+    let y_text = row_top + 1.0;
+    let mut x = gutter_rect.min.x + 2.0;
+    let painter = ui.painter_at(gutter_rect);
+
+    if let Some((h, m, s)) = info.time_hm {
+        let label = format!("[{h:02}:{m:02}:{s:02}]");
+        painter.text(
+            Pos2::new(x, y_text),
+            egui::Align2::LEFT_TOP,
+            label,
+            font.clone(),
+            if is_cursor_row {
+                GUTTER_LINENO_ACTIVE
+            } else {
+                GUTTER_TIME
+            },
+        );
+    }
+    x += CELL_W * GUTTER_TIME_CHARS;
+
+    if let Some(n) = info.lineno {
+        let label = format!("{n:>4}");
+        let color = if is_cursor_row {
+            GUTTER_LINENO_ACTIVE
+        } else {
+            GUTTER_LINENO
+        };
+        painter.text(
+            Pos2::new(x, y_text),
+            egui::Align2::LEFT_TOP,
+            label,
+            font.clone(),
+            color,
+        );
+    }
+    x += CELL_W * GUTTER_LINENO_CHARS;
+
+    let fold_col_x = x;
+    let box_size = FOLD_BOX_SIZE;
+    let box_x = fold_col_x + 2.0;
+    let box_y = row_top + (CELL_H - box_size) * 0.5;
+    let box_rect = Rect::from_min_size(Pos2::new(box_x, box_y), Vec2::splat(box_size));
+    let stem_x = box_rect.center().x;
+    let stroke = Stroke::new(1.0, GUTTER_FOLD_CHROME);
+
+    // Boxed −/+ on the command header.
+    // Font glyphs for +/- carry large ink margins, so they look tiny in an 11px
+    // box; WindTerm-style vector strokes fill the frame tightly instead.
+    // Collapsed (+): filled grey chip with dark “cut-out” plus.
+    // Expanded (−): hollow border; − and stem share GUTTER_FOLD_CHROME.
+    if let Some(fold) = info.fold {
+        let collapsed = matches!(fold, FoldControl::Expand);
+        if collapsed {
+            painter.rect_filled(box_rect, 1.5, GUTTER_FOLD_FILL);
+        }
+        painter.rect_stroke(box_rect, 1.5, stroke, egui::StrokeKind::Inside);
+        paint_fold_glyph(
+            &painter,
+            box_rect,
+            collapsed,
+            if collapsed {
+                TERM_BG // negative-space + like WindTerm
+            } else {
+                GUTTER_FOLD_CHROME
+            },
+        );
+    }
+
+    // Tree stem under expanded blocks.
+    match info.fold_guide {
+        Some(FoldGuide::Header) => {
+            // Stem from bottom of the fold box to the bottom of this row.
+            painter.line_segment(
+                [
+                    Pos2::new(stem_x, box_rect.bottom()),
+                    Pos2::new(stem_x, row_top + CELL_H),
+                ],
+                stroke,
+            );
+        }
+        Some(FoldGuide::Middle) => {
+            painter.line_segment(
+                [
+                    Pos2::new(stem_x, row_top),
+                    Pos2::new(stem_x, row_top + CELL_H),
+                ],
+                stroke,
+            );
+        }
+        Some(FoldGuide::End) => {
+            let mid_y = row_top + CELL_H * 0.5;
+            painter.line_segment(
+                [Pos2::new(stem_x, row_top), Pos2::new(stem_x, mid_y)],
+                stroke,
+            );
+            // Right-angle hook toward the text.
+            painter.line_segment(
+                [
+                    Pos2::new(stem_x, mid_y),
+                    Pos2::new(stem_x + box_size * 0.65, mid_y),
+                ],
+                stroke,
+            );
+        }
+        None => {}
+    }
+}
+
+fn paint_fold_glyph(painter: &egui::Painter, box_rect: Rect, expand: bool, color: Color32) {
+    // ~2px inset → glyph almost fills the box (WindTerm-like), not floating tiny.
+    let r = box_rect.shrink(2.0);
+    let cx = r.center().x;
+    let cy = r.center().y;
+    let stroke = Stroke::new(1.35, color);
+    painter.line_segment(
+        [Pos2::new(r.left(), cy), Pos2::new(r.right(), cy)],
+        stroke,
+    );
+    if expand {
+        painter.line_segment(
+            [Pos2::new(cx, r.top()), Pos2::new(cx, r.bottom())],
+            stroke,
+        );
+    }
+}
+
+fn paint_collapsed_ellipsis(
+    ui: &mut Ui,
+    snapshot: &TerminalSnapshot,
+    grid_rect: Rect,
+    row: usize,
+    max_cols: usize,
+    font: &FontId,
+) {
+    // Place the box just after the last non-space cell on this row.
+    let mut end_col = 0usize;
+    for col in 0..max_cols {
+        let idx = row * snapshot.cols + col;
+        if snapshot.cells.get(idx).is_some_and(|c| c.ch != ' ') {
+            end_col = col + 1;
+        }
+    }
+    if end_col >= max_cols {
+        end_col = max_cols.saturating_sub(3);
+    }
+    let box_w = CELL_W * 3.2;
+    let box_h = CELL_H - 3.0;
+    let origin = grid_rect.min + Vec2::new(end_col as f32 * CELL_W + 4.0, row as f32 * CELL_H + 1.5);
+    if origin.x + box_w > grid_rect.max.x {
+        return;
+    }
+    let r = Rect::from_min_size(origin, Vec2::new(box_w, box_h));
+    ui.painter().rect_stroke(
+        r,
+        2.0,
+        Stroke::new(1.0, Color32::from_rgb(90, 96, 110)),
+        egui::StrokeKind::Outside,
+    );
+    ui.painter().text(
+        r.center(),
+        egui::Align2::CENTER_CENTER,
+        "···",
+        font.clone(),
+        ELLIPSIS_FG,
+    );
+}
+
+fn pos_to_row(pos: Pos2, rect: Rect, max_rows: usize) -> Option<usize> {
+    if max_rows == 0 || !rect.contains(pos) {
+        return None;
+    }
+    let row = ((pos.y - rect.min.y) / CELL_H).floor() as isize;
+    if row < 0 {
+        return None;
+    }
+    Some((row as usize).min(max_rows.saturating_sub(1)))
 }
 
 fn paint_status(ui: &mut Ui, rect: Rect, mgr: &Arc<ConnectionManager>) {

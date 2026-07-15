@@ -161,10 +161,12 @@ mod tests {
             cols,
             rows: 1,
             cells: line.chars().map(cell).collect(),
+            gutters: vec![],
             cursor: (0, 0),
             cursor_visible: false,
             history_size: 0,
             display_offset: 0,
+            virtual_len: 1,
         };
         apply_semantic(&mut snap);
         let cells = &snap.cells;
@@ -190,10 +192,12 @@ mod tests {
                     c
                 })
                 .collect(),
+            gutters: vec![],
             cursor: (0, 0),
             cursor_visible: false,
             history_size: 0,
             display_offset: 0,
+            virtual_len: 1,
         };
         apply_semantic(&mut snap);
         assert_eq!(snap.cells[0].fg, Rgb::new(80, 250, 123));

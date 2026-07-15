@@ -1,12 +1,15 @@
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Point};
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{point_to_viewport, viewport_to_point, Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
+use chrono::{NaiveTime, Timelike};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
+use crate::osc133::{Osc133Filter, Osc133Kind};
+use crate::shell_marks::ShellMarks;
 use crate::TermError;
 
 /// Invoked (possibly from a PTY reader thread) after the grid accepts new bytes.
@@ -39,17 +42,56 @@ pub struct CellAttr {
     pub inverse: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldControl {
+    /// Block is expanded — click to collapse.
+    Collapse,
+    /// Block is folded — click to expand.
+    Expand,
+}
+
+/// How to draw the fold tree under an expanded command block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldGuide {
+    /// Header row: boxed −/+ ; vertical stem starts below the box when expanded.
+    Header,
+    /// Middle output row: vertical stem only.
+    Middle,
+    /// Last output row: vertical stem ending in a right-angle hook.
+    End,
+}
+
+#[derive(Debug, Clone)]
+pub struct GutterInfo {
+    pub abs: usize,
+    /// Absolute 1-based scrollback line number.
+    pub lineno: Option<u32>,
+    /// Wall-clock time when this line first appeared.
+    pub time_hm: Option<(u8, u8, u8)>,
+    pub fold: Option<FoldControl>,
+    /// Fold tree stem for expanded blocks (None when folded or unmarked).
+    pub fold_guide: Option<FoldGuide>,
+    pub block_id: Option<u64>,
+    /// Show boxed "···" after the command when folded.
+    pub collapsed_mark: bool,
+    /// Command text for collapsed summary (also present in cells when expanded).
+    pub command: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TerminalSnapshot {
     pub cols: usize,
     pub rows: usize,
     pub cells: Vec<CellAttr>,
+    pub gutters: Vec<GutterInfo>,
     pub cursor: (usize, usize),
     pub cursor_visible: bool,
-    /// Invisible scrollback lines currently available.
+    /// Lines above the live screen in alacritty history.
     pub history_size: usize,
-    /// How far the viewport is scrolled into history (0 = live bottom).
+    /// Scroll offset from the live bottom into the **virtual** (fold-filtered) line list.
     pub display_offset: usize,
+    /// Length of the virtual line list (for scrollbar).
+    pub virtual_len: usize,
 }
 
 struct TermSize {
@@ -82,6 +124,14 @@ struct TermState {
     parser: Processor,
     cols: usize,
     rows: usize,
+    osc: Osc133Filter,
+    marks: ShellMarks,
+    /// Virtual scroll from bottom (fold-aware); kept in sync when no folds.
+    view_offset: usize,
+    /// First-seen wall-clock time per absolute scrollback line (0 = oldest).
+    line_times: Vec<Option<NaiveTime>>,
+    /// Cursor abs after the previous advance (for stamping line ranges).
+    prev_cursor_abs: usize,
 }
 
 impl TerminalHandle {
@@ -101,12 +151,16 @@ impl TerminalHandle {
                 parser: Processor::new(),
                 cols: cols_usize,
                 rows: rows_usize,
+                osc: Osc133Filter::new(),
+                marks: ShellMarks::new(),
+                view_offset: 0,
+                line_times: Vec::new(),
+                prev_cursor_abs: 0,
             })),
             output_hook: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// UI sets this so PTY reader threads can wake the egui event loop.
     pub fn set_output_hook(&self, hook: Option<OutputHook>) {
         *self.output_hook.lock() = hook;
     }
@@ -116,8 +170,31 @@ impl TerminalHandle {
         (state.cols as u16, state.rows as u16)
     }
 
+    pub fn toggle_fold(&self, block_id: u64) -> bool {
+        let mut state = self.inner.lock();
+        state.marks.toggle_fold(block_id)
+    }
+
+    /// Mark a command block when the user submits Enter locally.
+    ///
+    /// Used when the remote shell does not emit OSC 133. Once any remote OSC
+    /// 133 mark is observed, this becomes a no-op so dual-marking is avoided.
+    pub fn on_client_enter(&self) {
+        let mut state = self.inner.lock();
+        if state.marks.remote_osc {
+            return;
+        }
+        if state.term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let history_size = state.term.history_size();
+        let abs = cursor_abs(&state.term, history_size);
+        let cmd = line_text(&state.term, abs, history_size, state.cols);
+        state.marks.on_output_start(abs, cmd);
+        stamp_abs_range(&mut state, abs, abs);
+    }
+
     /// Positive `lines` scrolls into history (up); negative toward the live bottom.
-    /// No-op on the alternate screen where the remote application owns the viewport.
     pub fn scroll_lines(&self, lines: i32) {
         if lines == 0 {
             return;
@@ -126,41 +203,38 @@ impl TerminalHandle {
         if state.term.mode().contains(TermMode::ALT_SCREEN) {
             return;
         }
-        state.term.scroll_display(Scroll::Delta(lines));
+        let vlen = virtual_len(&state);
+        let max_off = vlen.saturating_sub(state.rows);
+        let next = (state.view_offset as i32 + lines).clamp(0, max_off as i32) as usize;
+        state.view_offset = next;
+        sync_alacritty_scroll(&mut state);
     }
 
     pub fn scroll_page_up(&self) {
-        let mut state = self.inner.lock();
-        if state.term.mode().contains(TermMode::ALT_SCREEN) {
-            return;
-        }
-        state.term.scroll_display(Scroll::PageUp);
+        let rows = self.inner.lock().rows as i32;
+        self.scroll_lines(rows);
     }
 
     pub fn scroll_page_down(&self) {
-        let mut state = self.inner.lock();
-        if state.term.mode().contains(TermMode::ALT_SCREEN) {
-            return;
-        }
-        state.term.scroll_display(Scroll::PageDown);
+        let rows = self.inner.lock().rows as i32;
+        self.scroll_lines(-rows);
     }
 
     pub fn scroll_to_bottom(&self) {
         let mut state = self.inner.lock();
+        state.view_offset = 0;
         state.term.scroll_display(Scroll::Bottom);
     }
 
-    /// Absolute display offset into scrollback (clamped).
     pub fn set_display_offset(&self, offset: usize) {
         let mut state = self.inner.lock();
         if state.term.mode().contains(TermMode::ALT_SCREEN) {
             return;
         }
-        let cur = state.term.grid().display_offset();
-        let delta = offset as i32 - cur as i32;
-        if delta != 0 {
-            state.term.scroll_display(Scroll::Delta(delta));
-        }
+        let vlen = virtual_len(&state);
+        let max_off = vlen.saturating_sub(state.rows);
+        state.view_offset = offset.min(max_off);
+        sync_alacritty_scroll(&mut state);
     }
 
     pub fn advance_bytes(&self, bytes: &[u8]) {
@@ -169,8 +243,39 @@ impl TerminalHandle {
         }
         {
             let mut state = self.inner.lock();
-            let TermState { term, parser, .. } = &mut *state;
-            parser.advance(term, bytes);
+            let mut clean = Vec::with_capacity(bytes.len());
+            let mut marks = Vec::new();
+            state.osc.push(bytes, &mut clean, &mut marks);
+
+            let hist_before = state.term.history_size();
+            let cursor_before = cursor_abs(&state.term, hist_before);
+
+            if !clean.is_empty() {
+                let TermState {
+                    term, parser, ..
+                } = &mut *state;
+                parser.advance(term, &clean);
+            }
+
+            // Apply OSC marks against the post-advance cursor position.
+            for mark in marks {
+                apply_mark(&mut state, mark);
+            }
+
+            // Keep the open block's end at the current cursor (output growth).
+            let history_size = state.term.history_size();
+            let abs = cursor_abs(&state.term, history_size);
+            state.marks.grow_open_to(abs);
+
+            // Stamp every absolute line the cursor crossed (new output rows).
+            let from = cursor_before.min(state.prev_cursor_abs).min(abs);
+            let to = abs.max(cursor_before);
+            stamp_abs_range(&mut state, from, to);
+            state.prev_cursor_abs = abs;
+
+            if state.view_offset == 0 {
+                state.term.scroll_display(Scroll::Bottom);
+            }
         }
         if let Some(hook) = self.output_hook.lock().clone() {
             hook();
@@ -195,25 +300,37 @@ impl TerminalHandle {
         let state = self.inner.lock();
         let cols = state.cols;
         let rows = state.rows;
-        let display_offset = state.term.grid().display_offset();
         let history_size = state.term.history_size();
-        let mut cells = Vec::with_capacity(cols * rows);
+        let total_abs = history_size + rows;
+        let virtual_lines = build_virtual_abs(&state.marks, total_abs);
+        let virtual_len = virtual_lines.len();
+        let max_off = virtual_len.saturating_sub(rows);
+        let view_offset = state.view_offset.min(max_off);
 
-        for line in 0..rows {
+        let start = virtual_len.saturating_sub(rows + view_offset);
+        let end = virtual_len.saturating_sub(view_offset);
+        let window = &virtual_lines[start..end];
+
+        let cursor_point = state.term.grid().cursor.point;
+        let cursor_abs =
+            (history_size as i32 + cursor_point.line.0).max(0) as usize;
+        // Don't number empty screen rows below the live cursor / last written line.
+        let content_extent = content_extent_abs(&state, cursor_abs);
+
+        let mut cells = Vec::with_capacity(cols * rows);
+        let mut gutters = Vec::with_capacity(rows);
+
+        for (view_row, &abs) in window.iter().enumerate() {
+            let line = Line(abs as i32 - history_size as i32);
             for col in 0..cols {
-                let point =
-                    viewport_to_point(display_offset, Point::new(line, Column(col)));
-                let cell = &state.term.grid()[point];
+                let cell = &state.term.grid()[Point::new(line, Column(col))];
                 let ch = cell.c;
                 let flags = cell.flags;
-                // Many CLI tools use bold as "bright color"; map that when rendering.
                 let fg_color = brighten_if_bold(cell.fg, flags.contains(Flags::BOLD));
-                let fg = resolve_color(fg_color, false);
-                let bg = resolve_color(cell.bg, true);
                 cells.push(CellAttr {
                     ch: if ch == '\0' { ' ' } else { ch },
-                    fg,
-                    bg,
+                    fg: resolve_color(fg_color, false),
+                    bg: resolve_color(cell.bg, true),
                     bold: flags.contains(Flags::BOLD),
                     dim: flags.contains(Flags::DIM),
                     italic: flags.contains(Flags::ITALIC),
@@ -221,24 +338,251 @@ impl TerminalHandle {
                     inverse: flags.contains(Flags::INVERSE),
                 });
             }
+            gutters.push(gutter_for_abs(
+                &state.marks,
+                &state.line_times,
+                abs,
+                content_extent,
+            ));
+            let _ = view_row;
+        }
+        // Pad if virtual window shorter than screen (startup).
+        while gutters.len() < rows {
+            for _ in 0..cols {
+                cells.push(CellAttr {
+                    ch: ' ',
+                    fg: Rgb::new(230, 230, 230),
+                    bg: Rgb::new(0, 0, 0),
+                    bold: false,
+                    dim: false,
+                    italic: false,
+                    underline: false,
+                    inverse: false,
+                });
+            }
+            gutters.push(GutterInfo {
+                abs: 0,
+                lineno: None,
+                time_hm: None,
+                fold: None,
+                fold_guide: None,
+                block_id: None,
+                collapsed_mark: false,
+                command: None,
+            });
         }
 
-        let cursor_point = state.term.grid().cursor.point;
         let cursor_visible = state.term.mode().contains(TermMode::SHOW_CURSOR)
-            && display_offset == 0;
-        let cursor = point_to_viewport(display_offset, cursor_point)
-            .map(|p| (p.column.0, p.line))
+            && view_offset == 0;
+        let cursor = window
+            .iter()
+            .position(|&a| a == cursor_abs)
+            .map(|r| (cursor_point.column.0.min(cols.saturating_sub(1)), r))
             .unwrap_or((0, 0));
 
         TerminalSnapshot {
             cols,
             rows,
             cells,
+            gutters,
             cursor,
             cursor_visible,
             history_size,
-            display_offset,
+            display_offset: view_offset,
+            virtual_len,
         }
+    }
+}
+
+/// Highest absolute line that should show gutter chrome (lineno / time).
+fn content_extent_abs(state: &TermState, cursor_abs: usize) -> usize {
+    let mut extent = cursor_abs;
+    if let Some(last) = state.line_times.iter().rposition(|t| t.is_some()) {
+        extent = extent.max(last);
+    }
+    for b in state.marks.blocks() {
+        extent = extent.max(b.end_abs.max(b.header_abs));
+    }
+    extent
+}
+
+fn gutter_for_abs(
+    marks: &ShellMarks,
+    line_times: &[Option<NaiveTime>],
+    abs: usize,
+    content_extent: usize,
+) -> GutterInfo {
+    if abs > content_extent {
+        return GutterInfo {
+            abs,
+            lineno: None,
+            time_hm: None,
+            fold: None,
+            fold_guide: None,
+            block_id: None,
+            collapsed_mark: false,
+            command: None,
+        };
+    }
+
+    let time_hm = line_times.get(abs).and_then(|t| {
+        t.map(|tm| {
+            (
+                tm.hour() as u8,
+                tm.minute() as u8,
+                tm.second() as u8,
+            )
+        })
+    });
+    // Continuous absolute scrollback line numbers (1-based).
+    let lineno = Some((abs + 1) as u32);
+
+    let covering = marks.block_covering(abs);
+    let header = marks.header_at(abs);
+
+    let (fold, fold_guide, block_id, collapsed_mark, command) = if let Some(b) = header {
+        let foldable = b.end_abs > b.header_abs;
+        let fold = if foldable {
+            Some(if b.folded {
+                FoldControl::Expand
+            } else {
+                FoldControl::Collapse
+            })
+        } else {
+            None
+        };
+        let fold_guide = if foldable && !b.folded {
+            Some(FoldGuide::Header)
+        } else {
+            None
+        };
+        (
+            fold,
+            fold_guide,
+            Some(b.id),
+            foldable && b.folded,
+            Some(b.command.clone()),
+        )
+    } else if let Some(b) = covering.filter(|b| !b.folded) {
+        let guide = if abs == b.end_abs {
+            FoldGuide::End
+        } else {
+            FoldGuide::Middle
+        };
+        (None, Some(guide), Some(b.id), false, None)
+    } else {
+        (None, None, None, false, None)
+    };
+
+    let time_hm = time_hm.or_else(|| {
+        header.map(|b| {
+            (
+                b.time.hour() as u8,
+                b.time.minute() as u8,
+                b.time.second() as u8,
+            )
+        })
+    });
+
+    GutterInfo {
+        abs,
+        lineno,
+        time_hm,
+        fold,
+        fold_guide,
+        block_id,
+        collapsed_mark,
+        command,
+    }
+}
+
+/// First-write wall-clock stamp for absolute lines in `[from, to]` (inclusive).
+fn stamp_abs_range(state: &mut TermState, from: usize, to: usize) {
+    if to < from {
+        return;
+    }
+    let now = chrono::Local::now().time();
+    if state.line_times.len() <= to {
+        state.line_times.resize(to + 1, None);
+    }
+    for abs in from..=to {
+        if state.line_times[abs].is_none() {
+            state.line_times[abs] = Some(now);
+        }
+    }
+}
+
+fn apply_mark(state: &mut TermState, mark: Osc133Kind) {
+    let history_size = state.term.history_size();
+    let abs = cursor_abs(&state.term, history_size);
+    match mark {
+        Osc133Kind::OutputStart => {
+            state.marks.remote_osc = true;
+            // Command text usually sits on the line above after Enter.
+            let header_abs = abs.saturating_sub(1);
+            let cmd = line_text(&state.term, header_abs, history_size, state.cols);
+            let cmd = if cmd.is_empty() {
+                line_text(&state.term, abs, history_size, state.cols)
+            } else {
+                cmd
+            };
+            state.marks.on_output_start(header_abs, cmd);
+        }
+        Osc133Kind::CommandEnd { exit } => {
+            state.marks.remote_osc = true;
+            let end = abs.saturating_sub(1).max(0);
+            state.marks.on_command_end(end, exit);
+        }
+        Osc133Kind::PromptStart | Osc133Kind::InputStart => {
+            // Prompt begins: finalize any open block on the line above.
+            if state.marks.has_open() {
+                let end = abs.saturating_sub(1);
+                state.marks.on_command_end(end, None);
+            }
+        }
+    }
+}
+
+fn cursor_abs(term: &Term<VoidListener>, history_size: usize) -> usize {
+    let line = term.grid().cursor.point.line.0;
+    (history_size as i32 + line).max(0) as usize
+}
+
+fn line_text(
+    term: &Term<VoidListener>,
+    abs: usize,
+    history_size: usize,
+    cols: usize,
+) -> String {
+    let line = Line(abs as i32 - history_size as i32);
+    let mut s = String::with_capacity(cols);
+    for col in 0..cols {
+        let ch = term.grid()[Point::new(line, Column(col))].c;
+        s.push(if ch == '\0' { ' ' } else { ch });
+    }
+    s.trim_end().to_string()
+}
+
+fn build_virtual_abs(marks: &ShellMarks, total_abs: usize) -> Vec<usize> {
+    (0..total_abs)
+        .filter(|&a| !marks.is_folded_away(a))
+        .collect()
+}
+
+fn virtual_len(state: &TermState) -> usize {
+    let total = state.term.history_size() + state.rows;
+    build_virtual_abs(&state.marks, total).len()
+}
+
+fn sync_alacritty_scroll(state: &mut TermState) {
+    // Keep underlying grid near the same region for cursor metrics; virtual view
+    // is authoritative for painting when folds exist.
+    let hist = state.term.history_size();
+    let cur = state.term.grid().display_offset();
+    let target = state.view_offset.min(hist);
+    let delta = target as i32 - cur as i32;
+    if delta != 0 {
+        state.term.scroll_display(Scroll::Delta(delta));
     }
 }
 
@@ -282,9 +626,8 @@ fn brighten_if_bold(color: Color, bold: bool) -> Color {
 
 fn named_to_rgb(named: NamedColor, is_bg: bool) -> Rgb {
     match named {
-        // Pure black terminal background (WindTerm-style).
         NamedColor::Black | NamedColor::Background if is_bg => Rgb::new(0, 0, 0),
-        NamedColor::Black => Rgb::new(80, 80, 80), // visible "black" text on black bg
+        NamedColor::Black => Rgb::new(80, 80, 80),
         NamedColor::Red => Rgb::new(255, 85, 85),
         NamedColor::Green => Rgb::new(80, 250, 123),
         NamedColor::Yellow => Rgb::new(241, 250, 140),
@@ -320,30 +663,26 @@ fn indexed_to_rgb(idx: u8) -> Rgb {
         5 => Rgb::new(255, 121, 198),
         6 => Rgb::new(139, 233, 253),
         7 => Rgb::new(230, 230, 230),
-        8..=15 => named_to_rgb(
-            match idx {
-                8 => NamedColor::BrightBlack,
-                9 => NamedColor::BrightRed,
-                10 => NamedColor::BrightGreen,
-                11 => NamedColor::BrightYellow,
-                12 => NamedColor::BrightBlue,
-                13 => NamedColor::BrightMagenta,
-                14 => NamedColor::BrightCyan,
-                _ => NamedColor::BrightWhite,
-            },
-            false,
-        ),
+        8 => Rgb::new(98, 114, 164),
+        9 => Rgb::new(255, 110, 110),
+        10 => Rgb::new(105, 255, 150),
+        11 => Rgb::new(255, 255, 170),
+        12 => Rgb::new(160, 240, 255),
+        13 => Rgb::new(255, 160, 220),
+        14 => Rgb::new(160, 240, 255),
+        15 => Rgb::new(255, 255, 255),
         16..=231 => {
             let n = idx - 16;
             let r = n / 36;
             let g = (n % 36) / 6;
             let b = n % 6;
-            let conv = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
-            Rgb::new(conv(r), conv(g), conv(b))
+            let map = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };
+            Rgb::new(map(r), map(g), map(b))
         }
         232..=255 => {
-            let gray = 8 + (idx - 232) * 10;
-            Rgb::new(gray, gray, gray)
+            let v = 8 + 10 * (idx - 232);
+            Rgb::new(v, v, v)
         }
     }
 }
+
