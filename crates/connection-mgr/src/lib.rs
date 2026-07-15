@@ -3,17 +3,19 @@
 mod backend;
 mod error;
 mod manager;
+mod process;
 mod remote_exec;
 mod ssh_io;
 mod system_ssh;
 mod user_error;
 
-pub use backend::{SshBackend, SshChannel, SshSession};
+pub use backend::{RemoteExec, SshBackend, SshChannel, SshSession};
 pub use error::ConnError;
 pub use manager::{
     ActiveConnection, ConnectionId, ConnectionManager, ConnectionMeta, ConnectionState,
     SharedConnectionManager,
 };
+pub use process::{command as gui_command, hide_console};
 pub use remote_exec::RemoteSession;
 pub use system_ssh::{
     auth_failure_text, backend_unavailable_error, expand_user_path, preflight, resolve_auth,

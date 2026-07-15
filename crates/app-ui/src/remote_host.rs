@@ -235,10 +235,8 @@ impl RemoteHostService {
         let prev_key = g
             .target
             .as_ref()
-            .map(|t| format!("{}@{}", t.session.config.username, t.session.config.host));
-        let next_key = remote
-            .as_ref()
-            .map(|r| format!("{}@{}", r.config.username, r.config.host));
+            .map(|t| t.session.display_key());
+        let next_key = remote.as_ref().map(|r| r.display_key());
         g.target = remote.map(|session| RemoteTarget {
             session,
             vault_path: vault_path.unwrap_or_default(),

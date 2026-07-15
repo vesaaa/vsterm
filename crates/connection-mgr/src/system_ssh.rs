@@ -641,28 +641,33 @@ pub fn system_ssh_install_hint() -> &'static str {
 }
 
 pub(crate) fn which_ssh() -> Option<PathBuf> {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHED.get_or_init(find_ssh).clone()
+}
+
+fn find_ssh() -> Option<PathBuf> {
     #[cfg(windows)]
     {
+        // Prefer absolute OpenSSH / Git paths first — no console spawn.
         for candidate in [
-            "ssh.exe",
             r"C:\Windows\System32\OpenSSH\ssh.exe",
             r"C:\Program Files\Git\usr\bin\ssh.exe",
         ] {
-            if candidate == "ssh.exe" {
-                if std::process::Command::new("where")
-                    .arg("ssh")
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-                {
-                    return Some(PathBuf::from("ssh"));
-                }
-            } else {
-                let p = PathBuf::from(candidate);
-                if p.exists() {
-                    return Some(p);
-                }
+            let p = PathBuf::from(candidate);
+            if p.exists() {
+                return Some(p);
             }
+        }
+        // Last resort: PATH lookup via `where` (hidden console).
+        let mut cmd = crate::process::command("where");
+        cmd.arg("ssh");
+        if cmd
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Some(PathBuf::from("ssh"));
         }
         None
     }

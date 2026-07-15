@@ -1,4 +1,4 @@
-//! Cross-platform UI fonts: prefer the OS native light CJK face; embed only as fallback.
+//! Cross-platform UI fonts: OS native CJK on Windows/macOS; embed only on Linux.
 //!
 //! | Platform | UI proportional                         | Terminal mono        |
 //! |----------|-----------------------------------------|----------------------|
@@ -6,7 +6,7 @@
 //! | macOS    | PingFang SC / Heiti SC Light            | JetBrains Mono       |
 //! | Linux    | System Noto CJK when present, else embed| JetBrains Mono       |
 //!
-//! Embedded Noto Sans SC Light remains the universal fallback so Chinese never tofu.
+//! Noto Sans SC Light is embedded **only on Linux** so Windows/macOS builds stay small.
 //! Loading system fonts for local rendering (not redistributing them) matches normal
 //! desktop-app practice.
 
@@ -16,11 +16,14 @@ use std::sync::Arc;
 
 const JETBRAINS_MONO_REGULAR: &[u8] =
     include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
+
+#[cfg(target_os = "linux")]
 const NOTO_SANS_SC_LIGHT: &[u8] =
     include_bytes!("../../../assets/fonts/NotoSansSC-Light.otf");
 
 const FAMILY_UI: &str = "VsTermUI";
 const FAMILY_MONO: &str = "JetBrainsMono";
+#[cfg(target_os = "linux")]
 const FAMILY_FALLBACK_CJK: &str = "NotoSansSC-Light";
 
 pub fn install(ctx: &egui::Context) {
@@ -30,43 +33,84 @@ pub fn install(ctx: &egui::Context) {
         FAMILY_MONO.to_owned(),
         Arc::new(FontData::from_static(JETBRAINS_MONO_REGULAR)),
     );
-    fonts.font_data.insert(
-        FAMILY_FALLBACK_CJK.to_owned(),
-        Arc::new(FontData::from_static(NOTO_SANS_SC_LIGHT)),
-    );
 
-    let (ui_name, ui_source) = match load_platform_ui_font() {
+    #[cfg(target_os = "linux")]
+    {
+        fonts.font_data.insert(
+            FAMILY_FALLBACK_CJK.to_owned(),
+            Arc::new(FontData::from_static(NOTO_SANS_SC_LIGHT)),
+        );
+    }
+
+    let default_proportional = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+
+    let (ui_source, ui_family) = match load_platform_ui_font() {
         Some((label, data)) => {
-            fonts.font_data.insert(FAMILY_UI.to_owned(), Arc::new(data));
-            (FAMILY_UI.to_owned(), label)
+            fonts
+                .font_data
+                .insert(FAMILY_UI.to_owned(), Arc::new(data));
+            (label, Some(FAMILY_UI.to_owned()))
         }
-        None => (FAMILY_FALLBACK_CJK.to_owned(), "embedded Noto Sans SC Light".into()),
+        None => {
+            #[cfg(target_os = "linux")]
+            {
+                (
+                    "embedded Noto Sans SC Light".into(),
+                    Some(FAMILY_FALLBACK_CJK.to_owned()),
+                )
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                ("egui default (no system CJK font found)".into(), None)
+            }
+        }
     };
 
-    // Proportional: system (or embedded) UI first, then embedded CJK as glyph coverage backup.
-    let mut proportional = vec![ui_name.clone()];
-    if ui_name != FAMILY_FALLBACK_CJK {
-        proportional.push(FAMILY_FALLBACK_CJK.to_owned());
+    if let Some(ref ui) = ui_family {
+        let mut proportional = vec![ui.clone()];
+        #[cfg(target_os = "linux")]
+        {
+            if ui.as_str() != FAMILY_FALLBACK_CJK {
+                proportional.push(FAMILY_FALLBACK_CJK.to_owned());
+            }
+        }
+        fonts
+            .families
+            .insert(FontFamily::Proportional, proportional);
     }
-    fonts
-        .families
-        .insert(FontFamily::Proportional, proportional);
 
-    fonts.families.insert(
-        FontFamily::Monospace,
-        vec![FAMILY_MONO.to_owned(), ui_name.clone(), FAMILY_FALLBACK_CJK.to_owned()],
-    );
+    let mut mono = vec![FAMILY_MONO.to_owned()];
+    if let Some(ref ui) = ui_family {
+        mono.push(ui.clone());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if ui_family.as_deref() != Some(FAMILY_FALLBACK_CJK) {
+            mono.push(FAMILY_FALLBACK_CJK.to_owned());
+        }
+    }
+    if ui_family.is_none() {
+        // Still cover CJK (where possible) via egui's default proportional stack.
+        mono.extend(default_proportional);
+    }
+    fonts.families.insert(FontFamily::Monospace, mono);
 
-    // Lucide icon font (flat stroke glyphs) — separate family, not used for body text.
     register_lucide_fonts(&mut fonts);
 
     ctx.set_fonts(fonts);
     apply_text_styles(ctx);
 
+    #[cfg(target_os = "linux")]
     tracing::info!(
         "fonts: UI={ui_source}; mono=JetBrains Mono; CJK fallback=Noto Sans SC Light ({} KB); icons=Lucide",
         NOTO_SANS_SC_LIGHT.len() / 1024
     );
+    #[cfg(not(target_os = "linux"))]
+    tracing::info!("fonts: UI={ui_source}; mono=JetBrains Mono; CJK=system only; icons=Lucide");
 }
 
 fn register_lucide_fonts(fonts: &mut FontDefinitions) {
@@ -75,7 +119,6 @@ fn register_lucide_fonts(fonts: &mut FontDefinitions) {
         fonts
             .font_data
             .insert(family.clone(), Arc::new(FontData::from_static(asset.bytes)));
-        // Dedicated named family so IconId can select Lucide without CJK fallback swapping glyphs.
         fonts
             .families
             .insert(FontFamily::Name(family.clone().into()), vec![family]);
@@ -128,10 +171,9 @@ fn load_platform_ui_font() -> Option<(String, FontData)> {
 
 #[cfg(target_os = "windows")]
 fn load_windows_ui_font() -> Option<(String, FontData)> {
-    // 微软雅黑细体 → 微软雅黑 → UI 变体
-    let windir = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(r"C:\Windows")
-    });
+    let windir = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
     let fonts_dir = windir.join("Fonts");
     let candidates: &[(&str, u32, &str)] = &[
         ("msyhl.ttc", 0, "Microsoft YaHei Light"),
@@ -144,8 +186,6 @@ fn load_windows_ui_font() -> Option<(String, FontData)> {
 
 #[cfg(target_os = "macos")]
 fn load_macos_ui_font() -> Option<(String, FontData)> {
-    // Prefer modern PingFang SC Light; fall back to classic Heiti SC Light / Songti.
-    // Face indices vary by macOS version — probe a few common Light slots.
     let candidates: &[(&str, &[u32], &str)] = &[
         (
             "/System/Library/Fonts/PingFang.ttc",
@@ -173,7 +213,6 @@ fn load_macos_ui_font() -> Option<(String, FontData)> {
             return Some(((*label).into(), data));
         }
     }
-    // Newer macOS may keep PingFang under MobileAsset after download.
     if let Ok(entries) = std::fs::read_dir("/System/Library/AssetsV2") {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -192,7 +231,6 @@ fn load_macos_ui_font() -> Option<(String, FontData)> {
 
 #[cfg(target_os = "linux")]
 fn load_linux_ui_font() -> Option<(String, FontData)> {
-    // Prefer a system Noto CJK Light when distro ships it; else caller uses embed.
     let candidates: &[(&str, u32, &str)] = &[
         (
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Light.ttc",

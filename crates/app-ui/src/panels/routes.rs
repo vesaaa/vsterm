@@ -4,7 +4,6 @@ use crate::i18n;
 use connection_mgr::RemoteSession;
 use egui::{Color32, RichText, Ui};
 use std::path::Path;
-use std::process::Command;
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -49,7 +48,7 @@ fn cache() -> &'static Mutex<RouteCache> {
 
 pub fn show_panel(ui: &mut Ui, remote: Option<&RemoteSession>, vault_path: Option<&Path>) {
     let source_key = remote
-        .map(|r| format!("{}@{}", r.config.username, r.config.host))
+        .map(|r| r.display_key())
         .unwrap_or_else(|| "local".into());
 
     poll_fetch();
@@ -248,17 +247,16 @@ fn fetch_remote_routes(
 fn fetch_routes() -> Result<(Vec<RouteRow>, String), String> {
     #[cfg(windows)]
     {
-        let output = Command::new("route")
-            .arg("print")
-            .output()
-            .map_err(|e| e.to_string())?;
+        let mut cmd = connection_mgr::gui_command("route");
+        cmd.arg("print");
+        let output = cmd.output().map_err(|e| e.to_string())?;
         let raw = decode_command_output(&output.stdout);
         let rows = parse_windows_route(&raw);
         Ok((rows, raw))
     }
     #[cfg(not(windows))]
     {
-        let output = Command::new("sh")
+        let output = connection_mgr::gui_command("sh")
             .args([
                 "-c",
                 "ip route 2>/dev/null || netstat -rn 2>/dev/null || route -n",

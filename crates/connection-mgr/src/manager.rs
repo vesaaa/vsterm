@@ -320,10 +320,7 @@ impl ConnectionManager {
             io: Some(ConnectionIo::Ssh(io)),
             ssh_session: None,
             error_message: None,
-            remote: Some(RemoteSession {
-                config: config.clone(),
-                interactive_password: None,
-            }),
+            remote: Some(RemoteSession::system(config.clone(), None)),
             is_local_shell: false,
         };
         self.insert(conn);

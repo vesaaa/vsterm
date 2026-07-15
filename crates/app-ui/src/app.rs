@@ -275,10 +275,7 @@ impl VsTermApp {
         let mgr = Arc::clone(&self.connections);
         let vault_path = self.store.as_ref().map(|s| s.paths().vault_path());
         let (tx, rx) = mpsc::channel();
-        let remote = RemoteSession {
-            config: config.clone(),
-            interactive_password: interactive_password.clone(),
-        };
+        let remote = RemoteSession::system(config.clone(), interactive_password.clone());
 
         let config_for_thread = config.clone();
         let config_for_pending = config.clone();

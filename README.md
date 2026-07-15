@@ -1,9 +1,15 @@
 # VsTerm
 
-跨平台 SSH 终端管理工具（Rust 原生），对标 WindTerm / Termius。
+<p align="center">
+  <img src="assets/branding/logo.png" alt="VsTerm" width="160" height="160">
+</p>
+
+<p align="center">
+  <strong>跨平台 SSH 终端管理工具</strong>（Rust 原生）· 对标 WindTerm / Termius
+</p>
 
 - GUI：`egui` + `eframe`（`wgpu`：Windows DX12 / macOS Metal / Linux Vulkan）
-- 字体：内嵌 JetBrains Mono（终端）+ Noto Sans SC Light（界面中文，细体）
+- 字体：内嵌 JetBrains Mono（终端）；Windows/macOS 用系统中文界面字体，仅 Linux 内嵌 Noto Sans SC Light 作兜底
 - 终端仿真：`alacritty_terminal`
 - SSH：双内核 `russh`（内置）+ 系统 `ssh`（`portable-pty`）
 - 配置：YAML；凭据：系统 keyring + 加密 vault
@@ -23,7 +29,10 @@
 
 ```
 vsterm/
-├── assets/fonts/         # 内嵌字体（OFL）
+├── assets/
+│   ├── branding/         # README / 文档用 logo
+│   ├── fonts/            # 内嵌字体（OFL）
+│   └── icons/            # 应用图标（Windows/macOS/Linux/Web）
 ├── crates/
 │   ├── session-tree/
 │   ├── vault/

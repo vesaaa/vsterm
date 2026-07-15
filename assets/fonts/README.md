@@ -1,11 +1,9 @@
 ﻿# Embedded fonts
 
-| File | Source | License |
-|------|--------|---------|
-| JetBrainsMono-Regular.ttf | https://github.com/JetBrains/JetBrainsMono | SIL OFL 1.1 |
-| NotoSansSC-Light.otf | https://github.com/notofonts/noto-cjk (`Sans/SubsetOTF/SC`) | SIL OFL 1.1 |
+| File | Source | License | When embedded |
+|------|--------|---------|---------------|
+| JetBrainsMono-Regular.ttf | https://github.com/JetBrains/JetBrainsMono | SIL OFL 1.1 | All platforms (terminal) |
+| NotoSansSC-Light.otf | https://github.com/notofonts/noto-cjk (`Sans/SubsetOTF/SC`) | SIL OFL 1.1 | **Linux only** (UI CJK fallback) |
 
-UI uses **Noto Sans SC Light** for a thinner look (similar to FinalShell / WindTerm).
-Terminal uses **JetBrains Mono Regular**.
-
-Embedded at compile time — no system font dependency.
+On Windows / macOS the UI uses system CJK fonts (YaHei Light / PingFang SC, …).
+Terminal uses **JetBrains Mono Regular** on every platform.

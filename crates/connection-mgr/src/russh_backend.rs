@@ -1,4 +1,10 @@
 //! Builtin SSH engine based on `russh` (fully wired in stage 4).
+//!
+//! When ready:
+//! 1. Implement [`SshBackend`] / [`SshSession`] for interactive PTY.
+//! 2. Implement [`crate::RemoteExec`] for one-shot metrics/routes over an `exec`
+//!    channel on the same authenticated client (no `ssh.exe`, no console).
+//! 3. Attach with [`crate::RemoteSession::from_exec`] `(username, host, exec)`.
 
 use crate::backend::{SshBackend, SshChannel, SshSession};
 use crate::ConnError;

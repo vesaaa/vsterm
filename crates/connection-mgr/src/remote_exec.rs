@@ -1,37 +1,82 @@
-//! One-shot remote command execution via system `ssh` (metrics / routes).
+//! One-shot remote command execution (metrics / routes).
 //!
-//! Password auth uses `SSH_ASKPASS` + `SSH_ASKPASS_REQUIRE=force` with the
-//! running `vsterm` binary itself acting as the askpass helper.
+//! Callers go through [`RemoteSession`] → [`RemoteExec`]. Today only the system
+//! OpenSSH path is wired; the builtin russh engine plugs in by implementing
+//! [`RemoteExec`] and using [`RemoteSession::from_exec`].
 
+use crate::backend::RemoteExec;
 use crate::error::ConnError;
+use crate::process;
 use crate::system_ssh::{resolve_auth, system_ssh_missing, which_ssh, AuthMaterial};
 use session_tree::{AuthConfig, SessionConfig};
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use vault::Vault;
 
-/// Credentials + target needed to run commands on a connected SSH host.
+/// UI-facing handle for running commands on the connected SSH host.
+///
+/// Holds an engine-agnostic [`RemoteExec`] so system `ssh` and future russh
+/// share the same call path (`run_command`).
 #[derive(Clone)]
 pub struct RemoteSession {
-    pub config: SessionConfig,
-    /// Password entered in UI for this connection (not persisted).
-    pub interactive_password: Option<String>,
+    /// Stable identity for UI cache keys (metrics / routes).
+    pub username: String,
+    pub host: String,
+    exec: Arc<dyn RemoteExec>,
 }
 
 impl RemoteSession {
+    /// System OpenSSH: each call may spawn `ssh.exe` (always via [`process::command`]).
+    pub fn system(config: SessionConfig, interactive_password: Option<String>) -> Self {
+        Self {
+            username: config.username.clone(),
+            host: config.host.clone(),
+            exec: Arc::new(SystemRemoteExec {
+                config,
+                interactive_password,
+            }),
+        }
+    }
+
+    /// Attach any engine (system, russh, …) behind the same facade.
+    pub fn from_exec(username: String, host: String, exec: Arc<dyn RemoteExec>) -> Self {
+        Self {
+            username,
+            host,
+            exec,
+        }
+    }
+
+    pub fn display_key(&self) -> String {
+        format!("{}@{}", self.username, self.host)
+    }
+
     pub fn run_command(&self, vault: Option<&Vault>, remote_cmd: &str) -> Result<String, ConnError> {
+        self.exec.run_command(vault, remote_cmd)
+    }
+}
+
+/// System-backend exec: `ssh -T user@host 'sh -s <<…'`.
+struct SystemRemoteExec {
+    config: SessionConfig,
+    interactive_password: Option<String>,
+}
+
+impl RemoteExec for SystemRemoteExec {
+    fn run_command(&self, vault: Option<&Vault>, remote_cmd: &str) -> Result<String, ConnError> {
         let auth = resolve_auth(
             &self.config,
             vault,
             self.interactive_password.clone(),
         )?;
-        run_remote_command(&self.config, &auth, remote_cmd)
+        run_system_ssh(&self.config, &auth, remote_cmd)
     }
 }
 
-fn run_remote_command(
+fn run_system_ssh(
     config: &SessionConfig,
     auth: &AuthMaterial,
     remote_cmd: &str,
@@ -52,7 +97,8 @@ fn run_remote_command(
         .clone()
         .or_else(|| auth.passphrase.clone());
 
-    let mut cmd = Command::new(&ssh);
+    // Unified spawn entry — CREATE_NO_WINDOW on Windows.
+    let mut cmd = process::command(&ssh);
     cmd.arg("-T")
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
@@ -141,7 +187,6 @@ fn run_remote_command(
     if looks_like_auth_failure(&text) || looks_like_auth_failure(&err_s) {
         return Err(ConnError::AuthFailed("authentication failed".into()));
     }
-    // Prefer stdout for structured metrics; only fall back to stderr when empty.
     let body = if text.contains("VSTERM_BEGIN") {
         text
     } else if err_s.contains("VSTERM_BEGIN") {
@@ -156,22 +201,16 @@ fn run_remote_command(
         }
         combined
     };
-    if !status.success() && !body.contains("VSTERM_BEGIN") {
-        // BusyBox/OpenWrt often exits 127 ("command not found") from a failed
-        // alternative in a probe chain while an earlier command already printed
-        // useful stdout. Accept non-empty stdout so callers can still parse it.
-        if body.trim().is_empty() {
-            return Err(ConnError::Connect(format!(
-                "ssh exit {status}: {}",
-                truncate(&body, 240)
-            )));
-        }
+    if !status.success() && !body.contains("VSTERM_BEGIN") && body.trim().is_empty() {
+        return Err(ConnError::Connect(format!(
+            "ssh exit {status}: {}",
+            truncate(&body, 240)
+        )));
     }
     Ok(body)
 }
 
 /// Feed a multi-line script without nested-quote breakage (Windows OpenSSH + dash).
-/// Heredoc keeps `$`, quotes and parentheses intact on the remote side.
 fn wrap_sh_c(script: &str) -> String {
     format!(
         "sh -s <<'VSTERM_EOF'\n{}\nVSTERM_EOF",
