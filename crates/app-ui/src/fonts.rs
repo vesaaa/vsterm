@@ -71,11 +71,18 @@ pub fn install(ctx: &egui::Context) {
     };
 
     if let Some(ref ui) = ui_family {
+        // Keep egui defaults behind the UI font so rare symbols (menu ▸ / emoji)
+        // still resolve instead of rendering as `?`.
         let mut proportional = vec![ui.clone()];
         #[cfg(target_os = "linux")]
         {
             if ui.as_str() != FAMILY_FALLBACK_CJK {
                 proportional.push(FAMILY_FALLBACK_CJK.to_owned());
+            }
+        }
+        for name in &default_proportional {
+            if !proportional.iter().any(|n| n == name) {
+                proportional.push(name.clone());
             }
         }
         fonts

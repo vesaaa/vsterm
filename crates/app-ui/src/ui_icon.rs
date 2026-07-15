@@ -23,6 +23,14 @@ pub enum Icon {
     Pencil,
     Trash,
     Plus,
+    Languages,
+    Sparkles,
+    Plug,
+    Unplug,
+    RefreshCw,
+    LogOut,
+    Check,
+    ChevronRight,
 }
 
 impl Icon {
@@ -38,6 +46,14 @@ impl Icon {
             Icon::Pencil => "pencil",
             Icon::Trash => "trash-2",
             Icon::Plus => "plus",
+            Icon::Languages => "languages",
+            Icon::Sparkles => "sparkles",
+            Icon::Plug => "plug",
+            Icon::Unplug => "unplug",
+            Icon::RefreshCw => "refresh-cw",
+            Icon::LogOut => "log-out",
+            Icon::Check => "check",
+            Icon::ChevronRight => "chevron-right",
         }
     }
 
@@ -47,6 +63,8 @@ impl Icon {
             Icon::Trash => Some("trash"),
             Icon::FolderPlus => Some("folder"),
             Icon::Pencil => Some("pen-line"),
+            Icon::Sparkles => Some("wand"),
+            Icon::Unplug => Some("plug"),
             _ => None,
         }
     }

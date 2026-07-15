@@ -523,6 +523,32 @@ impl ConnectionManager {
         self.bump();
     }
 
+    /// Insert a Failed host tab so the user can reconnect via the status light
+    /// after exhausted auth attempts on a fresh connect (no existing tab).
+    pub fn insert_failed_host(
+        &self,
+        config: &SessionConfig,
+        message: impl Into<String>,
+    ) -> ConnectionId {
+        let id = ConnectionId::new();
+        let terminal = TerminalHandle::new(80, 24);
+        let conn = ActiveConnection {
+            id,
+            title: config.name.clone(),
+            color_tag: config.color_tag.clone(),
+            state: ConnectionState::Failed,
+            session_id: Some(config.id.clone()),
+            terminal,
+            io: None,
+            ssh_session: None,
+            error_message: Some(message.into()),
+            remote: None,
+            is_local_shell: false,
+        };
+        self.insert(conn);
+        id
+    }
+
     pub fn mark_disconnected(&self, id: ConnectionId) {
         let mut conns = self.connections.lock();
         let Some(conn) = conns.get_mut(&id) else {

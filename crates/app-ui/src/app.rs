@@ -1,6 +1,6 @@
 use crate::commands::CommandBook;
 use crate::conn_error::{format_conn_error, ConnErrorDisplay};
-use crate::fx::FxLayer;
+use crate::fx::{ConnectFxMode, FxLayer};
 use crate::i18n::{self, Locale};
 use crate::metrics::{HostSnapshot, MetricsService};
 use crate::remote_host::RemoteHostService;
@@ -72,6 +72,8 @@ pub struct VsTermApp {
     status: String,
     last_term_size: (u16, u16),
     locale: Locale,
+    /// Connect / reconnect motion preference (trail / shatter / off).
+    connect_fx: ConnectFxMode,
     pending_connect: Option<PendingConnect>,
     error_dialog: Option<ConnErrorDisplay>,
     auth_prompt: Option<AuthPromptState>,
@@ -88,10 +90,12 @@ pub struct VsTermApp {
     fx: FxLayer,
     /// Last painted auth dialog rect (for suck-in / spit-out FX).
     last_auth_dialog_rect: Option<egui::Rect>,
-    /// Session waiting for spit-out morph to finish before showing the auth dialog.
-    pending_spit_auth: Option<SessionConfig>,
-    /// Status-light rect queued until the next frame has a screen size for spit target.
+    /// Prompt held while the spit-out morph plays; shown when the morph lands.
+    pending_spit_auth: Option<AuthPromptState>,
+    /// Status-light rect (spit origin), pending until we've measured the dialog size.
     pending_spit_from: Option<egui::Rect>,
+    /// True while an off-screen auth dialog is being measured for the spit target.
+    spit_measuring: bool,
 }
 
 impl VsTermApp {
@@ -101,6 +105,7 @@ impl VsTermApp {
 
         let locale = load_locale();
         i18n::set(locale);
+        let connect_fx = load_connect_fx();
 
         let (store, tree, status) = match bootstrap_store() {
             Ok((store, tree)) => {
@@ -136,6 +141,7 @@ impl VsTermApp {
             status,
             last_term_size: (80, 24),
             locale,
+            connect_fx,
             pending_connect: None,
             error_dialog: None,
             auth_prompt: None,
@@ -150,6 +156,7 @@ impl VsTermApp {
             last_auth_dialog_rect: None,
             pending_spit_auth: None,
             pending_spit_from: None,
+            spit_measuring: false,
         }
     }
 
@@ -261,9 +268,22 @@ impl VsTermApp {
         if let Err(()) = self.preflight_before_auth(&config) {
             return;
         }
-        self.auth_prompt = None;
-        self.pending_spit_auth = Some(config);
+        if !self.connect_fx.motion_enabled() {
+            // No trail / spit — open the prompt immediately.
+            self.auth_prompt = Some(AuthPromptState::for_session(config, 1));
+            self.pending_spit_auth = None;
+            self.pending_spit_from = None;
+            self.spit_measuring = false;
+            return;
+        }
+        // Render the real dialog off-screen for one frame to capture its exact
+        // size, so the spit-out morph lands precisely where the dialog appears.
+        let mut prompt = AuthPromptState::for_session(config, 1);
+        prompt.measure_only = true;
+        self.auth_prompt = Some(prompt);
+        self.pending_spit_auth = None;
         self.pending_spit_from = Some(from_light);
+        self.spit_measuring = true;
     }
 
     /// Returns `Err(())` after surfacing an error dialog / clearing reconnect.
@@ -496,7 +516,10 @@ impl VsTermApp {
                 self.sync_host_binding();
                 self.status = i18n::t("status.connected");
                 if let Some(rect) = self.last_auth_dialog_rect.take() {
-                    self.fx.begin_auth_suck(rect);
+                    if self.connect_fx.motion_enabled() {
+                        let accent = crate::fx::accent_from_tag(pending.config.color_tag.as_deref());
+                        self.fx.begin_auth_suck(rect, accent);
+                    }
                 }
                 self.auth_prompt = None;
             }
@@ -531,22 +554,38 @@ impl VsTermApp {
                     self.auth_prompt = Some(prompt);
                     self.status = i18n::t("dialog.auth.retry");
                 } else {
-                    if let Some(id) = pending.replace_id {
-                        let msg = failure
-                            .detail
-                            .clone()
-                            .unwrap_or_else(|| i18n::t("status.open_failed"));
-                        self.connections.mark_failed(id, msg);
+                    let msg = failure
+                        .detail
+                        .clone()
+                        .unwrap_or_else(|| i18n::t("status.open_failed"));
+                    let auth_exhausted = matches!(
+                        failure.key,
+                        ConnErrorKey::AuthFailed | ConnErrorKey::PrivateKeyMissing
+                    );
+                    if auth_exhausted {
+                        // No modal — leave / create a Failed host tab; status light reopens auth.
+                        if let Some(id) = pending.replace_id {
+                            self.connections.mark_failed(id, msg);
+                        } else {
+                            let id = self
+                                .connections
+                                .insert_failed_host(&pending.config, msg);
+                            self.connections.set_active(id);
+                            self.left_tab = LeftTab::Monitor;
+                            self.main_tab = MainTab::Terminal;
+                        }
+                        self.sync_host_binding();
+                        self.auth_prompt = None;
+                        self.status = i18n::t("dialog.password.max_attempts");
+                    } else {
+                        if let Some(id) = pending.replace_id {
+                            self.connections.mark_failed(id, msg);
+                        }
+                        self.auth_prompt = None;
+                        self.error_dialog =
+                            Some(crate::conn_error::format_connect_failure(&failure));
+                        self.status = i18n::t("status.open_failed");
                     }
-                    self.auth_prompt = None;
-                    self.error_dialog =
-                        Some(crate::conn_error::format_connect_failure(&failure));
-                    if failure.key == ConnErrorKey::AuthFailed {
-                        self.error_dialog.as_mut().map(|d| {
-                            d.hint = i18n::t("dialog.password.max_attempts");
-                        });
-                    }
-                    self.status = i18n::t("status.open_failed");
                 }
             }
             Err(mpsc::TryRecvError::Empty) => {
@@ -564,12 +603,31 @@ impl VsTermApp {
 
     fn show_auth_prompt(&mut self, ctx: &egui::Context) {
         let mut action = None;
+        let mut spawn_sparks = None;
+        let motion = self.connect_fx.motion_enabled();
         if let Some(prompt) = &mut self.auth_prompt {
             let (act, rect) = connect_auth::show(ctx, prompt);
             action = act;
             if let Some(r) = rect {
                 self.last_auth_dialog_rect = Some(r);
+                // Spark ring once a fresh (non-error, visible) dialog first renders.
+                if !prompt.measure_only
+                    && !prompt.sparked
+                    && prompt.warn.is_none()
+                    && !prompt.verifying
+                {
+                    prompt.sparked = true;
+                    if motion {
+                        spawn_sparks = Some((
+                            r,
+                            crate::fx::accent_from_tag(prompt.config.color_tag.as_deref()),
+                        ));
+                    }
+                }
             }
+        }
+        if let Some((rect, accent)) = spawn_sparks {
+            self.fx.begin_dialog_sparks(rect, accent);
         }
         // After the dialog has been shown, auto-start the first public-key verification.
         let mut auto_connect = None;
@@ -611,7 +669,8 @@ impl VsTermApp {
             return;
         };
         let mut open = true;
-        egui::Window::new(i18n::t("dialog.error.title"))
+        let _title_bar = crate::dialog_chrome::CompactTitleBar::push(ctx);
+        egui::Window::new(crate::dialog_chrome::title(i18n::t("dialog.error.title")))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -631,9 +690,11 @@ impl VsTermApp {
                 ui.label(format!("{}:", i18n::t("dialog.error.hint")));
                 ui.label(&dialog.hint);
                 ui.add_space(10.0);
-                if ui.button(i18n::t("dialog.error.ok")).clicked() {
-                    self.error_dialog = None;
-                }
+                crate::dialog_chrome::centered_actions(ui, |ui| {
+                    if ui.button(i18n::t("dialog.error.ok")).clicked() {
+                        self.error_dialog = None;
+                    }
+                });
             });
         if !open {
             self.error_dialog = None;
@@ -643,8 +704,28 @@ impl VsTermApp {
     fn set_locale(&mut self, locale: Locale) {
         self.locale = locale;
         i18n::set(locale);
-        save_locale(locale);
+        save_app_config(locale, self.connect_fx);
         self.status = i18n::t("status.lang_changed");
+    }
+
+    fn set_connect_fx(&mut self, mode: ConnectFxMode) {
+        self.connect_fx = mode;
+        if !mode.motion_enabled() {
+            // Drop any in-flight morph when turning effects off.
+            self.fx = FxLayer::default();
+            if self.spit_measuring {
+                if let Some(mut p) = self.auth_prompt.take() {
+                    p.measure_only = false;
+                    self.auth_prompt = Some(p);
+                } else if let Some(mut p) = self.pending_spit_auth.take() {
+                    p.measure_only = false;
+                    self.auth_prompt = Some(p);
+                }
+                self.pending_spit_from = None;
+                self.spit_measuring = false;
+            }
+        }
+        save_app_config(self.locale, mode);
     }
 
     fn begin_add_server(&mut self, folder_id: Option<String>) {
@@ -899,7 +980,8 @@ impl VsTermApp {
                     .map(|(_, label)| label),
                 _ => None,
             };
-            egui::Window::new(title)
+            let _title_bar = crate::dialog_chrome::CompactTitleBar::push(ctx);
+            egui::Window::new(crate::dialog_chrome::title(title))
                 .id(egui::Id::new("folder_dialog"))
                 .open(&mut open)
                 .collapsible(false)
@@ -929,7 +1011,7 @@ impl VsTermApp {
                         ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
                     }
                     ui.add_space(10.0);
-                    ui.horizontal(|ui| {
+                    crate::dialog_chrome::centered_actions(ui, |ui| {
                         if ui.button(i18n::t("dialog.folder.save")).clicked() {
                             save = true;
                         }
@@ -967,7 +1049,8 @@ impl VsTermApp {
                 i18n::t("dialog.delete.folder").replace("{name}", name)
             }
         };
-        egui::Window::new(i18n::t("dialog.delete.title"))
+        let _title_bar = crate::dialog_chrome::CompactTitleBar::push(ctx);
+        egui::Window::new(crate::dialog_chrome::title(i18n::t("dialog.delete.title")))
             .id(egui::Id::new("delete_confirm"))
             .open(&mut open)
             .collapsible(false)
@@ -977,7 +1060,7 @@ impl VsTermApp {
             .show(ctx, |ui| {
                 ui.label(body);
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
+                crate::dialog_chrome::centered_actions(ui, |ui| {
                     if ui.button(i18n::t("dialog.delete.confirm")).clicked() {
                         confirm = true;
                     }
@@ -1130,20 +1213,39 @@ impl eframe::App for VsTermApp {
             self.sync_host_binding();
         }
 
-        if let Some(from) = self.pending_spit_from.take() {
-            let to = self
-                .last_auth_dialog_rect
-                .filter(|r| r.width() > 40.0 && r.height() > 40.0)
-                .unwrap_or_else(|| crate::fx::estimated_auth_dialog_rect(ctx.screen_rect()));
-            self.fx.begin_auth_spit(from, to);
-        }
         if self.fx.take_spit_finished() {
-            if let Some(cfg) = self.pending_spit_auth.take() {
-                self.auth_prompt = Some(AuthPromptState::for_session(cfg, 1));
-            }
+            // Morph landed on the dialog rect — reveal the real (input-ready) dialog.
+            self.auth_prompt = self.pending_spit_auth.take();
         }
 
         self.show_auth_prompt(ctx);
+
+        // Off-screen measurement finished this frame → launch the spit-out morph
+        // toward the dialog's true, centered rect, then hide it until the morph lands.
+        if self.spit_measuring {
+            let measured = self
+                .last_auth_dialog_rect
+                .filter(|r| r.width() > 40.0 && r.height() > 40.0);
+            if let (Some(from), Some(size_rect)) = (self.pending_spit_from, measured) {
+                let target = egui::Rect::from_center_size(
+                    ctx.screen_rect().center(),
+                    size_rect.size(),
+                );
+                let mut prompt = self.auth_prompt.take();
+                let accent = prompt
+                    .as_ref()
+                    .map(|p| crate::fx::accent_from_tag(p.config.color_tag.as_deref()))
+                    .unwrap_or(crate::fx::DEFAULT_ACCENT);
+                if let Some(p) = prompt.as_mut() {
+                    p.measure_only = false;
+                }
+                self.fx.begin_auth_spit(from, target, accent);
+                self.last_auth_dialog_rect = Some(target);
+                self.pending_spit_auth = prompt;
+                self.pending_spit_from = None;
+                self.spit_measuring = false;
+            }
+        }
         self.show_error_dialog(ctx);
         self.show_session_editor(ctx);
         self.show_folder_dialog(ctx);
@@ -1151,8 +1253,20 @@ impl eframe::App for VsTermApp {
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
+                use crate::ctx_menu;
+                use crate::ui_icon::Icon;
+
                 ui.menu_button(i18n::t("menu.file"), |ui| {
-                    if ui.button(i18n::t("menu.file.add_server")).clicked() {
+                    ctx_menu::prepare(ui);
+                    if ctx_menu::item(
+                        ui,
+                        Some(Icon::Server),
+                        &i18n::t("menu.file.add_server"),
+                        None,
+                        true,
+                    )
+                    .clicked()
+                    {
                         let folder_id = match &self.tree_selection {
                             Some(TreeSelection::Folder { id, .. }) => Some(id.clone()),
                             Some(TreeSelection::Session { session_ref, .. }) => {
@@ -1163,7 +1277,15 @@ impl eframe::App for VsTermApp {
                         self.begin_add_server(folder_id);
                         ui.close_menu();
                     }
-                    if ui.button(i18n::t("menu.file.add_folder")).clicked() {
+                    if ctx_menu::item(
+                        ui,
+                        Some(Icon::FolderPlus),
+                        &i18n::t("menu.file.add_folder"),
+                        None,
+                        true,
+                    )
+                    .clicked()
+                    {
                         let parent_id = match &self.tree_selection {
                             Some(TreeSelection::Folder { id, .. })
                                 if self.tree.can_nest_under(id) =>
@@ -1180,22 +1302,56 @@ impl eframe::App for VsTermApp {
                         });
                         ui.close_menu();
                     }
-                    ui.separator();
-                    if ui.button(i18n::t("menu.file.refresh_tree")).clicked() {
+                    ctx_menu::separator(ui);
+                    if ctx_menu::item(
+                        ui,
+                        Some(Icon::RefreshCw),
+                        &i18n::t("menu.file.refresh_tree"),
+                        None,
+                        true,
+                    )
+                    .clicked()
+                    {
                         self.reload_tree();
                         ui.close_menu();
                     }
-                    if ui.button(i18n::t("menu.file.new_local_shell")).clicked() {
+                    if ctx_menu::item(
+                        ui,
+                        Some(Icon::Terminal),
+                        &i18n::t("menu.file.new_local_shell"),
+                        None,
+                        true,
+                    )
+                    .clicked()
+                    {
                         self.open_local_shell("Local Shell");
                         ui.close_menu();
                     }
-                    ui.separator();
-                    if ui.button(i18n::t("menu.file.exit")).clicked() {
+                    ctx_menu::separator(ui);
+                    if ctx_menu::item(
+                        ui,
+                        Some(Icon::LogOut),
+                        &i18n::t("menu.file.exit"),
+                        None,
+                        true,
+                    )
+                    .clicked()
+                    {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
                 ui.menu_button(i18n::t("menu.connection"), |ui| {
-                    if ui.button(i18n::t("menu.connection.close")).clicked() {
+                    ctx_menu::prepare(ui);
+                    let can_close = self.connections.active_id().is_some();
+                    if ctx_menu::item(
+                        ui,
+                        Some(Icon::Unplug),
+                        &i18n::t("menu.connection.close"),
+                        None,
+                        can_close,
+                    )
+                    .clicked()
+                    {
                         if let Some(id) = self.connections.active_id() {
                             self.connections.close(id);
                             self.sync_host_binding();
@@ -1204,21 +1360,75 @@ impl eframe::App for VsTermApp {
                         ui.close_menu();
                     }
                 });
-                ui.menu_button(i18n::t("menu.language"), |ui| {
-                    if ui
-                        .selectable_label(self.locale == Locale::ZhCn, Locale::ZhCn.label())
+                ui.menu_button(i18n::t("menu.options"), |ui| {
+                    ctx_menu::prepare(ui);
+                    ctx_menu::submenu(ui, Some(Icon::Languages), &i18n::t("menu.language"), |ui| {
+                        if ctx_menu::check_item(
+                            ui,
+                            None,
+                            Locale::ZhCn.label(),
+                            self.locale == Locale::ZhCn,
+                            true,
+                        )
                         .clicked()
-                    {
-                        self.set_locale(Locale::ZhCn);
-                        ui.close_menu();
-                    }
-                    if ui
-                        .selectable_label(self.locale == Locale::En, Locale::En.label())
+                        {
+                            self.set_locale(Locale::ZhCn);
+                            ui.close_menu();
+                        }
+                        if ctx_menu::check_item(
+                            ui,
+                            None,
+                            Locale::En.label(),
+                            self.locale == Locale::En,
+                            true,
+                        )
                         .clicked()
-                    {
-                        self.set_locale(Locale::En);
-                        ui.close_menu();
-                    }
+                        {
+                            self.set_locale(Locale::En);
+                            ui.close_menu();
+                        }
+                    });
+                    ctx_menu::submenu(
+                        ui,
+                        Some(Icon::Sparkles),
+                        &i18n::t("menu.options.effects"),
+                        |ui| {
+                            ctx_menu::submenu(
+                                ui,
+                                Some(Icon::Plug),
+                                &i18n::t("menu.options.effects.connect"),
+                                |ui| {
+                                    for (mode, key) in [
+                                        (
+                                            ConnectFxMode::Trail,
+                                            "menu.options.effects.connect.trail",
+                                        ),
+                                        (
+                                            ConnectFxMode::Shatter,
+                                            "menu.options.effects.connect.shatter",
+                                        ),
+                                        (
+                                            ConnectFxMode::Off,
+                                            "menu.options.effects.connect.off",
+                                        ),
+                                    ] {
+                                        if ctx_menu::check_item(
+                                            ui,
+                                            None,
+                                            &i18n::t(key),
+                                            self.connect_fx == mode,
+                                            true,
+                                        )
+                                        .clicked()
+                                        {
+                                            self.set_connect_fx(mode);
+                                            ui.close_menu();
+                                        }
+                                    }
+                                },
+                            );
+                        },
+                    );
                 });
                 ui.label(egui::RichText::new(i18n::t("app.name")).size(13.0));
             });
@@ -1425,10 +1635,12 @@ impl eframe::App for VsTermApp {
                 egui::Id::new("active_host_tab_sep_mask"),
             ));
             painter.rect_filled(cover, 0.0, egui::Color32::from_rgb(255, 255, 255));
-            // Re-draw top/bottom tab borders over the masked strip.
+            // Re-stroke only the wiped segment on the col2 side — stop at the
+            // divider so borders don't spill into the main column.
             let stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(190, 205, 230));
-            painter.hline(tab_rect.x_range(), tab_rect.min.y, stroke);
-            painter.hline(tab_rect.x_range(), tab_rect.max.y - 1.0, stroke);
+            let border_x = egui::Rangef::new(cover.min.x, sep_x);
+            painter.hline(border_x, tab_rect.min.y, stroke);
+            painter.hline(border_x, tab_rect.max.y - 1.0, stroke);
         }
 
         // Third column: only show content for the currently active host.
@@ -1525,18 +1737,31 @@ fn bootstrap_store() -> anyhow::Result<(SessionStore, SessionTree)> {
 }
 
 fn load_locale() -> Locale {
+    load_app_config().0
+}
+
+fn load_connect_fx() -> ConnectFxMode {
+    load_app_config().1
+}
+
+fn load_app_config() -> (Locale, ConnectFxMode) {
     let path = AppPaths::default_root().join("config.yaml");
+    let mut locale = Locale::ZhCn;
+    let mut connect_fx = ConnectFxMode::default();
     if let Ok(text) = std::fs::read_to_string(path) {
         if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
             if let Some(code) = v.get("locale").and_then(|x| x.as_str()) {
-                return Locale::from_code(code);
+                locale = Locale::from_code(code);
+            }
+            if let Some(code) = v.get("connect_fx").and_then(|x| x.as_str()) {
+                connect_fx = ConnectFxMode::from_code(code);
             }
         }
     }
-    Locale::ZhCn
+    (locale, connect_fx)
 }
 
-fn save_locale(locale: Locale) {
+fn save_app_config(locale: Locale, connect_fx: ConnectFxMode) {
     let root = AppPaths::default_root();
     let _ = std::fs::create_dir_all(&root);
     let path = root.join("config.yaml");
@@ -1549,6 +1774,10 @@ fn save_locale(locale: Locale) {
     map.insert(
         serde_yaml::Value::String("locale".into()),
         serde_yaml::Value::String(locale.code().into()),
+    );
+    map.insert(
+        serde_yaml::Value::String("connect_fx".into()),
+        serde_yaml::Value::String(connect_fx.code().into()),
     );
     if let Ok(text) = serde_yaml::to_string(&serde_yaml::Value::Mapping(map)) {
         let _ = std::fs::write(path, text);

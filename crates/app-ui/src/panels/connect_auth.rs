@@ -1,5 +1,6 @@
 //! Interactive connect dialogs: username+password, or public-key path.
 
+use crate::dialog_chrome::{self, CompactTitleBar};
 use crate::i18n;
 use egui::{Color32, RichText};
 use session_tree::{AuthConfig, AuthType, SessionConfig};
@@ -38,6 +39,10 @@ pub struct AuthPromptState {
     pub server_ident: Option<String>,
     /// Started when auth/validation fails — drives horizontal shake offset.
     shake_born: Option<Instant>,
+    /// Render off-screen only to measure the true dialog rect (for spit-out FX targeting).
+    pub measure_only: bool,
+    /// Whether the appear-spark ring has been spawned for this dialog instance.
+    pub sparked: bool,
     ident_rx: Option<mpsc::Receiver<Option<String>>>,
 }
 
@@ -59,6 +64,8 @@ impl Clone for AuthPromptState {
             verifying: self.verifying,
             server_ident: self.server_ident.clone(),
             shake_born: self.shake_born,
+            measure_only: self.measure_only,
+            sparked: self.sparked,
             ident_rx: None,
         }
     }
@@ -104,6 +111,8 @@ impl AuthPromptState {
             verifying: false,
             server_ident: None,
             shake_born: None,
+            measure_only: false,
+            sparked: false,
             ident_rx: Some(ident_rx),
         }
     }
@@ -213,6 +222,7 @@ impl AuthPromptState {
 
     pub fn can_auto_verify(&self) -> bool {
         self.kind == AuthPromptKind::PublicKey
+            && !self.measure_only
             && self.dialog_shown
             && !self.auto_tried
             && !self.verifying
@@ -240,22 +250,26 @@ pub fn show(ctx: &egui::Context, state: &mut AuthPromptState) -> (Option<AuthPro
         AuthPromptKind::PublicKey => i18n::t("dialog.auth.key_title"),
     };
 
-    // Compact title bar: slightly smaller type + thinner vertical margin / interact height.
-    let old_interact_y = ctx.style().spacing.interact_size.y;
-    let old_window_margin = ctx.style().spacing.window_margin;
-    ctx.style_mut(|s| {
-        s.spacing.interact_size.y = 14.0;
-        s.spacing.window_margin = egui::Margin::symmetric(8, 3);
-    });
+    // Compact title bar — shared metrics with other modal dialogs.
+    let _title_bar = CompactTitleBar::push(ctx);
 
-    let title_text = RichText::new(format!("{} ({}/{})", title, state.attempt, max_attempts())).size(12.5);
-    let response = egui::Window::new(title_text)
+    let measuring = state.measure_only;
+    let title_text = dialog_chrome::title(format!("{} ({}/{})", title, state.attempt, max_attempts()));
+    let mut window = egui::Window::new(title_text)
         .id(egui::Id::new("connect_auth_prompt"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [shake_x, 0.0])
-        .default_width(400.0)
+        .default_width(400.0);
+    window = if measuring {
+        // Render off-screen (invisible) purely to capture the true rect size.
+        window
+            .constrain(false)
+            .anchor(egui::Align2::LEFT_TOP, [-10000.0, -10000.0])
+    } else {
+        window.anchor(egui::Align2::CENTER_CENTER, [shake_x, 0.0])
+    };
+    let response = window
         .show(ctx, |ui| {
             state.dialog_shown = true;
             if state.verifying {
@@ -306,7 +320,7 @@ pub fn show(ctx: &egui::Context, state: &mut AuthPromptState) -> (Option<AuthPro
                         .desired_width(f32::INFINITY)
                         .hint_text(i18n::t("dialog.auth.username_hint")),
                 );
-                if state.focus_username && enabled {
+                if state.focus_username && enabled && !measuring {
                     user_resp.request_focus();
                     state.focus_username = false;
                 }
@@ -342,13 +356,13 @@ pub fn show(ctx: &egui::Context, state: &mut AuthPromptState) -> (Option<AuthPro
                         )
                     }
                 };
-                if state.focus_secret && enabled {
+                if state.focus_secret && enabled && !measuring {
                     secret_resp.request_focus();
                     state.focus_secret = false;
                 }
 
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
+                crate::dialog_chrome::centered_actions(ui, |ui| {
                     let confirm_label = match state.kind {
                         AuthPromptKind::Password => i18n::t("dialog.auth.connect"),
                         AuthPromptKind::PublicKey => i18n::t("dialog.auth.verify"),
@@ -382,13 +396,13 @@ pub fn show(ctx: &egui::Context, state: &mut AuthPromptState) -> (Option<AuthPro
             });
         });
 
-    ctx.style_mut(|s| {
-        s.spacing.interact_size.y = old_interact_y;
-        s.spacing.window_margin = old_window_margin;
-    });
-
     if let Some(inner) = response {
         dialog_rect = Some(inner.response.rect);
+    }
+
+    if measuring {
+        // Measurement pass never yields an action.
+        return (None, dialog_rect);
     }
 
     if !open && !state.verifying {

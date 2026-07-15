@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>vsterm</string>
+    <string>VsTerm</string>
     <key>CFBundleIconFile</key>
     <string>VsTerm</string>
     <key>CFBundleIdentifier</key>

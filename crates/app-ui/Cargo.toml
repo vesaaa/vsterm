@@ -3,10 +3,10 @@ name = "app-ui"
 version.workspace = true
 edition.workspace = true
 description = "VsTerm egui application shell"
-default-run = "vsterm"
+default-run = "VsTerm"
 
 [[bin]]
-name = "vsterm"
+name = "VsTerm"
 path = "src/main.rs"
 
 [dependencies]

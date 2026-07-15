@@ -134,7 +134,8 @@ pub fn show(
         EditorMode::Edit => i18n::t("dialog.session.edit_title"),
     };
 
-    egui::Window::new(title)
+    let _title_bar = crate::dialog_chrome::CompactTitleBar::push(ctx);
+    egui::Window::new(crate::dialog_chrome::title(title))
         .id(egui::Id::new("session_editor"))
         .open(&mut open)
         .collapsible(false)
@@ -319,7 +320,7 @@ pub fn show(
             }
 
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
+            crate::dialog_chrome::centered_actions(ui, |ui| {
                 if ui.button(i18n::t("dialog.session.save")).clicked() {
                     if let Some(err) = validate(state) {
                         state.error = Some(err);

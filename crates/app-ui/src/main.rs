@@ -7,6 +7,7 @@
 mod app;
 mod commands;
 mod conn_error;
+mod dialog_chrome;
 mod remote_host;
 mod fonts;
 mod fx;

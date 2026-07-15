@@ -38,7 +38,7 @@ vsterm/
 │   ├── vault/
 │   ├── term-core/
 │   ├── connection-mgr/
-│   └── app-ui/           # egui 主程序 (bin: vsterm)
+│   └── app-ui/           # egui 主程序 (bin: VsTerm)
 ├── .github/workflows/    # CI + Release
 └── Cargo.toml
 ```

@@ -198,7 +198,7 @@ fn render_node(
                 crate::ctx_menu::prepare(ui);
                 if crate::ctx_menu::item(
                     ui,
-                    Icon::Server,
+                    Some(Icon::Server),
                     &i18n::t("tree.ctx.add_server"),
                     None,
                     true,
@@ -213,7 +213,7 @@ fn render_node(
                 if tree.can_nest_under(id)
                     && crate::ctx_menu::item(
                         ui,
-                        Icon::FolderPlus,
+                        Some(Icon::FolderPlus),
                         &i18n::t("tree.ctx.add_subfolder"),
                         None,
                         true,
@@ -228,7 +228,7 @@ fn render_node(
                 crate::ctx_menu::separator(ui);
                 if crate::ctx_menu::item(
                     ui,
-                    Icon::Pencil,
+                    Some(Icon::Pencil),
                     &i18n::t("tree.ctx.rename_folder"),
                     None,
                     true,
@@ -243,7 +243,7 @@ fn render_node(
                 }
                 if crate::ctx_menu::item(
                     ui,
-                    Icon::Trash,
+                    Some(Icon::Trash),
                     &i18n::t("tree.ctx.delete_folder"),
                     None,
                     true,
@@ -297,7 +297,7 @@ fn render_node(
                 crate::ctx_menu::prepare(ui);
                 if crate::ctx_menu::item(
                     ui,
-                    Icon::Terminal,
+                    Some(Icon::Terminal),
                     &i18n::t("tree.ctx.connect"),
                     None,
                     true,
@@ -312,7 +312,7 @@ fn render_node(
                 }
                 if crate::ctx_menu::item(
                     ui,
-                    Icon::Pencil,
+                    Some(Icon::Pencil),
                     &i18n::t("tree.ctx.edit"),
                     None,
                     true,
@@ -327,7 +327,7 @@ fn render_node(
                 crate::ctx_menu::separator(ui);
                 if crate::ctx_menu::item(
                     ui,
-                    Icon::Trash,
+                    Some(Icon::Trash),
                     &i18n::t("tree.ctx.delete"),
                     None,
                     true,

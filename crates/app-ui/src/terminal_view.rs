@@ -346,7 +346,7 @@ impl TerminalView {
             let paste_sc = crate::ctx_menu::shortcut_ctrl("V");
             if crate::ctx_menu::item(
                 ui,
-                crate::ui_icon::Icon::Copy,
+                Some(crate::ui_icon::Icon::Copy),
                 &crate::i18n::t("term.ctx.copy"),
                 Some(&copy_sc),
                 can_copy,
@@ -361,7 +361,7 @@ impl TerminalView {
 
             if crate::ctx_menu::item(
                 ui,
-                crate::ui_icon::Icon::Paste,
+                Some(crate::ui_icon::Icon::Paste),
                 &crate::i18n::t("term.ctx.paste"),
                 Some(&paste_sc),
                 can_input,

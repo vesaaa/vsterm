@@ -24,19 +24,19 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            bin: vsterm.exe
+            bin: VsTerm.exe
             asset: vsterm-windows-x64.zip
           - os: macos-latest
             target: x86_64-apple-darwin
-            bin: vsterm
+            bin: VsTerm
             asset: vsterm-macos-x64.tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
-            bin: vsterm
+            bin: VsTerm
             asset: vsterm-macos-arm64.tar.gz
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            bin: vsterm
+            bin: VsTerm
             asset: vsterm-linux-x64.tar.gz
 
     steps:
@@ -71,7 +71,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $dir = "dist/vsterm"
+          $dir = "dist/VsTerm"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" $dir/
           Copy-Item README.md $dir/
@@ -84,8 +84,8 @@ jobs:
         run: |
           APP="dist/VsTerm.app/Contents"
           mkdir -p "$APP/MacOS" "$APP/Resources"
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$APP/MacOS/vsterm"
-          chmod +x "$APP/MacOS/vsterm"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$APP/MacOS/VsTerm"
+          chmod +x "$APP/MacOS/VsTerm"
           cp assets/icons/macos/VsTerm.icns "$APP/Resources/"
           cp assets/icons/macos/Info.plist "$APP/"
           cp README.md dist/
@@ -96,19 +96,19 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist/vsterm/share/icons/hicolor/scalable/apps
+          mkdir -p dist/VsTerm/share/icons/hicolor/scalable/apps
           for sz in 16x16 22x22 24x24 32x32 48x48 64x64 128x128 256x256 512x512; do
-            mkdir -p "dist/vsterm/share/icons/hicolor/${sz}/apps"
-            cp "assets/icons/linux/${sz}/vsterm.png" "dist/vsterm/share/icons/hicolor/${sz}/apps/vsterm.png"
+            mkdir -p "dist/VsTerm/share/icons/hicolor/${sz}/apps"
+            cp "assets/icons/linux/${sz}/vsterm.png" "dist/VsTerm/share/icons/hicolor/${sz}/apps/vsterm.png"
           done
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/vsterm/
-          chmod +x "dist/vsterm/${{ matrix.bin }}"
-          cp README.md dist/vsterm/
-          cp assets/fonts/JetBrainsMono-OFL.txt dist/vsterm/
-          cp assets/fonts/NotoSansSC-OFL.txt dist/vsterm/
-          cp assets/icons/linux/vsterm.svg dist/vsterm/share/icons/hicolor/scalable/apps/
-          cp assets/icons/vsterm.desktop dist/vsterm/
-          tar -czvf "${{ matrix.asset }}" -C dist vsterm
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/VsTerm/
+          chmod +x "dist/VsTerm/${{ matrix.bin }}"
+          cp README.md dist/VsTerm/
+          cp assets/fonts/JetBrainsMono-OFL.txt dist/VsTerm/
+          cp assets/fonts/NotoSansSC-OFL.txt dist/VsTerm/
+          cp assets/icons/linux/vsterm.svg dist/VsTerm/share/icons/hicolor/scalable/apps/
+          cp assets/icons/vsterm.desktop dist/VsTerm/
+          tar -czvf "${{ matrix.asset }}" -C dist VsTerm
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
