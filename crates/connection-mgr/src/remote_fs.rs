@@ -116,6 +116,12 @@ pub trait RemoteFs: Send + Sync {
     fn remove(&self, remote_path: &str, is_dir: bool) -> Result<(), ConnError>;
 
     fn rename(&self, from: &str, to: &str) -> Result<(), ConnError>;
+
+    /// Create an empty remote directory (`mkdir`).
+    fn mkdir(&self, remote_path: &str) -> Result<(), ConnError>;
+
+    /// Create/overwrite a remote file with raw bytes (UTF-8 text uses plain bytes).
+    fn write_file(&self, remote_path: &str, data: &[u8]) -> Result<(), ConnError>;
 }
 
 /// Honest stub for system-OpenSSH sessions (SFTP not wired in v1).
@@ -171,6 +177,14 @@ impl RemoteFs for UnsupportedRemoteFs {
     }
 
     fn rename(&self, _from: &str, _to: &str) -> Result<(), ConnError> {
+        Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
+    }
+
+    fn mkdir(&self, _remote_path: &str) -> Result<(), ConnError> {
+        Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
+    }
+
+    fn write_file(&self, _remote_path: &str, _data: &[u8]) -> Result<(), ConnError> {
         Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
     }
 }

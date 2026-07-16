@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BottomTab {
@@ -38,7 +39,24 @@ struct ActiveTransfer {
     progress: ArcProgress,
     refresh_remote_on_ok: bool,
     open_after: Option<OpenAfter>,
+    is_upload: bool,
+    started: Instant,
+    last_bytes: u64,
+    last_sample: Instant,
+    /// Smoothed bytes/sec.
+    speed_bps: f64,
 }
+
+#[derive(Debug, Clone)]
+struct TransferLogItem {
+    name: String,
+    is_upload: bool,
+    ok: bool,
+    detail: String,
+}
+
+const TRANSFER_LOG_MAX: usize = 40;
+const PROGRESS_BAR_W: f32 = 300.0;
 
 #[derive(Debug, Clone, Copy)]
 enum OpenAfter {
@@ -52,17 +70,56 @@ struct InlineRename {
     request_focus: bool,
 }
 
+/// Waiting for a fresh OSC 7 after injecting a PTY cwd probe.
+struct CwdSyncPending {
+    started: Instant,
+    min_generation: u64,
+}
+
+/// Injected into the interactive PTY so the shell emits OSC 7 with `$PWD`.
+const CWD_PROBE_CMD: &str = "printf '\\033]7;file://localhost%s\\007' \"$PWD\"\n";
+
+#[derive(Debug, Clone)]
+struct RemoteDragPayload {
+    names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum QueuedTransfer {
+    Upload(PathBuf),
+    Download { name: String, dest: PathBuf },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectMode {
+    /// Plain click: replace selection.
+    Replace,
+    /// Ctrl/Cmd click: toggle one item.
+    Toggle,
+    /// Shift click: range from anchor.
+    Range,
+}
+
 #[derive(Debug, Clone)]
 enum EntryAction {
     Nav(String),
-    Select { name: String, toggle: bool },
+    Select { name: String, mode: SelectMode },
+    ClearSelection,
     Open { name: String, is_dir: bool },
     Edit { name: String },
     Delete { name: String, is_dir: bool },
     Rename { name: String },
     CommitRename,
     CancelRename,
-    Download { name: String },
+    Download { names: Vec<String> },
+    NewFolder,
+    /// Create a UTF-8 file with the given extension and initial body (may be empty).
+    NewFile {
+        ext: &'static str,
+        initial: &'static str,
+    },
+    UploadFile,
+    UploadFolder,
     ToggleTree(String),
 }
 
@@ -72,6 +129,8 @@ pub struct BottomPanelState {
     pub remote_path: String,
     download_dir: PathBuf,
     selected: HashSet<String>,
+    /// Anchor name for Shift+click range selection in the browse list.
+    selection_anchor: Option<String>,
     remote_entries: Vec<RemoteDirEntry>,
     remote_error: Option<String>,
     remote_loading: bool,
@@ -82,10 +141,14 @@ pub struct BottomPanelState {
     tree_expanded: HashSet<String>,
     tree_width: f32,
     transfer: Option<ActiveTransfer>,
-    /// Local paths waiting to upload after the current transfer finishes.
-    upload_queue: VecDeque<PathBuf>,
+    /// Uploads / downloads waiting after the current transfer finishes.
+    transfer_queue: VecDeque<QueuedTransfer>,
+    /// Recent finished transfers (newest at the front).
+    transfer_log: VecDeque<TransferLogItem>,
+    transfer_list_open: bool,
     status_line: Option<String>,
     inline_rename: Option<InlineRename>,
+    cwd_sync_pending: Option<CwdSyncPending>,
 }
 
 impl Default for BottomPanelState {
@@ -99,6 +162,7 @@ impl Default for BottomPanelState {
             remote_path: "/".into(),
             download_dir,
             selected: HashSet::new(),
+            selection_anchor: None,
             remote_entries: Vec::new(),
             remote_error: None,
             remote_loading: false,
@@ -109,9 +173,12 @@ impl Default for BottomPanelState {
             tree_expanded: HashSet::from(["/".into()]),
             tree_width: 180.0,
             transfer: None,
-            upload_queue: VecDeque::new(),
+            transfer_queue: VecDeque::new(),
+            transfer_log: VecDeque::new(),
+            transfer_list_open: false,
             status_line: None,
             inline_rename: None,
+            cwd_sync_pending: None,
         }
     }
 }
@@ -140,6 +207,7 @@ pub fn show(
     state: &mut BottomPanelState,
     book: &CommandBook,
     remote: Option<&RemoteSession>,
+    active_cwd: Option<(String, u64)>,
 ) -> Option<String> {
     let mut send_cmd = None;
     let panel_rect = ui.max_rect();
@@ -177,7 +245,15 @@ pub fn show(
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(4, 0))
                     .show(ui, |ui| {
-                        show_files_content(ui, state, remote, ui.max_rect().height());
+                        if let Some(cmd) = show_files_content(
+                            ui,
+                            state,
+                            remote,
+                            active_cwd.as_ref(),
+                            ui.max_rect().height(),
+                        ) {
+                            send_cmd = Some(cmd);
+                        }
                     });
             });
 
@@ -263,10 +339,14 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
         if let Some(t) = state.transfer.take() {
             t.progress.request_cancel();
         }
-        state.upload_queue.clear();
+        state.transfer_queue.clear();
+        state.transfer_log.clear();
+        state.transfer_list_open = false;
+        state.cwd_sync_pending = None;
         state.bound_key = key;
         state.remote_entries.clear();
         state.selected.clear();
+        state.selection_anchor = None;
         state.remote_error = None;
         state.pending_list = None;
         state.pending_queue.clear();
@@ -291,7 +371,13 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
                 {
                     state.remote_entries = entries;
                     state.remote_error = None;
-                    state.selected.clear();
+                    if state.inline_rename.is_none() {
+                        state.selected.clear();
+                    } else if let Some(r) = &state.inline_rename {
+                        state.selected.clear();
+                        state.selected.insert(r.old_name.clone());
+                        state.selection_anchor = Some(r.old_name.clone());
+                    }
                     state.remote_loading = false;
                     expand_tree_to(state, &path);
                 }
@@ -321,21 +407,46 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
         }
     }
 
+    if let Some(xfer) = state.transfer.as_mut() {
+        let snap = xfer.progress.snapshot();
+        if !snap.done {
+            update_transfer_speed(xfer, snap.transferred);
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+    }
+
     if let Some(xfer) = state.transfer.as_ref() {
         let snap = xfer.progress.snapshot();
         if snap.done {
             let refresh = xfer.refresh_remote_on_ok && snap.error.is_none();
             let open_after = xfer.open_after;
             let label = xfer.label.clone();
+            let is_upload = xfer.is_upload;
             let open_path = PathBuf::from(&label);
-            let msg = match &snap.error {
-                Some(e) => format_transfer_error(e),
-                None => format!(
-                    "{} — {}",
-                    i18n::t("bottom.files.transfer_ok"),
-                    path_leaf(&label)
-                ),
+            let leaf = path_leaf(&label).to_string();
+            let (msg, log_ok, log_detail) = match &snap.error {
+                Some(e) => {
+                    let err = format_transfer_error(e);
+                    (err.clone(), false, err)
+                }
+                None => {
+                    let detail = format_progress(snap.transferred, snap.total);
+                    (
+                        format!("{} — {leaf}", i18n::t("bottom.files.transfer_ok")),
+                        true,
+                        detail,
+                    )
+                }
             };
+            push_transfer_log(
+                state,
+                TransferLogItem {
+                    name: leaf,
+                    is_upload,
+                    ok: log_ok,
+                    detail: log_detail,
+                },
+            );
             state.transfer = None;
             state.status_line = Some(msg);
             if snap.error.is_none() {
@@ -355,9 +466,7 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
                 state.dir_cache.remove(&normalize_remote(&path));
                 request_dir(state, remote, &path, true);
             }
-            pump_upload_queue(state, remote);
-        } else {
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            pump_transfer_queue(state, remote);
         }
     }
 
@@ -401,38 +510,6 @@ fn handle_os_file_drop(
     remote: Option<&RemoteSession>,
     drop_rect: egui::Rect,
 ) {
-    if remote_mode(remote) != RemotePaneMode::Ready {
-        return;
-    }
-
-    let pointer_in_drop = ui
-        .ctx()
-        .pointer_interact_pos()
-        .or_else(|| ui.ctx().pointer_latest_pos())
-        .is_some_and(|p| drop_rect.contains(p));
-
-    let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
-    if hovering && pointer_in_drop {
-        let painter = ui.ctx().layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("vsterm_os_file_drop"),
-        ));
-        painter.rect_filled(drop_rect, 0.0, Color32::from_rgba_unmultiplied(40, 90, 160, 48));
-        painter.rect_stroke(
-            drop_rect.shrink(1.0),
-            0.0,
-            egui::Stroke::new(1.5_f32, Color32::from_rgb(70, 130, 210)),
-            StrokeKind::Inside,
-        );
-        painter.text(
-            drop_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            i18n::t("bottom.files.drop_upload"),
-            FontId::proportional(16.0),
-            Color32::from_rgb(30, 60, 110),
-        );
-    }
-
     let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
         i.raw
             .dropped_files
@@ -440,22 +517,76 @@ fn handle_os_file_drop(
             .filter_map(|f| f.path.clone())
             .collect()
     });
-    if dropped.is_empty() {
+    let has_os_drop = !dropped.is_empty();
+    let hovering_os = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+    let hovering_remote =
+        egui::DragAndDrop::has_payload_of_type::<RemoteDragPayload>(ui.ctx());
+
+    if remote_mode(remote) != RemotePaneMode::Ready {
+        if has_os_drop {
+            state.status_line = Some(i18n::t("bottom.files.err.no_sftp").into());
+        }
         return;
     }
 
-    // Drop events sometimes arrive without a live pointer; fall back to the
-    // last known position so a release over the files panel still counts.
-    let drop_pos = ui
-        .ctx()
-        .pointer_interact_pos()
-        .or_else(|| ui.ctx().pointer_latest_pos());
-    let over_target = drop_pos.is_some_and(|p| drop_rect.contains(p));
-    if !over_target {
-        return;
+    if hovering_os || hovering_remote {
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("vsterm_os_file_drop"),
+        ));
+        let fill = if hovering_remote {
+            Color32::from_rgba_unmultiplied(40, 140, 80, 48)
+        } else {
+            Color32::from_rgba_unmultiplied(40, 90, 160, 48)
+        };
+        let stroke = if hovering_remote {
+            Color32::from_rgb(50, 140, 80)
+        } else {
+            Color32::from_rgb(70, 130, 210)
+        };
+        let tip = if hovering_remote {
+            i18n::t("bottom.files.drop_download")
+        } else {
+            i18n::t("bottom.files.drop_upload")
+        };
+        painter.rect_filled(drop_rect, 0.0, fill);
+        painter.rect_stroke(
+            drop_rect.shrink(1.0),
+            0.0,
+            egui::Stroke::new(1.5_f32, stroke),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            drop_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            tip,
+            FontId::proportional(16.0),
+            Color32::from_rgb(30, 60, 110),
+        );
     }
 
-    enqueue_uploads(state, remote, dropped);
+    // Accept OS drops whenever the Files tab is active — pointer position at the
+    // drop frame is often already invalid on Windows, so do not gate on it.
+    if has_os_drop {
+        enqueue_uploads(state, remote, dropped);
+    }
+
+    // Remote → local: release an in-app drag over the files panel to pick a
+    // local folder and download there (Explorer OLE drag-out is not available).
+    if ui.input(|i| i.pointer.any_released()) {
+        let over = ui
+            .ctx()
+            .pointer_interact_pos()
+            .or_else(|| ui.ctx().pointer_latest_pos())
+            .is_some_and(|p| drop_rect.contains(p));
+        if over {
+            if let Some(payload) =
+                egui::DragAndDrop::take_payload::<RemoteDragPayload>(ui.ctx())
+            {
+                prompt_download_selection(state, remote, payload.names.clone());
+            }
+        }
+    }
 }
 
 fn enqueue_uploads(
@@ -463,49 +594,93 @@ fn enqueue_uploads(
     remote: Option<&RemoteSession>,
     paths: Vec<PathBuf>,
 ) {
-    let mut paths: Vec<PathBuf> = paths
-        .into_iter()
-        .filter(|p| p.exists())
-        .collect();
+    let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.exists()).collect();
     if paths.is_empty() {
         state.status_line = Some(i18n::t("bottom.files.err.local_missing").into());
         return;
     }
-
-    if state.transfer.is_none() {
-        let first = paths.remove(0);
-        state.status_line = Some(format!(
-            "{} {}",
-            i18n::t("bottom.files.uploading_to"),
-            first.display()
-        ));
-        start_upload(state, remote, first);
-    }
+    let n = paths.len();
     for path in paths {
-        state.upload_queue.push_back(path);
+        state
+            .transfer_queue
+            .push_back(QueuedTransfer::Upload(path));
     }
-    if !state.upload_queue.is_empty() {
-        let n = state.upload_queue.len();
-        let tip = format!("{} ({n})", i18n::t("bottom.files.upload_queued"));
-        if state.status_line.as_deref().unwrap_or("").is_empty() {
-            state.status_line = Some(tip);
+    state.status_line = Some(format!(
+        "{} ({n})",
+        i18n::t("bottom.files.upload_queued")
+    ));
+    pump_transfer_queue(state, remote);
+}
+
+fn enqueue_downloads(
+    state: &mut BottomPanelState,
+    remote: Option<&RemoteSession>,
+    items: Vec<(String, PathBuf)>,
+) {
+    if items.is_empty() {
+        return;
+    }
+    let n = items.len();
+    for (name, dest) in items {
+        state
+            .transfer_queue
+            .push_back(QueuedTransfer::Download { name, dest });
+    }
+    state.status_line = Some(format!(
+        "{} ({n})",
+        i18n::t("bottom.files.download_queued")
+    ));
+    pump_transfer_queue(state, remote);
+}
+
+fn pump_transfer_queue(state: &mut BottomPanelState, remote: Option<&RemoteSession>) {
+    if state.transfer.is_some() {
+        return;
+    }
+    let Some(next) = state.transfer_queue.pop_front() else {
+        return;
+    };
+    match next {
+        QueuedTransfer::Upload(path) => {
+            state.status_line = Some(format!(
+                "{} {}",
+                i18n::t("bottom.files.uploading_to"),
+                path.display()
+            ));
+            start_upload(state, remote, path);
+        }
+        QueuedTransfer::Download { name, dest } => {
+            state.status_line = Some(format!(
+                "{} {}",
+                i18n::t("bottom.files.downloading_to"),
+                dest.display()
+            ));
+            start_download(state, remote, &name, Some(dest), None);
         }
     }
 }
 
-fn pump_upload_queue(state: &mut BottomPanelState, remote: Option<&RemoteSession>) {
-    if state.transfer.is_some() {
+fn prompt_download_selection(
+    state: &mut BottomPanelState,
+    remote: Option<&RemoteSession>,
+    names: Vec<String>,
+) {
+    if names.is_empty() {
         return;
     }
-    let Some(next) = state.upload_queue.pop_front() else {
+    let Some(folder) = rfd::FileDialog::new()
+        .set_title(&i18n::t("bottom.files.save_dir_title"))
+        .pick_folder()
+    else {
+        state.status_line = Some(i18n::t("bottom.files.download_cancelled").into());
         return;
     };
-    state.status_line = Some(format!(
-        "{} {}",
-        i18n::t("bottom.files.uploading_to"),
-        next.display()
-    ));
-    start_upload(state, remote, next);
+    state.download_dir = folder.clone();
+    let mut items = Vec::new();
+    for name in names {
+        items.push((name.clone(), folder.join(&name)));
+    }
+    enqueue_downloads(state, remote, items);
 }
 
 fn path_leaf(s: &str) -> &str {
@@ -589,17 +764,37 @@ fn show_files_content(
     ui: &mut Ui,
     state: &mut BottomPanelState,
     remote: Option<&RemoteSession>,
+    active_cwd: Option<&(String, u64)>,
     area_h: f32,
-) {
+) -> Option<String> {
     const PATH_H: f32 = 26.0;
 
     let mode = remote_mode(remote);
     let mut actions = Vec::new();
     let mut do_refresh = false;
     let mut commit_path = false;
-    let mut do_upload_file = false;
-    let mut do_upload_folder = false;
+    let mut send_cmd = None;
     let list_h = (area_h - PATH_H).max(40.0);
+
+    // Complete or time out a terminal→files cwd probe.
+    if let Some(pending) = state.cwd_sync_pending.as_ref() {
+        let timed_out = pending.started.elapsed() > Duration::from_secs(2);
+        let ready = active_cwd.is_some_and(|(_, gen)| *gen >= pending.min_generation);
+        if ready {
+            if let Some((path, _)) = active_cwd {
+                let path = normalize_remote(path);
+                state.cwd_sync_pending = None;
+                state.status_line = None;
+                state.dir_cache.remove(&path);
+                actions.push(EntryAction::Nav(path));
+            }
+        } else if timed_out {
+            state.cwd_sync_pending = None;
+            state.status_line = Some(i18n::t("bottom.files.sync_from_term.failed").into());
+        } else {
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+        }
+    }
 
     ui.spacing_mut().item_spacing.y = 0.0;
     ui.allocate_ui_with_layout(
@@ -642,31 +837,45 @@ fn show_files_content(
                     refresh.surrender_focus();
                 }
                 if mode == RemotePaneMode::Ready {
-                    let upload = ui
+                    let to_term = ui
                         .add(egui::Button::new(ui_icon::rich(
                             Icon::Upload,
                             13.0,
                             ui_icon::COLOR_MUTED,
                         )))
-                        .on_hover_text(i18n::t("bottom.files.ctx.upload"));
-                    if upload.clicked() {
-                        do_upload_file = true;
+                        .on_hover_text(i18n::t("bottom.files.sync_to_term"));
+                    if to_term.clicked() {
+                        let path = normalize_remote(&state.remote_path);
+                        send_cmd = Some(format!("cd {}\n", shell_single_quote(&path)));
                     }
-                    if upload.has_focus() {
-                        upload.surrender_focus();
+                    if to_term.has_focus() {
+                        to_term.surrender_focus();
                     }
-                    let upload_dir = ui
+                    let from_term = ui
                         .add(egui::Button::new(ui_icon::rich(
-                            Icon::FolderPlus,
+                            Icon::Download,
                             13.0,
                             ui_icon::COLOR_MUTED,
                         )))
-                        .on_hover_text(i18n::t("bottom.files.ctx.upload_folder"));
-                    if upload_dir.clicked() {
-                        do_upload_folder = true;
+                        .on_hover_text(i18n::t("bottom.files.sync_from_term"));
+                    if from_term.clicked() {
+                        if let Some((path, _)) = active_cwd {
+                            // Force a fresh listing when syncing from the terminal.
+                            let path = normalize_remote(path);
+                            state.dir_cache.remove(&path);
+                            actions.push(EntryAction::Nav(path));
+                        } else {
+                            state.cwd_sync_pending = Some(CwdSyncPending {
+                                started: Instant::now(),
+                                min_generation: 1,
+                            });
+                            state.status_line =
+                                Some(i18n::t("bottom.files.sync_from_term.probing").into());
+                            send_cmd = Some(CWD_PROBE_CMD.to_string());
+                        }
                     }
-                    if upload_dir.has_focus() {
-                        upload_dir.surrender_focus();
+                    if from_term.has_focus() {
+                        from_term.surrender_focus();
                     }
                 }
             });
@@ -767,6 +976,7 @@ fn show_files_content(
     if commit_path || do_refresh {
         let path = normalize_remote(&state.remote_path);
         state.selected.clear();
+        state.selection_anchor = None;
         if do_refresh {
             state.dir_cache.remove(&path);
         }
@@ -775,17 +985,16 @@ fn show_files_content(
         }
     }
 
-    if do_upload_file {
-        prompt_upload_file(state, remote);
-    }
-    if do_upload_folder {
-        prompt_upload_folder(state, remote);
-    }
+    send_cmd
+}
+
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn paint_files_status_bar(
     ui: &mut Ui,
-    state: &BottomPanelState,
+    state: &mut BottomPanelState,
     status_bar_rect: egui::Rect,
     do_cancel: &mut bool,
 ) {
@@ -795,6 +1004,9 @@ fn paint_files_status_bar(
         status_bar_rect.min.y + 0.5,
         stroke,
     );
+
+    let mut open_clicked = false;
+    let mut transfer_anchor = None;
 
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(status_bar_rect), |ui| {
         ui.set_min_height(FILES_STATUS_BAR_H);
@@ -830,26 +1042,331 @@ fn paint_files_status_bar(
                         }
                         _ => 0.0,
                     };
-                    ui.add(
-                        egui::ProgressBar::new(frac)
-                            .desired_width(180.0)
-                            .desired_height(20.0)
-                            .corner_radius(egui::CornerRadius::ZERO)
-                            .text(
-                                RichText::new(format!(
-                                    "{} {}",
-                                    path_leaf(&xfer.label),
-                                    format_progress(snap.transferred, snap.total)
-                                ))
-                                .size(11.0),
-                            ),
+                    let bar = paint_transfer_progress_bar(
+                        ui,
+                        frac,
+                        path_leaf(&xfer.label),
+                        &format_progress(snap.transferred, snap.total),
+                        &format_speed(xfer.speed_bps),
                     );
+                    transfer_anchor = Some(bar.rect);
+                    if bar.clicked() {
+                        open_clicked = true;
+                    }
+                    bar.on_hover_text(i18n::t("bottom.files.transfer_list.tip"));
                 } else if let Some(line) = &state.status_line {
-                    ui.label(RichText::new(line).size(12.0).color(text_color));
+                    let can_open = transfer_list_has_rows(state);
+                    let label = ui.add(
+                        egui::Label::new(RichText::new(line.clone()).size(12.0).color(text_color))
+                            .sense(if can_open {
+                                Sense::click()
+                            } else {
+                                Sense::hover()
+                            }),
+                    );
+                    if can_open {
+                        transfer_anchor = Some(label.rect);
+                        if label.clicked() {
+                            open_clicked = true;
+                        }
+                        label.on_hover_text(i18n::t("bottom.files.transfer_list.tip"));
+                    }
+                } else if transfer_list_has_rows(state) {
+                    let label = ui
+                        .add(
+                            egui::Label::new(
+                                RichText::new(i18n::t("bottom.files.transfer_list"))
+                                    .size(12.0)
+                                    .color(text_color),
+                            )
+                            .sense(Sense::click()),
+                        )
+                        .on_hover_text(i18n::t("bottom.files.transfer_list.tip"));
+                    transfer_anchor = Some(label.rect);
+                    if label.clicked() {
+                        open_clicked = true;
+                    }
                 }
             });
         });
     });
+
+    if open_clicked {
+        state.transfer_list_open = !state.transfer_list_open;
+    }
+
+    if state.transfer_list_open {
+        let anchor = transfer_anchor.unwrap_or(status_bar_rect);
+        paint_transfer_list_popup(ui, state, anchor, status_bar_rect, open_clicked);
+    }
+}
+
+fn transfer_list_has_rows(state: &BottomPanelState) -> bool {
+    state.transfer.is_some()
+        || !state.transfer_queue.is_empty()
+        || !state.transfer_log.is_empty()
+}
+
+/// Custom progress strip: name left, speed center, size right — and clickable.
+fn paint_transfer_progress_bar(
+    ui: &mut Ui,
+    frac: f32,
+    name: &str,
+    size_text: &str,
+    speed_text: &str,
+) -> egui::Response {
+    const BAR_H: f32 = 20.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(PROGRESS_BAR_W, BAR_H), Sense::click());
+
+    let bg = ui.visuals().extreme_bg_color;
+    let fill = Color32::from_rgb(160, 198, 235);
+    let fg = ui.visuals().text_color();
+    ui.painter().rect_filled(rect, 0.0, bg);
+    let fill_w = (rect.width() * frac.clamp(0.0, 1.0)).round();
+    if fill_w > 0.0 {
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(rect.min, egui::vec2(fill_w, rect.height())),
+            0.0,
+            fill,
+        );
+    }
+
+    let font = FontId::proportional(11.0);
+    let pad = 6.0;
+    let y = rect.center().y;
+
+    let name_g = ui.fonts(|f| f.layout_no_wrap(name.to_owned(), font.clone(), fg));
+    let speed_g = ui.fonts(|f| f.layout_no_wrap(speed_text.to_owned(), font.clone(), fg));
+    let size_g = ui.fonts(|f| f.layout_no_wrap(size_text.to_owned(), font, fg));
+
+    // Right: size
+    let size_x = rect.right() - pad - size_g.size().x;
+    // Center: speed
+    let speed_x = rect.center().x - speed_g.size().x * 0.5;
+    // Left: name (clip so it does not overlap speed)
+    let name_max_right = (speed_x - 8.0).max(rect.left() + pad);
+    let name_x = rect.left() + pad;
+    let name_clip = egui::Rect::from_min_max(
+        egui::pos2(name_x, rect.top()),
+        egui::pos2(name_max_right, rect.bottom()),
+    );
+
+    ui.painter().with_clip_rect(name_clip).galley(
+        egui::pos2(name_x, y - name_g.size().y * 0.5),
+        name_g,
+        fg,
+    );
+    ui.painter().galley(
+        egui::pos2(speed_x, y - speed_g.size().y * 0.5),
+        speed_g,
+        fg,
+    );
+    ui.painter().galley(
+        egui::pos2(size_x, y - size_g.size().y * 0.5),
+        size_g,
+        fg,
+    );
+
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    resp
+}
+
+fn paint_transfer_list_popup(
+    ui: &mut Ui,
+    state: &mut BottomPanelState,
+    anchor: egui::Rect,
+    status_bar: egui::Rect,
+    opened_this_frame: bool,
+) {
+    const PANEL_W: f32 = 360.0;
+    const PANEL_H: f32 = 240.0;
+    // Bottom-right: panel bottom edge sits on the status bar top, right-aligned.
+    let pos = egui::pos2(status_bar.right() - PANEL_W, status_bar.top() - PANEL_H);
+
+    let mut close = false;
+    let resp = egui::Area::new(egui::Id::new("files_transfer_list"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .constrain_to(ui.ctx().screen_rect())
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.set_min_size(egui::vec2(PANEL_W - 16.0, PANEL_H - 16.0));
+                    ui.set_max_size(egui::vec2(PANEL_W - 16.0, PANEL_H - 16.0));
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(i18n::t("bottom.files.transfer_list"))
+                                .size(13.0)
+                                .strong(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("×").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    let list_h = ui.available_height().max(40.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("transfer_list_scroll")
+                        .max_height(list_h)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_min_width(PANEL_W - 24.0);
+                            let mut any = false;
+
+                            if let Some(xfer) = &state.transfer {
+                                any = true;
+                                let snap = xfer.progress.snapshot();
+                                transfer_list_row(
+                                    ui,
+                                    xfer.is_upload,
+                                    path_leaf(&xfer.label),
+                                    &format!(
+                                        "{}  {}",
+                                        format_progress(snap.transferred, snap.total),
+                                        format_speed(xfer.speed_bps),
+                                    ),
+                                    TransferRowKind::Running,
+                                );
+                            }
+
+                            for q in &state.transfer_queue {
+                                any = true;
+                                let (name, up) = match q {
+                                    QueuedTransfer::Upload(p) => (
+                                        p.file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or("?")
+                                            .to_string(),
+                                        true,
+                                    ),
+                                    QueuedTransfer::Download { name, .. } => (name.clone(), false),
+                                };
+                                transfer_list_row(
+                                    ui,
+                                    up,
+                                    &name,
+                                    &i18n::t("bottom.files.transfer.queued"),
+                                    TransferRowKind::Queued,
+                                );
+                            }
+
+                            for item in &state.transfer_log {
+                                any = true;
+                                transfer_list_row(
+                                    ui,
+                                    item.is_upload,
+                                    &item.name,
+                                    &item.detail,
+                                    if item.ok {
+                                        TransferRowKind::Ok
+                                    } else {
+                                        TransferRowKind::Failed
+                                    },
+                                );
+                            }
+
+                            if !any {
+                                ui.label(
+                                    RichText::new(i18n::t("bottom.files.transfer_list.empty"))
+                                        .weak(),
+                                );
+                            }
+                        });
+                });
+        });
+
+    if close {
+        state.transfer_list_open = false;
+    }
+
+    // Skip outside-close on the frame that opened the panel (the opening click
+    // would otherwise race). Progress-bar clicks are on the status bar anchor.
+    if !opened_this_frame && ui.input(|i| i.pointer.any_click()) {
+        if let Some(pos) = ui.ctx().pointer_interact_pos() {
+            let on_popup = resp.response.rect.contains(pos);
+            let on_anchor = anchor.contains(pos) || status_bar.contains(pos);
+            if !on_popup && !on_anchor {
+                state.transfer_list_open = false;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TransferRowKind {
+    Running,
+    Queued,
+    Ok,
+    Failed,
+}
+
+fn transfer_list_row(ui: &mut Ui, is_upload: bool, name: &str, detail: &str, kind: TransferRowKind) {
+    let arrow = if is_upload { "↑" } else { "↓" };
+    let status = match kind {
+        TransferRowKind::Running => i18n::t("bottom.files.transfer.running"),
+        TransferRowKind::Queued => i18n::t("bottom.files.transfer.queued"),
+        TransferRowKind::Ok => i18n::t("bottom.files.transfer_ok"),
+        TransferRowKind::Failed => i18n::t("bottom.files.transfer_failed"),
+    };
+    let status_color = match kind {
+        TransferRowKind::Running => Color32::from_rgb(40, 120, 200),
+        TransferRowKind::Queued => Color32::from_rgb(120, 120, 128),
+        TransferRowKind::Ok => Color32::from_rgb(40, 140, 80),
+        TransferRowKind::Failed => Color32::from_rgb(190, 70, 70),
+    };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(arrow).size(12.0).color(ui_icon::COLOR_MUTED));
+        ui.label(RichText::new(name).size(12.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(status).size(11.0).color(status_color));
+            ui.label(RichText::new(detail).size(11.0).weak());
+        });
+    });
+}
+
+fn push_transfer_log(state: &mut BottomPanelState, item: TransferLogItem) {
+    state.transfer_log.push_front(item);
+    while state.transfer_log.len() > TRANSFER_LOG_MAX {
+        state.transfer_log.pop_back();
+    }
+}
+
+fn update_transfer_speed(xfer: &mut ActiveTransfer, transferred: u64) {
+    let now = Instant::now();
+    let dt = now.duration_since(xfer.last_sample).as_secs_f64();
+    if dt < 0.15 {
+        return;
+    }
+    let delta = transferred.saturating_sub(xfer.last_bytes) as f64;
+    let instant = delta / dt;
+    xfer.speed_bps = if xfer.speed_bps <= 0.0 {
+        instant
+    } else {
+        xfer.speed_bps * 0.65 + instant * 0.35
+    };
+    // Fallback to average if samples are noisy at start.
+    if xfer.speed_bps < 1.0 {
+        let elapsed = now.duration_since(xfer.started).as_secs_f64().max(0.001);
+        xfer.speed_bps = transferred as f64 / elapsed;
+    }
+    xfer.last_bytes = transferred;
+    xfer.last_sample = now;
+}
+
+fn format_speed(bps: f64) -> String {
+    if bps < 1.0 {
+        return "—/s".into();
+    }
+    format!("{}/s", format_size(bps as u64))
 }
 
 fn selection_stats(state: &BottomPanelState) -> (usize, u64, usize, u64) {
@@ -882,6 +1399,7 @@ fn apply_entry_action(
         EntryAction::Nav(p) => {
             let p = normalize_remote(&p);
             state.selected.clear();
+            state.selection_anchor = None;
             expand_tree_to(state, &p);
             if remote_mode(remote) == RemotePaneMode::Ready {
                 if let Some(cached) = state.dir_cache.get(&p).cloned() {
@@ -907,15 +1425,12 @@ fn apply_entry_action(
                 }
             }
         }
-        EntryAction::Select { name, toggle } => {
-            if toggle {
-                if !state.selected.remove(&name) {
-                    state.selected.insert(name);
-                }
-            } else {
-                state.selected.clear();
-                state.selected.insert(name);
-            }
+        EntryAction::Select { name, mode } => {
+            apply_selection(state, &name, mode);
+        }
+        EntryAction::ClearSelection => {
+            state.selected.clear();
+            state.selection_anchor = None;
         }
         EntryAction::Open { name, is_dir } => {
             if is_dir {
@@ -967,8 +1482,160 @@ fn apply_entry_action(
         EntryAction::CancelRename => {
             state.inline_rename = None;
         }
-        EntryAction::Download { name } => {
-            prompt_download(state, remote, &name);
+        EntryAction::Download { names } => {
+            if names.len() == 1 {
+                prompt_download(state, remote, &names[0]);
+            } else {
+                prompt_download_selection(state, remote, names);
+            }
+        }
+        EntryAction::NewFolder => {
+            create_remote_folder(state, remote);
+        }
+        EntryAction::NewFile { ext, initial } => {
+            create_remote_file(state, remote, ext, initial);
+        }
+        EntryAction::UploadFile => {
+            prompt_upload_file(state, remote);
+        }
+        EntryAction::UploadFolder => {
+            prompt_upload_folder(state, remote);
+        }
+    }
+}
+
+fn apply_selection(state: &mut BottomPanelState, name: &str, mode: SelectMode) {
+    match mode {
+        SelectMode::Replace => {
+            state.selected.clear();
+            state.selected.insert(name.to_string());
+            state.selection_anchor = Some(name.to_string());
+        }
+        SelectMode::Toggle => {
+            if !state.selected.remove(name) {
+                state.selected.insert(name.to_string());
+            }
+            state.selection_anchor = Some(name.to_string());
+        }
+        SelectMode::Range => {
+            let anchor = state
+                .selection_anchor
+                .clone()
+                .unwrap_or_else(|| name.to_string());
+            let names: Vec<&str> = state.remote_entries.iter().map(|e| e.name.as_str()).collect();
+            let Some(i0) = names.iter().position(|n| *n == anchor.as_str()) else {
+                state.selected.clear();
+                state.selected.insert(name.to_string());
+                state.selection_anchor = Some(name.to_string());
+                return;
+            };
+            let Some(i1) = names.iter().position(|n| *n == name) else {
+                return;
+            };
+            let (lo, hi) = if i0 <= i1 { (i0, i1) } else { (i1, i0) };
+            state.selected.clear();
+            for n in &names[lo..=hi] {
+                state.selected.insert((*n).to_string());
+            }
+            // Keep original anchor so repeated Shift+clicks extend from the same start.
+            if state.selection_anchor.is_none() {
+                state.selection_anchor = Some(anchor);
+            }
+        }
+    }
+}
+
+fn unique_entry_name(entries: &[RemoteDirEntry], preferred: &str) -> String {
+    if !entries.iter().any(|e| e.name == preferred) {
+        return preferred.to_string();
+    }
+    // untitled.txt → untitled (2).txt ; 新建文件夹 → 新建文件夹 (2)
+    let (stem, ext) = match preferred.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && !preferred.starts_with('.') => {
+            (stem, Some(ext))
+        }
+        _ => (preferred, None),
+    };
+    for i in 2..10_000 {
+        let candidate = match ext {
+            Some(ext) => format!("{stem} ({i}).{ext}"),
+            None => format!("{stem} ({i})"),
+        };
+        if !entries.iter().any(|e| e.name == candidate) {
+            return candidate;
+        }
+    }
+    format!("{preferred}.{}", uuid_fallback())
+}
+
+fn uuid_fallback() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| (d.as_nanos() as u32) % 100_000)
+        .unwrap_or(0)
+}
+
+fn create_remote_folder(state: &mut BottomPanelState, remote: Option<&RemoteSession>) {
+    let Some(session) = remote.filter(|r| r.sftp_supported()) else {
+        state.status_line = Some(i18n::t("bottom.files.err.no_sftp").into());
+        return;
+    };
+    let name = unique_entry_name(&state.remote_entries, &i18n::t("bottom.files.new_folder_name"));
+    let path = join_remote(&state.remote_path, &name);
+    match session.mkdir(&path) {
+        Ok(()) => {
+            state.status_line = Some(i18n::t("bottom.files.created").into());
+            state.selected.clear();
+            state.selected.insert(name.clone());
+            state.selection_anchor = Some(name.clone());
+            state.inline_rename = Some(InlineRename {
+                old_name: name.clone(),
+                new_name: name,
+                request_focus: true,
+            });
+            let parent = state.remote_path.clone();
+            state.dir_cache.remove(&normalize_remote(&parent));
+            request_dir(state, remote, &parent, true);
+        }
+        Err(e) => {
+            state.status_line = Some(format!("{}: {e}", i18n::t("bottom.files.err.create")));
+        }
+    }
+}
+
+fn create_remote_file(
+    state: &mut BottomPanelState,
+    remote: Option<&RemoteSession>,
+    ext: &str,
+    initial: &str,
+) {
+    let Some(session) = remote.filter(|r| r.sftp_supported()) else {
+        state.status_line = Some(i18n::t("bottom.files.err.no_sftp").into());
+        return;
+    };
+    let ext = ext.trim_start_matches('.');
+    let preferred = format!("{}.{}", i18n::t("bottom.files.new_file_stem"), ext);
+    let name = unique_entry_name(&state.remote_entries, &preferred);
+    let path = join_remote(&state.remote_path, &name);
+    // Body is UTF-8 (empty or shebang + newline).
+    match session.write_file(&path, initial.as_bytes()) {
+        Ok(()) => {
+            state.status_line = Some(i18n::t("bottom.files.created").into());
+            state.selected.clear();
+            state.selected.insert(name.clone());
+            state.selection_anchor = Some(name.clone());
+            state.inline_rename = Some(InlineRename {
+                old_name: name.clone(),
+                new_name: name,
+                request_focus: true,
+            });
+            let parent = state.remote_path.clone();
+            state.dir_cache.remove(&normalize_remote(&parent));
+            request_dir(state, remote, &parent, true);
+        }
+        Err(e) => {
+            state.status_line = Some(format!("{}: {e}", i18n::t("bottom.files.err.create")));
         }
     }
 }
@@ -1044,12 +1711,7 @@ fn prompt_download(state: &mut BottomPanelState, remote: Option<&RemoteSession>,
     if let Some(parent) = path.parent() {
         state.download_dir = parent.to_path_buf();
     }
-    state.status_line = Some(format!(
-        "{} {}",
-        i18n::t("bottom.files.downloading_to"),
-        path.display()
-    ));
-    start_download(state, remote, name, Some(path), None);
+    enqueue_downloads(state, remote, vec![(name.to_string(), path)]);
 }
 
 fn pick_download_dest(name: &str, is_dir: bool) -> Option<PathBuf> {
@@ -1198,11 +1860,17 @@ fn start_download(
     let local = dest.unwrap_or_else(|| state.download_dir.join(name));
     let progress = ArcProgress::new();
     let label = local.to_string_lossy().into_owned();
+    let now = Instant::now();
     state.transfer = Some(ActiveTransfer {
         label,
         progress: progress.clone(),
         refresh_remote_on_ok: false,
         open_after,
+        is_upload: false,
+        started: now,
+        last_bytes: 0,
+        last_sample: now,
+        speed_bps: 0.0,
     });
     state.status_line = None;
     let session = remote.clone();
@@ -1240,11 +1908,17 @@ fn start_upload(
     let remote_path = join_remote(&state.remote_path, &name);
     let progress = ArcProgress::new();
     let label = name.clone();
+    let now = Instant::now();
     state.transfer = Some(ActiveTransfer {
         label,
         progress: progress.clone(),
         refresh_remote_on_ok: true,
         open_after: None,
+        is_upload: true,
+        started: now,
+        last_bytes: 0,
+        last_sample: now,
+        speed_bps: 0.0,
     });
     state.status_line = None;
     let session = remote.clone();
@@ -1391,7 +2065,14 @@ fn list_remote(
 ) -> Vec<EntryAction> {
     let mut actions = Vec::new();
     let row_h = 20.0;
-    let toggle = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+    let mods = ui.input(|i| i.modifiers);
+    let select_mode = if mods.shift {
+        SelectMode::Range
+    } else if mods.command || mods.ctrl {
+        SelectMode::Toggle
+    } else {
+        SelectMode::Replace
+    };
     let selected = state.selected.clone();
     let editing = state
         .inline_rename
@@ -1410,11 +2091,12 @@ fn list_remote(
                 let id = ui.id().with(("rf", remote_path, ".."));
                 let (_, rect) = ui.allocate_space(egui::vec2(full_w, row_h));
                 let resp = ui.interact(rect, id, Sense::click());
-                paint_row(ui, rect, "..", true, None, false);
+                paint_parent_row(ui, rect);
                 if resp.hovered() {
                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                 }
-                if resp.double_clicked() {
+                // Single click is enough — this row is only a navigation affordance.
+                if resp.clicked() || resp.double_clicked() {
                     actions.push(EntryAction::Nav(parent_remote(remote_path)));
                 }
             }
@@ -1423,7 +2105,7 @@ fn list_remote(
                 let is_sel = selected.contains(&entry.name);
                 let id = ui.id().with(("rf", remote_path, entry.name.as_str()));
                 let (_, rect) = ui.allocate_space(egui::vec2(full_w, row_h));
-                let resp = ui.interact(rect, id, Sense::click());
+                let resp = ui.interact(rect, id, Sense::click_and_drag());
 
                 if editing.as_deref() == Some(entry.name.as_str()) {
                     let just_opened = state
@@ -1431,8 +2113,9 @@ fn list_remote(
                         .as_ref()
                         .is_some_and(|r| r.request_focus);
                     let rename = state.inline_rename.as_mut().unwrap();
+                    let rename_id = id.with("rename");
                     if rename.request_focus {
-                        ui.memory_mut(|m| m.request_focus(id.with("rename")));
+                        ui.memory_mut(|m| m.request_focus(rename_id));
                         rename.request_focus = false;
                     }
                     if is_sel {
@@ -1450,24 +2133,42 @@ fn list_remote(
                         icon_rect,
                         16.0,
                     );
-                    let edit_rect = egui::Rect::from_min_max(
+                    let edit_w = rename_field_width(ui, &rename.new_name, rect.left() + 20.0, rect.right() - 4.0);
+                    let edit_rect = egui::Rect::from_min_size(
                         egui::pos2(rect.left() + 20.0, rect.top() + 1.0),
-                        egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
+                        egui::vec2(edit_w, (rect.height() - 2.0).max(16.0)),
                     );
-                    let edit = ui.put(
-                        edit_rect,
-                        egui::TextEdit::singleline(&mut rename.new_name)
-                            .id_salt("rename")
+                    let mut edit_output = None;
+                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(edit_rect), |ui| {
+                        ui.set_min_size(edit_rect.size());
+                        let out = egui::TextEdit::singleline(&mut rename.new_name)
+                            .id(rename_id)
+                            .desired_width(edit_w)
                             .frame(true)
-                            .margin(egui::Margin::symmetric(2, 0)),
-                    );
-                    if !just_opened && edit.lost_focus() {
+                            .margin(egui::Margin::symmetric(2, 0))
+                            .show(ui);
+                        edit_output = Some(out);
+                    });
+                    let edit = edit_output.expect("rename TextEdit output");
+                    if just_opened {
+                        let end = rename_stem_char_len(&rename.new_name, entry.is_dir);
+                        let mut state_te = edit.state;
+                        state_te.cursor.set_char_range(Some(
+                            egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(0),
+                                egui::text::CCursor::new(end),
+                            ),
+                        ));
+                        state_te.store(ui.ctx(), edit.response.id);
+                        ui.ctx().request_repaint();
+                    }
+                    if !just_opened && edit.response.lost_focus() {
                         actions.push(EntryAction::CommitRename);
                     }
-                    if edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if edit.response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         actions.push(EntryAction::CommitRename);
                     }
-                    if edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    if edit.response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         actions.push(EntryAction::CancelRename);
                     }
                     continue;
@@ -1484,10 +2185,22 @@ fn list_remote(
                 if resp.hovered() {
                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                 }
+                if resp.drag_started() && can_xfer {
+                    let names = if selected.contains(&entry.name) && !selected.is_empty() {
+                        selected.iter().cloned().collect::<Vec<_>>()
+                    } else {
+                        vec![entry.name.clone()]
+                    };
+                    egui::DragAndDrop::set_payload(
+                        ui.ctx(),
+                        RemoteDragPayload { names },
+                    );
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                }
                 if resp.clicked() {
                     actions.push(EntryAction::Select {
                         name: entry.name.clone(),
-                        toggle,
+                        mode: select_mode,
                     });
                 }
                 if resp.double_clicked() && entry.is_dir {
@@ -1570,22 +2283,159 @@ fn list_remote(
                     )
                     .clicked()
                     {
-                        ctx_act = Some(EntryAction::Download {
-                            name: entry.name.clone(),
-                        });
+                        let names = if selected.contains(&entry.name) && !selected.is_empty() {
+                            entries
+                                .iter()
+                                .filter(|e| selected.contains(&e.name))
+                                .map(|e| e.name.clone())
+                                .collect::<Vec<_>>()
+                        } else {
+                            vec![entry.name.clone()]
+                        };
+                        ctx_act = Some(EntryAction::Download { names });
                         ui.close_menu();
                     }
                 });
                 if let Some(a) = ctx_act {
-                    actions.push(EntryAction::Select {
-                        name: entry.name.clone(),
-                        toggle: false,
-                    });
+                    // Keep multi-selection when downloading several items.
+                    let keep_selection = matches!(&a, EntryAction::Download { names } if names.len() > 1);
+                    if !keep_selection {
+                        actions.push(EntryAction::Select {
+                            name: entry.name.clone(),
+                            mode: SelectMode::Replace,
+                        });
+                    }
                     actions.push(a);
                 }
             }
+
+            // Empty area below entries: clear selection on click; create via context menu.
+            let empty_h = ui.available_height().max(48.0);
+            let (_, empty_resp) =
+                ui.allocate_exact_size(egui::vec2(full_w, empty_h), Sense::click());
+            if empty_resp.clicked() {
+                actions.push(EntryAction::ClearSelection);
+            }
+            let mut empty_act = None;
+            empty_resp.context_menu(|ui| {
+                ctx_menu::prepare(ui);
+                if ctx_menu::item(
+                    ui,
+                    Some(Icon::FolderPlus),
+                    &i18n::t("bottom.files.ctx.new_folder"),
+                    None,
+                    can_xfer,
+                )
+                .clicked()
+                {
+                    empty_act = Some(EntryAction::NewFolder);
+                    ui.close_menu();
+                }
+                ctx_menu::submenu(
+                    ui,
+                    Some(Icon::File),
+                    &i18n::t("bottom.files.ctx.new_file"),
+                    |ui| {
+                        for (label, ext, initial) in [
+                            (".sh(sh)", "sh", "#!/bin/sh\n"),
+                            (".sh(bash)", "sh", "#!/bin/bash\n"),
+                            (".json", "json", ""),
+                            (".config", "config", ""),
+                            (".yaml", "yaml", ""),
+                            (".txt", "txt", ""),
+                        ] {
+                            if ctx_menu::item(ui, None, label, None, can_xfer).clicked() {
+                                empty_act = Some(EntryAction::NewFile { ext, initial });
+                                ui.close_menu();
+                            }
+                        }
+                    },
+                );
+                ctx_menu::separator(ui);
+                if ctx_menu::item(
+                    ui,
+                    Some(Icon::Upload),
+                    &i18n::t("bottom.files.ctx.upload"),
+                    None,
+                    can_xfer,
+                )
+                .clicked()
+                {
+                    empty_act = Some(EntryAction::UploadFile);
+                    ui.close_menu();
+                }
+                if ctx_menu::item(
+                    ui,
+                    Some(Icon::FolderPlus),
+                    &i18n::t("bottom.files.ctx.upload_folder"),
+                    None,
+                    can_xfer,
+                )
+                .clicked()
+                {
+                    empty_act = Some(EntryAction::UploadFolder);
+                    ui.close_menu();
+                }
+            });
+            if let Some(a) = empty_act {
+                actions.push(a);
+            }
         });
     actions
+}
+
+/// Width of the inline rename field: hug the filename, not the whole row.
+fn rename_field_width(ui: &Ui, name: &str, left: f32, right: f32) -> f32 {
+    let text_w = ui
+        .fonts(|f| {
+            f.layout_no_wrap(
+                name.to_owned(),
+                FontId::proportional(13.0),
+                Color32::WHITE,
+            )
+        })
+        .size()
+        .x;
+    let max_w = (right - left).max(40.0);
+    (text_w + 14.0).clamp(40.0, max_w)
+}
+
+/// Char length to select on rename focus: stem only for files with an extension.
+fn rename_stem_char_len(name: &str, is_dir: bool) -> usize {
+    if is_dir {
+        return name.chars().count();
+    }
+    match name.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty() && !ext.is_empty() && !name.starts_with('.') =>
+        {
+            stem.chars().count()
+        }
+        _ => name.chars().count(),
+    }
+}
+
+fn paint_parent_row(ui: &mut Ui, rect: egui::Rect) {
+    let icon_w = 16.0;
+    let icon_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 2.0, rect.top()),
+        egui::pos2(rect.left() + 2.0 + icon_w, rect.bottom()),
+    );
+    sys_file_icon::paint_ui_icon(ui, Icon::FolderUp, icon_rect, icon_w);
+
+    let label = i18n::t("bottom.files.parent");
+    let x = rect.left() + 4.0 + icon_w + 4.0;
+    let y = rect.center().y;
+    let name_galley = ui.fonts(|f| {
+        f.layout_no_wrap(
+            label,
+            FontId::proportional(13.0),
+            ui_icon::COLOR_MUTED,
+        )
+    });
+    let name_pos = egui::pos2(x, y - name_galley.size().y * 0.5);
+    ui.painter()
+        .galley(name_pos, name_galley, ui_icon::COLOR_MUTED);
 }
 
 fn paint_row(

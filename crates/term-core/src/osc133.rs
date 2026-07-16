@@ -1,7 +1,7 @@
-//! OSC 133 (Final Term / shell integration) byte filter.
+//! OSC 133 (shell integration) + OSC 7 (cwd) byte filter.
 //!
 //! Sequences are stripped from the PTY stream before alacritty VTE so they
-//! never appear on screen; callers receive structured mark events.
+//! never appear on screen; callers receive structured events.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Osc133Kind {
@@ -15,7 +15,14 @@ pub enum Osc133Kind {
     CommandEnd { exit: Option<i32> },
 }
 
-/// Incremental scanner: feed PTY chunks, get clean bytes + mark events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OscEvent {
+    Mark(Osc133Kind),
+    /// Absolute path from OSC 7 (`file://…`).
+    Cwd(String),
+}
+
+/// Incremental scanner: feed PTY chunks, get clean bytes + OSC events.
 #[derive(Debug, Default)]
 pub struct Osc133Filter {
     /// Bytes held while matching an incomplete ESC sequence.
@@ -27,18 +34,18 @@ impl Osc133Filter {
         Self::default()
     }
 
-    /// Process `input`, appending screen bytes to `out` and OSC 133 marks to `marks`.
-    pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>, marks: &mut Vec<Osc133Kind>) {
+    /// Process `input`, appending screen bytes to `out` and OSC events to `events`.
+    pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>, events: &mut Vec<OscEvent>) {
         if !self.pending.is_empty() {
             let mut combined = std::mem::take(&mut self.pending);
             combined.extend_from_slice(input);
-            self.scan(&combined, out, marks);
+            self.scan(&combined, out, events);
         } else {
-            self.scan(input, out, marks);
+            self.scan(input, out, events);
         }
     }
 
-    fn scan(&mut self, data: &[u8], out: &mut Vec<u8>, marks: &mut Vec<Osc133Kind>) {
+    fn scan(&mut self, data: &[u8], out: &mut Vec<u8>, events: &mut Vec<OscEvent>) {
         let mut i = 0;
         while i < data.len() {
             if data[i] != 0x1b {
@@ -83,8 +90,8 @@ impl Osc133Filter {
                 self.pending.extend_from_slice(&data[osc_start..]);
                 return;
             }
-            if let Some(kind) = parse_osc133_body(&body) {
-                marks.push(kind);
+            if let Some(ev) = parse_osc_body(&body) {
+                events.push(ev);
             } else {
                 out.extend_from_slice(&data[osc_start..i]);
             }
@@ -92,13 +99,21 @@ impl Osc133Filter {
     }
 }
 
-fn parse_osc133_body(body: &[u8]) -> Option<Osc133Kind> {
+fn parse_osc_body(body: &[u8]) -> Option<OscEvent> {
     let s = std::str::from_utf8(body).ok()?;
-    let mut parts = s.split(';');
-    let code = parts.next()?;
-    if code != "133" {
-        return None;
+    let (code, rest) = match s.split_once(';') {
+        Some((c, r)) => (c, r),
+        None => (s, ""),
+    };
+    match code {
+        "133" => parse_osc133_kind(rest).map(OscEvent::Mark),
+        "7" => parse_osc7_uri(rest).map(OscEvent::Cwd),
+        _ => None,
     }
+}
+
+fn parse_osc133_kind(rest: &str) -> Option<Osc133Kind> {
+    let mut parts = rest.split(';');
     let kind = parts.next()?;
     match kind.chars().next()? {
         'A' => Some(Osc133Kind::PromptStart),
@@ -115,6 +130,51 @@ fn parse_osc133_body(body: &[u8]) -> Option<Osc133Kind> {
     }
 }
 
+/// Parse OSC 7 payload: `file://host/path` → `/path`.
+fn parse_osc7_uri(uri: &str) -> Option<String> {
+    let uri = uri.trim();
+    if uri.is_empty() {
+        return None;
+    }
+    let rest = uri.strip_prefix("file://")?;
+    // Authority ends at first '/'; path includes that slash.
+    let path = match rest.find('/') {
+        Some(idx) => &rest[idx..],
+        None => return None,
+    };
+    if path.is_empty() {
+        return None;
+    }
+    Some(percent_decode_path(path))
+}
+
+fn percent_decode_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,34 +183,64 @@ mod tests {
     fn strips_osc133_bel() {
         let mut f = Osc133Filter::new();
         let mut out = Vec::new();
-        let mut marks = Vec::new();
+        let mut events = Vec::new();
         let input = b"hello\x1b]133;C\x07world\x1b]133;D;0\x07!";
-        f.push(input, &mut out, &mut marks);
+        f.push(input, &mut out, &mut events);
         assert_eq!(out, b"helloworld!");
-        assert_eq!(marks.len(), 2);
-        assert_eq!(marks[0], Osc133Kind::OutputStart);
-        assert_eq!(marks[1], Osc133Kind::CommandEnd { exit: Some(0) });
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], OscEvent::Mark(Osc133Kind::OutputStart));
+        assert_eq!(
+            events[1],
+            OscEvent::Mark(Osc133Kind::CommandEnd { exit: Some(0) })
+        );
+    }
+
+    #[test]
+    fn strips_osc7_cwd() {
+        let mut f = Osc133Filter::new();
+        let mut out = Vec::new();
+        let mut events = Vec::new();
+        let input = b"x\x1b]7;file://localhost/opt\x07y";
+        f.push(input, &mut out, &mut events);
+        assert_eq!(out, b"xy");
+        assert_eq!(events, vec![OscEvent::Cwd("/opt".into())]);
+    }
+
+    #[test]
+    fn osc7_file_triple_slash() {
+        assert_eq!(
+            parse_osc7_uri("file:///tmp/foo"),
+            Some("/tmp/foo".into())
+        );
+    }
+
+    #[test]
+    fn osc7_percent_decode() {
+        assert_eq!(
+            parse_osc7_uri("file://host/home/a%20b"),
+            Some("/home/a b".into())
+        );
     }
 
     #[test]
     fn passes_other_osc() {
         let mut f = Osc133Filter::new();
         let mut out = Vec::new();
-        let mut marks = Vec::new();
+        let mut events = Vec::new();
         let input = b"\x1b]0;title\x07ok";
-        f.push(input, &mut out, &mut marks);
+        f.push(input, &mut out, &mut events);
         assert_eq!(out, input);
-        assert!(marks.is_empty());
+        assert!(events.is_empty());
     }
 
     #[test]
     fn split_across_chunks() {
         let mut f = Osc133Filter::new();
         let mut out = Vec::new();
-        let mut marks = Vec::new();
-        f.push(b"x\x1b]13", &mut out, &mut marks);
-        f.push(b"3;A\x07y", &mut out, &mut marks);
+        let mut events = Vec::new();
+        f.push(b"x\x1b]13", &mut out, &mut events);
+        f.push(b"3;A\x07y", &mut out, &mut events);
         assert_eq!(out, b"xy");
-        assert_eq!(marks, vec![Osc133Kind::PromptStart]);
+        assert_eq!(events, vec![OscEvent::Mark(Osc133Kind::PromptStart)]);
     }
 }

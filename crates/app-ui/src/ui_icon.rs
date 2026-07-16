@@ -14,6 +14,7 @@ pub const COLOR_ACCENT: Color32 = Color32::from_rgb(30, 80, 160);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Icon {
     Folder,
+    FolderUp,
     FolderPlus,
     Server,
     File,
@@ -29,6 +30,7 @@ pub enum Icon {
     Unplug,
     RefreshCw,
     Upload,
+    Download,
     LogOut,
     Check,
     ChevronRight,
@@ -39,6 +41,7 @@ impl Icon {
     fn lucide_name(self) -> &'static str {
         match self {
             Icon::Folder => "folder",
+            Icon::FolderUp => "folder-up",
             Icon::FolderPlus => "folder-plus",
             Icon::Server => "server",
             Icon::File => "file",
@@ -54,6 +57,7 @@ impl Icon {
             Icon::Unplug => "unplug",
             Icon::RefreshCw => "refresh-cw",
             Icon::Upload => "upload",
+            Icon::Download => "download",
             Icon::LogOut => "log-out",
             Icon::Check => "check",
             Icon::ChevronRight => "chevron-right",
@@ -66,6 +70,7 @@ impl Icon {
             Icon::Paste => Some("clipboard"),
             Icon::Trash => Some("trash"),
             Icon::FolderPlus => Some("folder"),
+            Icon::FolderUp => Some("arrow-up"),
             Icon::Pencil => Some("pen-line"),
             Icon::Sparkles => Some("wand"),
             Icon::Unplug => Some("plug"),

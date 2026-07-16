@@ -1,7 +1,9 @@
-//! Routing table panel (local + remote via background fetch — never block UI).
+//! Routing table panel (local shell + remote SSH via background fetch — never block UI).
 //!
 //! Shows IPv4 + IPv6 routes. Policy rules (`ip rule`) appear only when the
 //! platform actually returns them (typically Linux); Windows omits that section.
+//!
+//! Disconnected SSH tabs must not fall back to local Windows routes.
 
 use crate::i18n;
 use connection_mgr::RemoteSession;
@@ -14,6 +16,16 @@ use vault::Vault;
 
 const HEADER_COLOR: Color32 = Color32::from_rgb(100, 105, 115);
 const SECTION_COLOR: Color32 = Color32::from_rgb(70, 74, 82);
+
+/// Where route data may be collected from. Never map a dead SSH tab to [`Local`].
+pub enum RoutesSource<'a> {
+    /// Connected SSH session — remote route table only.
+    Remote(&'a RemoteSession),
+    /// Connected local shell — this machine's routes.
+    Local,
+    /// Active tab is not Connected (gray/red status).
+    Disconnected,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct RouteRow {
@@ -58,10 +70,20 @@ fn cache() -> &'static Mutex<RouteCache> {
     })
 }
 
-pub fn show_panel(ui: &mut Ui, remote: Option<&RemoteSession>, vault_path: Option<&Path>) {
-    let source_key = remote
-        .map(|r| r.display_key())
-        .unwrap_or_else(|| "local".into());
+pub fn show_panel(ui: &mut Ui, source: RoutesSource<'_>, vault_path: Option<&Path>) {
+    if matches!(source, RoutesSource::Disconnected) {
+        clear_disconnected_cache();
+        ui.centered_and_justified(|ui| {
+            ui.label(RichText::new(i18n::t("routes.disconnected")).weak());
+        });
+        return;
+    }
+
+    let (source_key, remote) = match source {
+        RoutesSource::Remote(session) => (session.display_key(), Some(session)),
+        RoutesSource::Local => ("local".into(), None),
+        RoutesSource::Disconnected => unreachable!(),
+    };
 
     poll_fetch();
     ensure_fresh(false, remote, vault_path, &source_key);
@@ -131,6 +153,20 @@ pub fn show_panel(ui: &mut Ui, remote: Option<&RemoteSession>, vault_path: Optio
                 }
             }
         });
+}
+
+/// Drop any previously fetched table so a gray-light tab cannot show stale or local data.
+fn clear_disconnected_cache() {
+    let mut guard = cache().lock().unwrap_or_else(|e| e.into_inner());
+    if guard.source_key == "disconnected" && !guard.loading && guard.payload.ipv4.is_empty() {
+        return;
+    }
+    guard.payload = RoutesPayload::default();
+    guard.error = None;
+    guard.fetched_at = None;
+    guard.source_key = "disconnected".into();
+    guard.loading = false;
+    guard.rx = None;
 }
 
 fn section_divider(ui: &mut Ui) {
@@ -245,6 +281,7 @@ fn ensure_fresh(
     std::thread::Builder::new()
         .name("vsterm-routes-fetch".into())
         .spawn(move || {
+            // `remote == None` is only used for RoutesSource::Local (connected local shell).
             let result = if let Some(session) = remote {
                 fetch_remote_routes(&session, vault_path.as_deref())
             } else {

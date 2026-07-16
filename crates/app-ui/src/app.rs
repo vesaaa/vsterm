@@ -1665,6 +1665,7 @@ impl eframe::App for VsTermApp {
             let snap = self.host_snapshot();
             let vault_path = self.store.as_ref().map(|s| s.paths().vault_path());
             let remote = self.connections.active_remote();
+            let active_cwd = self.connections.active_cwd();
 
             match self.main_tab {
                 MainTab::Terminal => {
@@ -1731,6 +1732,7 @@ impl eframe::App for VsTermApp {
                             &mut self.bottom,
                             &self.commands,
                             remote.as_ref(),
+                            active_cwd.clone(),
                         ) {
                             if let Err(err) = self.connections.write_to_active(cmd.as_bytes()) {
                                 self.status =
@@ -1742,11 +1744,37 @@ impl eframe::App for VsTermApp {
                     ui.advance_cursor_after_rect(full);
                 }
                 MainTab::SystemInfo => {
-                    let err = self.remote_host.last_error();
-                    toolbar::show_panel(ui, Some(&snap), err.as_deref());
+                    let connected = self
+                        .connections
+                        .with_active(|c| {
+                            c.state == connection_mgr::ConnectionState::Connected
+                        })
+                        .unwrap_or(false);
+                    if connected {
+                        let err = self.remote_host.last_error();
+                        toolbar::show_panel(ui, Some(&snap), err.as_deref());
+                    } else {
+                        // Do not show empty-snap "loading" or any stale host view.
+                        toolbar::show_panel(ui, None, None);
+                    }
                 }
                 MainTab::Routes => {
-                    routes::show_panel(ui, remote.as_ref(), vault_path.as_deref());
+                    let connected = self
+                        .connections
+                        .with_active(|c| {
+                            c.state == connection_mgr::ConnectionState::Connected
+                        })
+                        .unwrap_or(false);
+                    let source = if !connected {
+                        routes::RoutesSource::Disconnected
+                    } else if self.connections.active_local_metrics() {
+                        routes::RoutesSource::Local
+                    } else if let Some(r) = remote.as_ref() {
+                        routes::RoutesSource::Remote(r)
+                    } else {
+                        routes::RoutesSource::Disconnected
+                    };
+                    routes::show_panel(ui, source, vault_path.as_deref());
                 }
             }
         });

@@ -671,6 +671,52 @@ impl RemoteFs for RusshRemoteExec {
             Ok(())
         })
     }
+
+    fn mkdir(&self, remote_path: &str) -> Result<(), ConnError> {
+        let session = Arc::clone(&self.session);
+        let host = self.host.clone();
+        let remote_path = remote_path.to_string();
+        runtime().block_on(async move {
+            let sftp = open_sftp(session, &host).await?;
+            sftp.create_dir(&remote_path)
+                .await
+                .map_err(|e| ConnError::Connect(format!("sftp mkdir {remote_path}: {e}")))?;
+            let _ = sftp.close().await;
+            Ok(())
+        })
+    }
+
+    fn write_file(&self, remote_path: &str, data: &[u8]) -> Result<(), ConnError> {
+        let session = Arc::clone(&self.session);
+        let host = self.host.clone();
+        let remote_path = remote_path.to_string();
+        let data = data.to_vec();
+        runtime().block_on(async move {
+            let sftp = open_sftp(session, &host).await?;
+            let mut remote = sftp
+                .create(&remote_path)
+                .await
+                .map_err(|e| ConnError::Connect(format!("sftp create {remote_path}: {e}")))?;
+            use tokio::io::AsyncWriteExt;
+            if !data.is_empty() {
+                remote
+                    .write_all(&data)
+                    .await
+                    .map_err(|e| ConnError::Connect(format!("sftp write {remote_path}: {e}")))?;
+                remote
+                    .flush()
+                    .await
+                    .map_err(|e| ConnError::Connect(format!("sftp flush {remote_path}: {e}")))?;
+            }
+            // Close the SFTP handle (required by russh-sftp; empty files still need this).
+            remote
+                .shutdown()
+                .await
+                .map_err(|e| ConnError::Connect(format!("sftp close {remote_path}: {e}")))?;
+            let _ = sftp.close().await;
+            Ok(())
+        })
+    }
 }
 
 fn finish_transfer(result: &Result<(), ConnError>, progress: Option<&ArcProgress>) {

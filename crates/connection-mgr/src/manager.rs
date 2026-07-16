@@ -448,6 +448,19 @@ impl ConnectionManager {
         conn.write_input(data)
     }
 
+    /// Interactive PTY cwd from OSC 7 (`path`, `generation`), if known.
+    pub fn active_cwd(&self) -> Option<(String, u64)> {
+        let id = self.active_id()?;
+        let conns = self.connections.lock();
+        let conn = conns.get(&id)?;
+        if conn.state != ConnectionState::Connected {
+            return None;
+        }
+        let path = conn.terminal.cwd()?;
+        let gen = conn.terminal.cwd_generation();
+        Some((path, gen))
+    }
+
     pub fn resize_active(&self, cols: u16, rows: u16) -> Result<(), ConnError> {
         let id = self.active_id().ok_or(ConnError::NotConnected)?;
         let conns = self.connections.lock();

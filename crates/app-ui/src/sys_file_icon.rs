@@ -118,6 +118,13 @@ fn paint_lucide(ui: &Ui, icon: Icon, rect: egui::Rect) {
     );
 }
 
+/// Paint a Lucide UI icon (e.g. parent-folder affordance) into a list-row icon slot.
+pub fn paint_ui_icon(ui: &Ui, icon: Icon, rect: egui::Rect, size_px: f32) {
+    let size = egui::vec2(size_px, size_px);
+    let pos = egui::pos2(rect.left() + 2.0, rect.center().y - size_px * 0.5);
+    paint_lucide(ui, icon, egui::Rect::from_min_size(pos, size));
+}
+
 fn texture(ctx: &egui::Context, key: &IconKey) -> Option<TextureHandle> {
     if let Some(existing) = TEXTURES.with(|textures| textures.borrow().get(key).cloned()) {
         return Some(existing);

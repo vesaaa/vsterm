@@ -121,6 +121,14 @@ impl RemoteSession {
     pub fn rename(&self, from: &str, to: &str) -> Result<(), ConnError> {
         self.fs.rename(from, to)
     }
+
+    pub fn mkdir(&self, remote_path: &str) -> Result<(), ConnError> {
+        self.fs.mkdir(remote_path)
+    }
+
+    pub fn write_file(&self, remote_path: &str, data: &[u8]) -> Result<(), ConnError> {
+        self.fs.write_file(remote_path, data)
+    }
 }
 
 /// System-backend exec: `ssh -T user@host 'sh -s <<…'`.

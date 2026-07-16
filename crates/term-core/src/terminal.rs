@@ -8,7 +8,7 @@ use chrono::{NaiveTime, Timelike};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-use crate::osc133::{Osc133Filter, Osc133Kind};
+use crate::osc133::{Osc133Filter, Osc133Kind, OscEvent};
 use crate::shell_marks::ShellMarks;
 use crate::TermError;
 
@@ -126,6 +126,10 @@ struct TermState {
     rows: usize,
     osc: Osc133Filter,
     marks: ShellMarks,
+    /// Last OSC 7 working directory (absolute path), if reported.
+    cwd: Option<String>,
+    /// Increments on every OSC 7 update (including same path).
+    cwd_generation: u64,
     /// Virtual scroll from bottom (fold-aware); kept in sync when no folds.
     view_offset: usize,
     /// First-seen wall-clock time per absolute scrollback line (0 = oldest).
@@ -153,6 +157,8 @@ impl TerminalHandle {
                 rows: rows_usize,
                 osc: Osc133Filter::new(),
                 marks: ShellMarks::new(),
+                cwd: None,
+                cwd_generation: 0,
                 view_offset: 0,
                 line_times: Vec::new(),
                 prev_cursor_abs: 0,
@@ -173,6 +179,16 @@ impl TerminalHandle {
     pub fn toggle_fold(&self, block_id: u64) -> bool {
         let mut state = self.inner.lock();
         state.marks.toggle_fold(block_id)
+    }
+
+    /// Interactive shell cwd from OSC 7, if known.
+    pub fn cwd(&self) -> Option<String> {
+        self.inner.lock().cwd.clone()
+    }
+
+    /// Monotonic counter bumped on each OSC 7 update.
+    pub fn cwd_generation(&self) -> u64 {
+        self.inner.lock().cwd_generation
     }
 
     /// Mark a command block when the user submits Enter locally.
@@ -244,8 +260,8 @@ impl TerminalHandle {
         {
             let mut state = self.inner.lock();
             let mut clean = Vec::with_capacity(bytes.len());
-            let mut marks = Vec::new();
-            state.osc.push(bytes, &mut clean, &mut marks);
+            let mut events = Vec::new();
+            state.osc.push(bytes, &mut clean, &mut events);
 
             let hist_before = state.term.history_size();
             let cursor_before = cursor_abs(&state.term, hist_before);
@@ -257,9 +273,15 @@ impl TerminalHandle {
                 parser.advance(term, &clean);
             }
 
-            // Apply OSC marks against the post-advance cursor position.
-            for mark in marks {
-                apply_mark(&mut state, mark);
+            // Apply OSC events against the post-advance cursor position.
+            for ev in events {
+                match ev {
+                    OscEvent::Mark(mark) => apply_mark(&mut state, mark),
+                    OscEvent::Cwd(path) => {
+                        state.cwd = Some(path);
+                        state.cwd_generation = state.cwd_generation.saturating_add(1);
+                    }
+                }
             }
 
             // Keep the open block's end at the current cursor (output growth).
