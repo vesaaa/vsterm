@@ -104,6 +104,7 @@ impl VsTermApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         fonts::install(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
+        crate::sys_file_icon::warm_up();
 
         let locale = load_locale();
         i18n::set(locale);
@@ -136,7 +137,7 @@ impl VsTermApp {
             commands,
             left_tab: LeftTab::Servers,
             main_tab: MainTab::Terminal,
-            // Fixed-ish widths — never grow from monitor plot/gauge content.
+            // Fixed column widths — not user-resizable.
             tree_width: 260.0,
             list_width: 168.0,
             bottom: BottomPanelState::default(),
@@ -1465,36 +1466,26 @@ impl eframe::App for VsTermApp {
             status_bar::show(ui, &self.status, self.connections.list_meta().len());
         });
 
-        // Col1 + Col2 share ONE SidePanel so the internal drag strip uses the same
-        // panel fill (dual SidePanels left a black gap when content expanded rect).
-        // Outer edge vs CentralPanel matches the working col2↔col3 resize behavior.
+        // Col1 + Col2 share ONE SidePanel (fixed widths, no resize).
         let side_fill = egui::Color32::from_rgb(248, 249, 250);
         let side_frame = egui::Frame::NONE
             .fill(side_fill)
             .inner_margin(egui::Margin::ZERO)
             .stroke(egui::Stroke::NONE);
 
-        let duo_default = self.tree_width + self.list_width + 4.0;
+        const SEP_W: f32 = 4.0;
+        let tree_w = self.tree_width;
+        let list_w = self.list_width;
+        let duo_w = tree_w + SEP_W + list_w;
         let mut active_tab_screen_rect: Option<egui::Rect> = None;
         let duo = egui::SidePanel::left("left_duo")
-            .resizable(true)
-            .default_width(duo_default)
-            .width_range(360.0..=560.0)
+            .resizable(false)
+            .default_width(duo_w)
+            .width_range(duo_w..=duo_w)
             .frame(side_frame)
             .show_separator_line(true)
             .show(ctx, |ui| {
-                let total_w = ui.available_width().max(1.0);
                 let total_h = ui.available_height().max(1.0);
-                let sep_w = 4.0;
-
-                self.list_width = self.list_width.clamp(140.0, 220.0);
-                let max_tree = (total_w - sep_w - 140.0).min(320.0);
-                self.tree_width = self.tree_width.clamp(220.0, max_tree.max(220.0));
-                if self.tree_width + sep_w + self.list_width > total_w {
-                    self.list_width = (total_w - sep_w - self.tree_width).max(140.0);
-                }
-                let tree_w = self.tree_width.min(total_w - sep_w - 140.0).max(180.0);
-                let list_w = (total_w - sep_w - tree_w).max(140.0);
 
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                 ui.horizontal(|ui| {
@@ -1572,26 +1563,15 @@ impl eframe::App for VsTermApp {
                         },
                     );
 
-                    // —— Internal splitter (panel fill, not black) ——
-                    let (sep_rect, sep_resp) =
-                        ui.allocate_exact_size(egui::vec2(sep_w, total_h), egui::Sense::drag());
+                    // —— Column divider (visual only) ——
+                    let (sep_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(SEP_W, total_h), egui::Sense::hover());
                     ui.painter().rect_filled(sep_rect, 0.0, side_fill);
-                    let line_x = sep_rect.center().x;
-                    let stroke = if sep_resp.dragged() {
-                        ui.style().visuals.widgets.active.fg_stroke
-                    } else if sep_resp.hovered() {
-                        ui.style().visuals.widgets.hovered.fg_stroke
-                    } else {
-                        ui.style().visuals.widgets.noninteractive.bg_stroke
-                    };
-                    ui.painter().vline(line_x, sep_rect.y_range(), stroke);
-                    if sep_resp.hovered() || sep_resp.dragged() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                    }
-                    if sep_resp.dragged() {
-                        self.tree_width = (self.tree_width + sep_resp.drag_delta().x)
-                            .clamp(220.0, (total_w - sep_w - 140.0).min(320.0).max(220.0));
-                    }
+                    ui.painter().vline(
+                        sep_rect.center().x,
+                        sep_rect.y_range(),
+                        ui.style().visuals.widgets.noninteractive.bg_stroke,
+                    );
 
                     // —— Column 2 (exact width, flush right into col3) ——
                     ui.allocate_ui_with_layout(
@@ -1639,16 +1619,6 @@ impl eframe::App for VsTermApp {
                     );
                 });
             });
-        // Outer SidePanel resize: keep col1 width preference; col2 takes the remainder.
-        let duo_w = duo.response.rect.width().clamp(360.0, 560.0);
-        let sep_w = 4.0;
-        self.tree_width = self
-            .tree_width
-            .clamp(220.0, (duo_w - sep_w - 140.0).min(320.0).max(220.0));
-        self.list_width = (duo_w - sep_w - self.tree_width).clamp(140.0, 220.0);
-        if self.tree_width + sep_w + self.list_width > duo_w + 0.5 {
-            self.tree_width = (duo_w - sep_w - self.list_width).max(180.0);
-        }
 
         // Mask the col2/col3 separator inside the active host tab so tab + main area look joined.
         if let Some(tab_rect) = active_tab_screen_rect {
@@ -1673,7 +1643,12 @@ impl eframe::App for VsTermApp {
         // Third column: only show content for the currently active host.
         let central_frame = egui::Frame::NONE
             .fill(egui::Color32::from_rgb(255, 255, 255))
-            .inner_margin(egui::Margin::symmetric(8, 6))
+            .inner_margin(egui::Margin {
+                left: 8,
+                right: 8,
+                top: 6,
+                bottom: 0,
+            })
             .stroke(egui::Stroke::NONE);
 
         egui::CentralPanel::default().frame(central_frame).show(ctx, |ui| {
@@ -1693,20 +1668,27 @@ impl eframe::App for VsTermApp {
 
             match self.main_tab {
                 MainTab::Terminal => {
-                    // Strict vertical split: terminal and bottom strip never share hit-test area.
-                    let gap = 6.0;
-                    let bottom_h = bottom_panel::reserved_height(&self.bottom);
+                    // Vertical split: terminal | draggable gap | bottom (files/commands).
+                    let gap = bottom_panel::SPLIT_GAP;
                     let full = ui.available_rect_before_wrap();
-                    let term_h = (full.height() - bottom_h - gap).max(80.0);
+                    self.bottom.height =
+                        bottom_panel::clamp_body_height(self.bottom.height, full.height());
+                    let bottom_h = bottom_panel::reserved_height(&self.bottom);
+                    let term_h = (full.height() - bottom_h - gap).max(bottom_panel::MIN_TERM_HEIGHT);
                     let term_rect = egui::Rect::from_min_size(
                         full.min,
                         egui::vec2(full.width(), term_h),
                     );
                     self.last_central_rect = Some(term_rect);
                     self.fx.set_shatter_scatter(term_rect);
+
+                    let sep_rect = egui::Rect::from_min_max(
+                        egui::pos2(full.min.x, term_rect.max.y),
+                        egui::pos2(full.max.x, term_rect.max.y + gap),
+                    );
                     let bottom_rect = egui::Rect::from_min_max(
-                        egui::pos2(full.min.x, term_rect.max.y + gap),
-                        full.max,
+                        egui::pos2(full.min.x, sep_rect.max.y),
+                        egui::pos2(full.max.x, ui.max_rect().max.y),
                     );
 
                     ui.allocate_ui_at_rect(term_rect, |ui| {
@@ -1721,18 +1703,35 @@ impl eframe::App for VsTermApp {
                         }
                     });
 
-                    // Thin separator drawn in the gap (visual only, no interactive widgets).
-                    let sep_y = term_rect.max.y + gap * 0.5;
-                    ui.painter().hline(
-                        term_rect.x_range(),
-                        sep_y,
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(210, 214, 220)),
-                    );
+                    // Draggable separator (drag up → taller bottom panel).
+                    let sep_id = ui.id().with("term_bottom_split");
+                    let sep_resp = ui.interact(sep_rect, sep_id, egui::Sense::drag());
+                    let stroke = if sep_resp.dragged() {
+                        ui.style().visuals.widgets.active.fg_stroke
+                    } else if sep_resp.hovered() {
+                        ui.style().visuals.widgets.hovered.fg_stroke
+                    } else {
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(210, 214, 220))
+                    };
+                    ui.painter().hline(sep_rect.x_range(), sep_rect.center().y, stroke);
+                    if sep_resp.hovered() || sep_resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    }
+                    if sep_resp.dragged() {
+                        // Pointer up (negative Δy) grows the bottom body.
+                        self.bottom.height = bottom_panel::clamp_body_height(
+                            self.bottom.height - sep_resp.drag_delta().y,
+                            full.height(),
+                        );
+                    }
 
                     ui.allocate_ui_at_rect(bottom_rect, |ui| {
-                        if let Some(cmd) =
-                            bottom_panel::show(ui, &mut self.bottom, &self.commands)
-                        {
+                        if let Some(cmd) = bottom_panel::show(
+                            ui,
+                            &mut self.bottom,
+                            &self.commands,
+                            remote.as_ref(),
+                        ) {
                             if let Err(err) = self.connections.write_to_active(cmd.as_bytes()) {
                                 self.status =
                                     format!("{}: {err}", i18n::t("status.open_failed"));
@@ -1740,7 +1739,6 @@ impl eframe::App for VsTermApp {
                         }
                     });
 
-                    // Consume the full region so subsequent UI does not stack under us.
                     ui.advance_cursor_after_rect(full);
                 }
                 MainTab::SystemInfo => {

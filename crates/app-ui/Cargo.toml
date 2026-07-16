@@ -25,6 +25,8 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 dirs = { workspace = true }
+rfd = { workspace = true }
+file_icon_provider = "1.0"
 uuid = { workspace = true }
 parking_lot = { workspace = true }
 sysinfo = { workspace = true }

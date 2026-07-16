@@ -18,6 +18,7 @@ parking_lot = { workspace = true }
 tracing = { workspace = true }
 portable-pty = { workspace = true }
 russh = { workspace = true }
+russh-sftp = { workspace = true }
 regex = { workspace = true }
 futures = { workspace = true }
 dirs = { workspace = true }

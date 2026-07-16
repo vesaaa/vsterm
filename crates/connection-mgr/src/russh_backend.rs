@@ -7,6 +7,8 @@
 use crate::backend::RemoteExec;
 use crate::known_hosts::{self, HostKeyCheck};
 use crate::remote_exec::RemoteSession;
+use crate::remote_fs::{ArcProgress, RemoteDirEntry, RemoteFs};
+use crate::remote_tree;
 use crate::ssh_io::SshIoSession;
 use crate::system_ssh::{expand_user_path, preflight, resolve_auth, AuthMaterial, PreflightOpts};
 use crate::ConnError;
@@ -15,8 +17,11 @@ use russh::client::{AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{load_secret_key, PrivateKeyWithHashAlg, PublicKey};
 use russh::MethodKind;
 use russh::{client, ChannelMsg};
+use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::FileType;
 use session_tree::{AuthConfig, SessionConfig};
 use std::io::{self, Cursor, Read, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, OnceLock};
@@ -117,14 +122,15 @@ async fn connect_and_shell(
     authenticate(&mut handle, &config, &auth).await?;
 
     let session = Arc::new(handle);
-    let exec = Arc::new(RusshRemoteExec {
+    let shared = Arc::new(RusshRemoteExec {
         session: Arc::clone(&session),
         host: config.host.clone(),
     });
-    let remote = RemoteSession::from_exec(
+    let remote = RemoteSession::from_exec_fs(
         config.username.clone(),
         config.host.clone(),
-        exec as Arc<dyn RemoteExec>,
+        shared.clone() as Arc<dyn RemoteExec>,
+        shared as Arc<dyn RemoteFs>,
     );
 
     let io = open_shell_io(Arc::clone(&session), &config.term_type, cols, rows).await?;
@@ -519,6 +525,184 @@ impl RemoteExec for RusshRemoteExec {
                 Ok(body)
             })
     }
+}
+
+impl RemoteFs for RusshRemoteExec {
+    fn list_dir(&self, path: &str) -> Result<Vec<RemoteDirEntry>, ConnError> {
+        let session = Arc::clone(&self.session);
+        let host = self.host.clone();
+        let path = path.to_string();
+        runtime().block_on(async move {
+            let sftp = open_sftp(session, &host).await?;
+            let mut entries = Vec::new();
+            let dir = sftp
+                .read_dir(&path)
+                .await
+                .map_err(|e| ConnError::Connect(format!("sftp list {path}: {e}")))?;
+            for entry in dir {
+                let name = entry.file_name();
+                if name == "." || name == ".." {
+                    continue;
+                }
+                let meta = entry.metadata();
+                let is_dir = meta.file_type() == FileType::Dir;
+                entries.push(RemoteDirEntry {
+                    name,
+                    is_dir,
+                    size: meta.size,
+                    mtime: meta.mtime.map(|t| t as u64),
+                });
+            }
+            entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            });
+            let _ = sftp.close().await;
+            Ok(entries)
+        })
+    }
+
+    fn get_file(
+        &self,
+        remote_path: &str,
+        local_path: &Path,
+        progress: Option<&ArcProgress>,
+    ) -> Result<(), ConnError> {
+        self.get_path(remote_path, local_path, progress)
+    }
+
+    fn get_path(
+        &self,
+        remote_path: &str,
+        local_path: &Path,
+        progress: Option<&ArcProgress>,
+    ) -> Result<(), ConnError> {
+        let session = Arc::clone(&self.session);
+        let host = self.host.clone();
+        let remote_path = remote_path.to_string();
+        let local_path = local_path.to_path_buf();
+        let progress_ui = progress.cloned();
+        let progress_worker = progress_ui.clone();
+        let result: Result<(), ConnError> = runtime().block_on(async move {
+            let sftp = open_sftp(session, &host).await?;
+            remote_tree::run_download(
+                &sftp,
+                &remote_path,
+                &local_path,
+                progress_worker.as_ref(),
+            )
+            .await?;
+            let _ = sftp.close().await;
+            Ok(())
+        });
+        finish_transfer(&result, progress_ui.as_ref());
+        result
+    }
+
+    fn put_file(
+        &self,
+        local_path: &Path,
+        remote_path: &str,
+        progress: Option<&ArcProgress>,
+    ) -> Result<(), ConnError> {
+        self.put_path(local_path, remote_path, progress)
+    }
+
+    fn put_path(
+        &self,
+        local_path: &Path,
+        remote_path: &str,
+        progress: Option<&ArcProgress>,
+    ) -> Result<(), ConnError> {
+        let session = Arc::clone(&self.session);
+        let host = self.host.clone();
+        let remote_path = remote_path.to_string();
+        let local_path = local_path.to_path_buf();
+        let progress_ui = progress.cloned();
+        let progress_worker = progress_ui.clone();
+        let result: Result<(), ConnError> = runtime().block_on(async move {
+            let sftp = open_sftp(session, &host).await?;
+            remote_tree::run_upload(
+                &sftp,
+                &local_path,
+                &remote_path,
+                progress_worker.as_ref(),
+            )
+            .await?;
+            let _ = sftp.close().await;
+            Ok(())
+        });
+        finish_transfer(&result, progress_ui.as_ref());
+        result
+    }
+
+    fn remove(&self, remote_path: &str, is_dir: bool) -> Result<(), ConnError> {
+        let session = Arc::clone(&self.session);
+        let host = self.host.clone();
+        let remote_path = remote_path.to_string();
+        runtime().block_on(async move {
+            let sftp = open_sftp(session, &host).await?;
+            let res = if is_dir {
+                sftp.remove_dir(&remote_path)
+                    .await
+                    .map_err(|e| ConnError::Connect(format!("sftp rmdir {remote_path}: {e}")))
+            } else {
+                sftp.remove_file(&remote_path)
+                    .await
+                    .map_err(|e| ConnError::Connect(format!("sftp rm {remote_path}: {e}")))
+            };
+            let _ = sftp.close().await;
+            res
+        })
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), ConnError> {
+        let session = Arc::clone(&self.session);
+        let host = self.host.clone();
+        let from = from.to_string();
+        let to = to.to_string();
+        runtime().block_on(async move {
+            let sftp = open_sftp(session, &host).await?;
+            sftp.rename(&from, &to)
+                .await
+                .map_err(|e| ConnError::Connect(format!("sftp rename {from} → {to}: {e}")))?;
+            let _ = sftp.close().await;
+            Ok(())
+        })
+    }
+}
+
+fn finish_transfer(result: &Result<(), ConnError>, progress: Option<&ArcProgress>) {
+    match result {
+        Ok(()) => {
+            if let Some(p) = progress {
+                p.finish_ok();
+            }
+        }
+        Err(e) => {
+            if let Some(p) = progress {
+                p.finish_err(e.to_string());
+            }
+        }
+    }
+}
+
+async fn open_sftp(
+    session: Arc<Handle<ClientHandler>>,
+    host: &str,
+) -> Result<SftpSession, ConnError> {
+    let channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| ConnError::Connect(format!("sftp channel {host}: {e}")))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| ConnError::Connect(format!("sftp subsystem {host}: {e}")))?;
+    SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| ConnError::Connect(format!("sftp init {host}: {e}")))
 }
 
 fn wrap_sh_c(script: &str) -> String {

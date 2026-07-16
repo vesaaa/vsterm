@@ -10,7 +10,7 @@ members = [
 default-members = ["crates/app-ui"]
 
 [workspace.package]
-version = "1.0.11"
+version = "1.0.12"
 edition = "2021"
 license-file = "LICENSE"
 authors = ["vesaa"]
@@ -44,6 +44,7 @@ portable-pty = "0.8"
 
 # SSH (full wiring in stage 4)
 russh = "0.50"
+russh-sftp = "2.0.5"
 
 # Security
 keyring = "3"
@@ -54,6 +55,7 @@ zeroize = { version = "1", features = ["derive"] }
 # Utils
 uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "6"
+rfd = "0.15"
 parking_lot = "0.12"
 bytes = "1"
 regex = "1"

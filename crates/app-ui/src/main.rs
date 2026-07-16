@@ -17,6 +17,7 @@ mod metrics;
 mod panels;
 mod term_highlight;
 mod terminal_view;
+mod sys_file_icon;
 mod theme;
 mod ui_icon;
 mod ctx_menu;
@@ -52,6 +53,7 @@ fn main() -> Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1400.0, 860.0])
         .with_min_inner_size([900.0, 560.0])
+        .with_drag_and_drop(true)
         .with_title("VsTerm");
     if let Ok(icon) = icon::window_icon() {
         viewport = viewport.with_icon(icon);

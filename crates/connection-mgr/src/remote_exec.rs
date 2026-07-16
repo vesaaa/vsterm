@@ -1,35 +1,35 @@
-//! One-shot remote command execution (metrics / routes).
+//! One-shot remote command execution (metrics / routes) and optional SFTP.
 //!
-//! Callers go through [`RemoteSession`] → [`RemoteExec`]. Today only the system
-//! OpenSSH path is wired; the builtin russh engine plugs in by implementing
-//! [`RemoteExec`] and using [`RemoteSession::from_exec`].
+//! Callers go through [`RemoteSession`] → [`RemoteExec`] / [`RemoteFs`].
 
 use crate::backend::RemoteExec;
 use crate::error::ConnError;
 use crate::process;
+use crate::remote_fs::{
+    ArcProgress, RemoteDirEntry, RemoteFs, UnsupportedRemoteFs,
+};
 use crate::system_ssh::{resolve_auth, system_ssh_missing, which_ssh, AuthMaterial};
 use session_tree::{AuthConfig, SessionConfig};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use vault::Vault;
 
-/// UI-facing handle for running commands on the connected SSH host.
-///
-/// Holds an engine-agnostic [`RemoteExec`] so system `ssh` and future russh
-/// share the same call path (`run_command`).
+/// UI-facing handle for running commands / SFTP on the connected SSH host.
 #[derive(Clone)]
 pub struct RemoteSession {
-    /// Stable identity for UI cache keys (metrics / routes).
+    /// Stable identity for UI cache keys (metrics / routes / SFTP).
     pub username: String,
     pub host: String,
     exec: Arc<dyn RemoteExec>,
+    fs: Arc<dyn RemoteFs>,
 }
 
 impl RemoteSession {
     /// System OpenSSH: each call may spawn `ssh.exe` (always via [`process::command`]).
+    /// SFTP is not supported yet — [`Self::sftp_supported`] is false.
     pub fn system(config: SessionConfig, interactive_password: Option<String>) -> Self {
         Self {
             username: config.username.clone(),
@@ -38,16 +38,28 @@ impl RemoteSession {
                 config,
                 interactive_password,
             }),
+            fs: Arc::new(UnsupportedRemoteFs),
         }
     }
 
-    /// Attach any engine (system, russh, …) behind the same facade.
-    pub fn from_exec(username: String, host: String, exec: Arc<dyn RemoteExec>) -> Self {
+    /// Builtin russh (or any engine) with shared exec + filesystem.
+    pub fn from_exec_fs(
+        username: String,
+        host: String,
+        exec: Arc<dyn RemoteExec>,
+        fs: Arc<dyn RemoteFs>,
+    ) -> Self {
         Self {
             username,
             host,
             exec,
+            fs,
         }
+    }
+
+    /// Attach exec only (SFTP unsupported).
+    pub fn from_exec(username: String, host: String, exec: Arc<dyn RemoteExec>) -> Self {
+        Self::from_exec_fs(username, host, exec, Arc::new(UnsupportedRemoteFs))
     }
 
     pub fn display_key(&self) -> String {
@@ -56,6 +68,58 @@ impl RemoteSession {
 
     pub fn run_command(&self, vault: Option<&Vault>, remote_cmd: &str) -> Result<String, ConnError> {
         self.exec.run_command(vault, remote_cmd)
+    }
+
+    pub fn sftp_supported(&self) -> bool {
+        self.fs.sftp_supported()
+    }
+
+    pub fn list_dir(&self, path: &str) -> Result<Vec<RemoteDirEntry>, ConnError> {
+        self.fs.list_dir(path)
+    }
+
+    pub fn get_file(
+        &self,
+        remote_path: &str,
+        local_path: &Path,
+        progress: Option<&ArcProgress>,
+    ) -> Result<(), ConnError> {
+        self.fs.get_file(remote_path, local_path, progress)
+    }
+
+    pub fn put_file(
+        &self,
+        local_path: &Path,
+        remote_path: &str,
+        progress: Option<&ArcProgress>,
+    ) -> Result<(), ConnError> {
+        self.fs.put_file(local_path, remote_path, progress)
+    }
+
+    pub fn get_path(
+        &self,
+        remote_path: &str,
+        local_path: &Path,
+        progress: Option<&ArcProgress>,
+    ) -> Result<(), ConnError> {
+        self.fs.get_path(remote_path, local_path, progress)
+    }
+
+    pub fn put_path(
+        &self,
+        local_path: &Path,
+        remote_path: &str,
+        progress: Option<&ArcProgress>,
+    ) -> Result<(), ConnError> {
+        self.fs.put_path(local_path, remote_path, progress)
+    }
+
+    pub fn remove(&self, remote_path: &str, is_dir: bool) -> Result<(), ConnError> {
+        self.fs.remove(remote_path, is_dir)
+    }
+
+    pub fn rename(&self, from: &str, to: &str) -> Result<(), ConnError> {
+        self.fs.rename(from, to)
     }
 }
 

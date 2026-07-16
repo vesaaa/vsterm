@@ -28,9 +28,11 @@ pub enum Icon {
     Plug,
     Unplug,
     RefreshCw,
+    Upload,
     LogOut,
     Check,
     ChevronRight,
+    ChevronDown,
 }
 
 impl Icon {
@@ -51,9 +53,11 @@ impl Icon {
             Icon::Plug => "plug",
             Icon::Unplug => "unplug",
             Icon::RefreshCw => "refresh-cw",
+            Icon::Upload => "upload",
             Icon::LogOut => "log-out",
             Icon::Check => "check",
             Icon::ChevronRight => "chevron-right",
+            Icon::ChevronDown => "chevron-down",
         }
     }
 

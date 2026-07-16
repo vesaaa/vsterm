@@ -12,6 +12,12 @@ pub fn apply(ctx: &Context) {
     visuals.widgets.active.bg_fill = Color32::from_rgb(200, 210, 230);
     visuals.selection.bg_fill = Color32::from_rgb(200, 220, 250);
     visuals.override_text_color = Some(Color32::from_rgb(52, 56, 62));
+    visuals.widgets.inactive.bg_stroke =
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(170, 174, 180));
+    visuals.widgets.hovered.bg_stroke =
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(140, 150, 165));
+    visuals.widgets.active.bg_stroke =
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(90, 130, 190));
     visuals.widgets.noninteractive.fg_stroke =
         egui::Stroke::new(1.0_f32, Color32::from_rgb(52, 56, 62));
     visuals.widgets.inactive.fg_stroke =

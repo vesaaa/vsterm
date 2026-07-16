@@ -1,6 +1,7 @@
 use crate::i18n;
+use crate::sys_file_icon::{self, FileIconKind};
 use crate::ui_icon::{self, Icon};
-use egui::{Color32, Sense, Ui};
+use egui::{Color32, RichText, Sense, Ui};
 use session_tree::{SessionTree, TreeNode};
 
 #[derive(Debug, Clone)]
@@ -157,21 +158,25 @@ fn render_node(
             } else {
                 Color32::from_rgb(32, 34, 40)
             };
-            let header = ui_icon::with_label(Icon::Folder, name, 14.0, color);
-            let response = egui::CollapsingHeader::new(header)
-                .id_salt(("folder", id.as_str()))
-                .default_open(true)
-                .show(ui, |ui| {
-                    let mut action = None;
-                    for child in children {
-                        if let Some(a) = render_node(ui, tree, child, selection) {
-                            action = Some(a);
-                        }
+            let header = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                ui.id().with(("folder", id.as_str())),
+                true,
+            )
+            .show_header(ui, |ui| {
+                sys_file_icon::add_icon(ui, FileIconKind::Folder, 14.0, Icon::Folder);
+                ui.label(RichText::new(name).size(13.0).color(color));
+            });
+            let (_, header_inner, body_opt) = header.body(|ui| {
+                let mut action = None;
+                for child in children {
+                    if let Some(a) = render_node(ui, tree, child, selection) {
+                        action = Some(a);
                     }
-                    action
-                });
-
-            let header = &response.header_response;
+                }
+                action
+            });
+            let header = &header_inner.response;
             if header.dnd_hover_payload::<SessionDragPayload>().is_some() {
                 ui.painter().rect_filled(
                     header.rect,
@@ -257,7 +262,7 @@ fn render_node(
                     ui.close_menu();
                 }
             });
-            action.or(response.body_returned.flatten())
+            action.or(body_opt.map(|b| b.inner).flatten())
         }
         TreeNode::Session { name, session_ref } => {
             let selected = matches!(
