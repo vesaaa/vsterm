@@ -175,6 +175,55 @@ impl AuthPromptState {
         }
     }
 
+    /// Snapshot chrome for the shatter FX (title / fields / buttons).
+    pub fn shatter_face(&self) -> crate::fx::ShatterFace {
+        let title_base = match self.kind {
+            AuthPromptKind::Password => i18n::t("dialog.auth.password_title"),
+            AuthPromptKind::PublicKey => i18n::t("dialog.auth.key_title"),
+        };
+        let title = format!("{} ({}/{})", title_base, self.attempt, max_attempts());
+        let mut host_line = format!("{}: {}", i18n::t("dialog.auth.host"), self.host_label());
+        if let Some(ident) = &self.server_ident {
+            host_line.push_str(&format!(" · {ident}"));
+        }
+        let (secret_label, secret_display, btn_primary) = match self.kind {
+            AuthPromptKind::Password => {
+                let bullets = if self.password.is_empty() {
+                    String::new()
+                } else {
+                    "•".repeat(self.password.chars().count().clamp(4, 16))
+                };
+                (
+                    i18n::t("dialog.auth.password"),
+                    bullets,
+                    i18n::t("dialog.auth.connect"),
+                )
+            }
+            AuthPromptKind::PublicKey => {
+                let path = if self.key_path.len() > 28 {
+                    format!("…{}", &self.key_path[self.key_path.len().saturating_sub(26)..])
+                } else {
+                    self.key_path.clone()
+                };
+                (
+                    i18n::t("dialog.auth.key_path"),
+                    path,
+                    i18n::t("dialog.auth.verify"),
+                )
+            }
+        };
+        crate::fx::ShatterFace {
+            title,
+            host_line,
+            username_label: i18n::t("dialog.auth.username"),
+            username: self.username.clone(),
+            secret_label,
+            secret_display,
+            btn_primary,
+            btn_cancel: i18n::t("dialog.auth.cancel"),
+        }
+    }
+
     /// Apply dialog fields onto a connect-ready config + interactive password.
     pub fn build_connect(&self) -> Result<(SessionConfig, Option<String>), String> {
         let username = self.username.trim().to_string();

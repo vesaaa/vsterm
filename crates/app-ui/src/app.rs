@@ -96,6 +96,8 @@ pub struct VsTermApp {
     pending_spit_from: Option<egui::Rect>,
     /// True while an off-screen auth dialog is being measured for the spit target.
     spit_measuring: bool,
+    /// Central (terminal) region from the last frame — shatter shards disperse here.
+    last_central_rect: Option<egui::Rect>,
 }
 
 impl VsTermApp {
@@ -157,6 +159,7 @@ impl VsTermApp {
             pending_spit_auth: None,
             pending_spit_from: None,
             spit_measuring: false,
+            last_central_rect: None,
         }
     }
 
@@ -268,8 +271,8 @@ impl VsTermApp {
         if let Err(()) = self.preflight_before_auth(&config) {
             return;
         }
-        if !self.connect_fx.motion_enabled() {
-            // No trail / spit — open the prompt immediately.
+        if !self.connect_fx.connect_animated() {
+            // No entrance animation — open the prompt immediately.
             self.auth_prompt = Some(AuthPromptState::for_session(config, 1));
             self.pending_spit_auth = None;
             self.pending_spit_from = None;
@@ -277,7 +280,7 @@ impl VsTermApp {
             return;
         }
         // Render the real dialog off-screen for one frame to capture its exact
-        // size, so the spit-out morph lands precisely where the dialog appears.
+        // size, so the entrance animation lands precisely where the dialog appears.
         let mut prompt = AuthPromptState::for_session(config, 1);
         prompt.measure_only = true;
         self.auth_prompt = Some(prompt);
@@ -516,9 +519,21 @@ impl VsTermApp {
                 self.sync_host_binding();
                 self.status = i18n::t("status.connected");
                 if let Some(rect) = self.last_auth_dialog_rect.take() {
-                    if self.connect_fx.motion_enabled() {
-                        let accent = crate::fx::accent_from_tag(pending.config.color_tag.as_deref());
-                        self.fx.begin_auth_suck(rect, accent);
+                    let accent = crate::fx::accent_from_tag(pending.config.color_tag.as_deref());
+                    match self.connect_fx {
+                        ConnectFxMode::Trail => self.fx.begin_auth_suck(rect, accent),
+                        ConnectFxMode::Shatter => {
+                            let zone = self.last_central_rect.unwrap_or(rect);
+                            if let Some(p) = self.auth_prompt.as_ref() {
+                                self.fx.begin_auth_shatter_out(
+                                    rect,
+                                    accent,
+                                    zone,
+                                    p.shatter_face(),
+                                );
+                            }
+                        }
+                        ConnectFxMode::Off => {}
                     }
                 }
                 self.auth_prompt = None;
@@ -710,7 +725,7 @@ impl VsTermApp {
 
     fn set_connect_fx(&mut self, mode: ConnectFxMode) {
         self.connect_fx = mode;
-        if !mode.motion_enabled() {
+        if !mode.connect_animated() {
             // Drop any in-flight morph when turning effects off.
             self.fx = FxLayer::default();
             if self.spit_measuring {
@@ -1220,8 +1235,9 @@ impl eframe::App for VsTermApp {
 
         self.show_auth_prompt(ctx);
 
-        // Off-screen measurement finished this frame → launch the spit-out morph
-        // toward the dialog's true, centered rect, then hide it until the morph lands.
+        // Off-screen measurement finished this frame → launch the entrance
+        // animation toward the dialog's true, centered rect, then hide it until
+        // the animation lands (Trail spit morph or Shatter re-assembly).
         if self.spit_measuring {
             let measured = self
                 .last_auth_dialog_rect
@@ -1239,7 +1255,18 @@ impl eframe::App for VsTermApp {
                 if let Some(p) = prompt.as_mut() {
                     p.measure_only = false;
                 }
-                self.fx.begin_auth_spit(from, target, accent);
+                match self.connect_fx {
+                    ConnectFxMode::Shatter => {
+                        let zone = self.last_central_rect.unwrap_or(target);
+                        if let Some(p) = prompt.as_ref() {
+                            self.fx
+                                .begin_auth_shatter_in(target, accent, zone, p.shatter_face());
+                        } else {
+                            self.fx.begin_auth_spit(from, target, accent);
+                        }
+                    }
+                    _ => self.fx.begin_auth_spit(from, target, accent),
+                }
                 self.last_auth_dialog_rect = Some(target);
                 self.pending_spit_auth = prompt;
                 self.pending_spit_from = None;
@@ -1675,6 +1702,8 @@ impl eframe::App for VsTermApp {
                         full.min,
                         egui::vec2(full.width(), term_h),
                     );
+                    self.last_central_rect = Some(term_rect);
+                    self.fx.set_shatter_scatter(term_rect);
                     let bottom_rect = egui::Rect::from_min_max(
                         egui::pos2(full.min.x, term_rect.max.y + gap),
                         full.max,

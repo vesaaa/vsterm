@@ -4,7 +4,10 @@
 //! Event-driven only — no always-on full FPS loop. Callers request repaint
 //! while [`FxLayer::is_active`].
 
-use egui::{Color32, Context, Id, LayerId, Order, Painter, Pos2, Rect, Vec2};
+use egui::{
+    epaint::TextShape, Align2, Color32, Context, FontId, Id, LayerId, Order, Painter, Pos2, Rect,
+    Vec2,
+};
 use std::time::{Duration, Instant};
 
 const MORPH_LIFE: Duration = Duration::from_millis(760);
@@ -16,6 +19,12 @@ const TRAIL: usize = 7;
 const SPARKS: usize = 9;
 /// Fallback when the host has no `color_tag` (matches session-list default accent).
 pub const DEFAULT_ACCENT: Color32 = Color32::from_rgb(60, 120, 210);
+
+/// Shatter grid — 3×2 = 6 shards (fewer, more irregular, cheaper).
+const SHATTER_COLS: usize = 3;
+const SHATTER_ROWS: usize = 2;
+const SHATTER_OUT_LIFE: Duration = Duration::from_millis(820);
+const SHATTER_IN_LIFE: Duration = Duration::from_millis(700);
 
 /// User preference for connect / reconnect motion (persisted in `config.yaml`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -46,9 +55,15 @@ impl ConnectFxMode {
         }
     }
 
-    /// Whether suck / spit / dialog-spark connect motion should run.
+    /// Whether the Trail suck / spit morph + dialog-spark flourish should run.
     pub fn motion_enabled(self) -> bool {
         matches!(self, Self::Trail)
+    }
+
+    /// Whether reconnect should measure the dialog off-screen and play a custom
+    /// entrance animation (Trail spit morph or Shatter re-assembly).
+    pub fn connect_animated(self) -> bool {
+        matches!(self, Self::Trail | Self::Shatter)
     }
 }
 
@@ -81,12 +96,49 @@ struct SparkField {
     seed: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShatterKind {
+    /// Auth success: the assembled dialog breaks apart and falls into the terminal.
+    Out,
+    /// Reconnect: shards fly up from the terminal and re-assemble into the dialog.
+    In,
+}
+
+/// Snapshot of auth-dialog chrome painted onto shards (keeps the FX readable as
+/// “broken login panel”, not blank geometry).
+#[derive(Clone)]
+pub struct ShatterFace {
+    pub title: String,
+    pub host_line: String,
+    pub username_label: String,
+    pub username: String,
+    pub secret_label: String,
+    /// Masked password (`••••`) or truncated key path.
+    pub secret_display: String,
+    pub btn_primary: String,
+    pub btn_cancel: String,
+}
+
+/// Grid-based dialog shatter (a handful of shards, purely decorative).
+struct Shatter {
+    /// Dialog footprint (assembled state).
+    rect: Rect,
+    /// Where shards scatter to / from (terminal pane).
+    scatter: Rect,
+    born: Instant,
+    accent: Color32,
+    kind: ShatterKind,
+    seed: u64,
+    face: ShatterFace,
+}
+
 /// App-owned motion/effects layer.
 #[derive(Default)]
 pub struct FxLayer {
     pending_suck: Option<PendingSuck>,
     morph: Option<AuthMorph>,
     sparks: Option<SparkField>,
+    shatter: Option<Shatter>,
     spit_just_finished: bool,
 }
 
@@ -95,6 +147,7 @@ impl FxLayer {
         self.pending_suck.is_some()
             || self.morph.is_some()
             || self.sparks.is_some()
+            || self.shatter.is_some()
             || self.spit_just_finished
     }
 
@@ -156,7 +209,73 @@ impl FxLayer {
         });
     }
 
-    /// True once after a spit morph completes (consumed).
+    /// Auth success (Shatter mode): break the dialog apart; shards scatter into `zone`
+    /// (typically the terminal pane). Call [`Self::set_shatter_scatter`] later if the
+    /// zone was only approximate at start.
+    pub fn begin_auth_shatter_out(
+        &mut self,
+        rect: Rect,
+        accent: Color32,
+        zone: Rect,
+        face: ShatterFace,
+    ) {
+        if rect.width() < 8.0 || rect.height() < 8.0 {
+            return;
+        }
+        let now = Instant::now();
+        self.sparks = None;
+        self.morph = None;
+        self.pending_suck = None;
+        self.spit_just_finished = false;
+        self.shatter = Some(Shatter {
+            rect,
+            scatter: sanitize_scatter(zone, rect),
+            born: now,
+            accent,
+            kind: ShatterKind::Out,
+            seed: seed_from(now),
+            face,
+        });
+    }
+
+    /// Reconnect (Shatter mode): shards fly in from `zone` and re-assemble into the dialog.
+    /// Sets `spit_just_finished` on completion so the real dialog is revealed.
+    pub fn begin_auth_shatter_in(
+        &mut self,
+        to_dialog: Rect,
+        accent: Color32,
+        zone: Rect,
+        face: ShatterFace,
+    ) {
+        if to_dialog.width() < 8.0 || to_dialog.height() < 8.0 {
+            return;
+        }
+        let now = Instant::now();
+        self.sparks = None;
+        self.morph = None;
+        self.pending_suck = None;
+        self.spit_just_finished = false;
+        self.shatter = Some(Shatter {
+            rect: to_dialog,
+            scatter: sanitize_scatter(zone, to_dialog),
+            born: now,
+            accent,
+            kind: ShatterKind::In,
+            seed: seed_from(now),
+            face,
+        });
+    }
+
+    /// Refine the scatter zone once the terminal rect is known this frame.
+    pub fn set_shatter_scatter(&mut self, zone: Rect) {
+        if let Some(sh) = &mut self.shatter {
+            if zone.width() > 40.0 && zone.height() > 40.0 {
+                sh.scatter = zone;
+            }
+        }
+    }
+
+    /// True once after a spit morph / shatter-in completes (consumed).
     pub fn take_spit_finished(&mut self) -> bool {
         std::mem::take(&mut self.spit_just_finished)
     }
@@ -192,6 +311,21 @@ impl FxLayer {
                 self.sparks = None;
             } else {
                 paint_sparks(&painter, s, now);
+            }
+        }
+
+        if let Some(sh) = &self.shatter {
+            let life = match sh.kind {
+                ShatterKind::Out => SHATTER_OUT_LIFE,
+                ShatterKind::In => SHATTER_IN_LIFE,
+            };
+            if now.duration_since(sh.born) >= life {
+                if sh.kind == ShatterKind::In {
+                    self.spit_just_finished = true;
+                }
+                self.shatter = None;
+            } else {
+                paint_shatter(&painter, sh, now, life);
             }
         }
     }
@@ -440,5 +574,360 @@ fn paint_sparks(painter: &Painter, field: &SparkField, now: Instant) {
             Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), alpha / 3),
         );
         painter.circle_filled(pos, sr, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
+    }
+}
+
+fn rotate(offset: Vec2, ang: f32) -> Vec2 {
+    let (s, c) = ang.sin_cos();
+    Vec2::new(offset.x * c - offset.y * s, offset.x * s + offset.y * c)
+}
+
+/// Map a dialog-local point onto the moving shard.
+fn xform(p: Pos2, base: Pos2, center: Pos2, scale: f32, ang: f32) -> Pos2 {
+    center + rotate((p - base) * scale, ang)
+}
+
+/// Rotated filled quad (keeps edges aligned with the shard — never an AABB "square").
+fn paint_rotated_quad(
+    painter: &Painter,
+    r: Rect,
+    base: Pos2,
+    center: Pos2,
+    scale: f32,
+    ang: f32,
+    fill: Color32,
+) {
+    let pts = vec![
+        xform(r.left_top(), base, center, scale, ang),
+        xform(r.right_top(), base, center, scale, ang),
+        xform(r.right_bottom(), base, center, scale, ang),
+        xform(r.left_bottom(), base, center, scale, ang),
+    ];
+    painter.add(egui::Shape::convex_polygon(pts, fill, egui::Stroke::NONE));
+}
+
+/// Text that rotates with the shard (`TextShape::angle`, pivot = upper-left).
+fn paint_rotated_text(
+    painter: &Painter,
+    anchor: Pos2,
+    ang: f32,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    align: Align2,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let galley = painter.layout_no_wrap(text.to_owned(), font, color);
+    let size = galley.size();
+    let (ax, ay) = match align {
+        Align2::CENTER_CENTER => (0.5, 0.5),
+        Align2::LEFT_CENTER => (0.0, 0.5),
+        Align2::LEFT_TOP => (0.0, 0.0),
+        _ => (0.0, 0.0),
+    };
+    // `pos` is the upper-left corner; rotate around it so `align` lands on `anchor`.
+    let pos = anchor - rotate(Vec2::new(size.x * ax, size.y * ay), ang);
+    painter.add(TextShape::new(pos, galley, color).with_angle(ang));
+}
+
+/// Prefer a real terminal zone; otherwise fall back near the dialog so shards
+/// never only drop "off the bottom of the window".
+fn sanitize_scatter(zone: Rect, dialog: Rect) -> Rect {
+    if zone.width() > 40.0 && zone.height() > 40.0 {
+        return zone;
+    }
+    Rect::from_min_max(
+        Pos2::new(dialog.min.x, dialog.max.y + 12.0),
+        Pos2::new(
+            dialog.max.x + dialog.width() * 0.35,
+            dialog.max.y + dialog.height() * 1.8,
+        ),
+    )
+}
+
+/// Deterministic landing / origin point inside the scatter zone.
+fn shard_scatter_pos(sh: &Shatter, idx: u64) -> Pos2 {
+    let z = sh.scatter;
+    let pad_x = (z.width() * 0.10).min(28.0);
+    let pad_y = (z.height() * 0.10).min(28.0);
+    let w = (z.width() - 2.0 * pad_x).max(1.0);
+    let h = (z.height() - 2.0 * pad_y).max(1.0);
+    Pos2::new(
+        z.min.x + pad_x + rnd(sh.seed, idx.wrapping_add(200)) * w,
+        z.min.y + pad_y + rnd(sh.seed, idx.wrapping_add(201)) * h,
+    )
+}
+
+/// Jagged shard outline — triangles or pentagons (never tidy quads).
+fn irregular_shard_verts(center: Pos2, half: Vec2, ang: f32, seed: u64, idx: u64) -> Vec<Pos2> {
+    let n = if rnd(seed, idx.wrapping_add(40)) > 0.42 {
+        5
+    } else {
+        3
+    };
+    let tau = std::f32::consts::TAU;
+    let base_r = half.x.hypot(half.y);
+    let mut pts = Vec::with_capacity(n);
+    for i in 0..n {
+        let a0 = (i as f32 + 0.5) / n as f32 * tau;
+        let wob = (rnd(seed, idx.wrapping_add(50 + i as u64)) - 0.5) * 0.85;
+        let a = a0 + wob + ang;
+        // Strong radius jitter → clearly broken, not rectangular.
+        let r = base_r * (0.32 + rnd(seed, idx.wrapping_add(80 + i as u64)) * 0.78);
+        let stretch = Vec2::new(1.0 + (half.x / half.y.max(1.0) - 1.0) * 0.3, 1.0);
+        let local = Vec2::new(a.cos() * r * stretch.x, a.sin() * r * stretch.y);
+        pts.push(center + local);
+    }
+    pts
+}
+
+fn paint_shatter(painter: &Painter, sh: &Shatter, now: Instant, life: Duration) {
+    let t = (now.duration_since(sh.born).as_secs_f32() / life.as_secs_f32()).clamp(0.0, 1.0);
+    let rect = sh.rect;
+    let cell_w = rect.width() / SHATTER_COLS as f32;
+    let cell_h = rect.height() / SHATTER_ROWS as f32;
+    let half = Vec2::new(cell_w * 0.5 * 0.95, cell_h * 0.5 * 0.95);
+
+    for row in 0..SHATTER_ROWS {
+        for col in 0..SHATTER_COLS {
+            let idx = (row * SHATTER_COLS + col) as u64;
+            let base = Pos2::new(
+                rect.min.x + (col as f32 + 0.5) * cell_w,
+                rect.min.y + (row as f32 + 0.5) * cell_h,
+            );
+            let dest = shard_scatter_pos(sh, idx);
+
+            let spin = (rnd(sh.seed, idx.wrapping_add(62)) - 0.5) * 2.0 * 2.2;
+            let delay = rnd(sh.seed, idx.wrapping_add(93)) * 0.16;
+            let tl = ((t - delay) / (1.0 - delay).max(0.01)).clamp(0.0, 1.0);
+
+            let (center, ang, scale, alpha_f) = match sh.kind {
+                ShatterKind::Out => {
+                    let e = ease_in_cubic(tl);
+                    let c = base.lerp(dest, e);
+                    let a = (1.0 - tl.powf(1.6)).clamp(0.0, 1.0);
+                    (c, spin * tl, 1.0 - 0.22 * e, a)
+                }
+                ShatterKind::In => {
+                    let e = ease_out_cubic(tl);
+                    let c = dest.lerp(base, e);
+                    let a = (0.10 + 0.90 * e).clamp(0.0, 1.0);
+                    (c, spin * (1.0 - e), 0.78 + 0.22 * e, a)
+                }
+            };
+
+            if alpha_f <= 0.02 {
+                continue;
+            }
+            let verts = irregular_shard_verts(center, half * scale, ang, sh.seed, idx);
+            let fill_a = (alpha_f * 242.0) as u8;
+            painter.add(egui::Shape::convex_polygon(
+                verts.clone(),
+                Color32::from_rgba_unmultiplied(250, 251, 253, fill_a),
+                egui::Stroke::NONE,
+            ));
+
+            let clip = Rect::from_points(&verts);
+            let clipped = painter.with_clip_rect(clip);
+            paint_shard_content(
+                &clipped,
+                sh,
+                row,
+                col,
+                base,
+                center,
+                scale,
+                ang,
+                alpha_f,
+            );
+        }
+    }
+}
+
+/// One (or two) dialog fragments per shard — enough to read as the login panel,
+/// without painting the whole face onto every piece.
+fn paint_shard_content(
+    painter: &Painter,
+    sh: &Shatter,
+    row: usize,
+    col: usize,
+    base: Pos2,
+    center: Pos2,
+    scale: f32,
+    ang: f32,
+    alpha_f: f32,
+) {
+    let r = sh.rect;
+    let face = &sh.face;
+    let a = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (alpha_f * 255.0) as u8);
+    let pad = 12.0;
+    let inner_w = (r.width() - pad * 2.0).max(40.0);
+    let body_fs = (12.0 * scale).clamp(7.5, 12.0);
+    let title_fs = (12.0 * scale).clamp(8.0, 12.5);
+
+    // Zone → single content piece (3×2 grid).
+    match (row, col) {
+        (0, 0) => {
+            // Gray title.
+            paint_rotated_text(
+                painter,
+                xform(Pos2::new(r.min.x + pad, r.min.y + 14.0), base, center, scale, ang),
+                ang,
+                &face.title,
+                FontId::proportional(title_fs),
+                a(Color32::from_rgb(110, 114, 122)),
+                Align2::LEFT_CENTER,
+            );
+        }
+        (0, 1) => {
+            // Host line.
+            paint_rotated_text(
+                painter,
+                xform(
+                    Pos2::new(r.min.x + pad, r.min.y + r.height() * 0.22),
+                    base,
+                    center,
+                    scale,
+                    ang,
+                ),
+                ang,
+                &face.host_line,
+                FontId::proportional(body_fs),
+                a(Color32::from_rgb(52, 56, 62)),
+                Align2::LEFT_CENTER,
+            );
+        }
+        (0, 2) => {
+            // Username label + field.
+            paint_rotated_text(
+                painter,
+                xform(
+                    Pos2::new(r.min.x + pad, r.min.y + r.height() * 0.30),
+                    base,
+                    center,
+                    scale,
+                    ang,
+                ),
+                ang,
+                &face.username_label,
+                FontId::proportional(body_fs * 0.95),
+                a(Color32::from_rgb(52, 56, 62)),
+                Align2::LEFT_CENTER,
+            );
+            let field = Rect::from_min_size(
+                Pos2::new(r.min.x + pad, r.min.y + r.height() * 0.35),
+                Vec2::new(inner_w * 0.85, 22.0),
+            );
+            paint_rotated_quad(
+                painter,
+                field,
+                base,
+                center,
+                scale,
+                ang,
+                a(Color32::from_rgb(235, 237, 240)),
+            );
+            paint_rotated_text(
+                painter,
+                xform(field.left_center() + Vec2::new(8.0, 0.0), base, center, scale, ang),
+                ang,
+                &face.username,
+                FontId::proportional(body_fs),
+                a(Color32::from_rgb(40, 44, 52)),
+                Align2::LEFT_CENTER,
+            );
+        }
+        (1, 0) => {
+            // Password / key field.
+            paint_rotated_text(
+                painter,
+                xform(
+                    Pos2::new(r.min.x + pad, r.min.y + r.height() * 0.52),
+                    base,
+                    center,
+                    scale,
+                    ang,
+                ),
+                ang,
+                &face.secret_label,
+                FontId::proportional(body_fs * 0.95),
+                a(Color32::from_rgb(52, 56, 62)),
+                Align2::LEFT_CENTER,
+            );
+            let field = Rect::from_min_size(
+                Pos2::new(r.min.x + pad, r.min.y + r.height() * 0.57),
+                Vec2::new(inner_w * 0.85, 22.0),
+            );
+            paint_rotated_quad(
+                painter,
+                field,
+                base,
+                center,
+                scale,
+                ang,
+                a(Color32::from_rgb(235, 237, 240)),
+            );
+            paint_rotated_text(
+                painter,
+                xform(field.left_center() + Vec2::new(8.0, 0.0), base, center, scale, ang),
+                ang,
+                &face.secret_display,
+                FontId::proportional(body_fs),
+                a(Color32::from_rgb(40, 44, 52)),
+                Align2::LEFT_CENTER,
+            );
+        }
+        (1, 1) => {
+            // Primary button.
+            let btn = Rect::from_center_size(
+                Pos2::new(r.center().x - 42.0, r.min.y + r.height() * 0.80),
+                Vec2::new(76.0, 24.0),
+            );
+            paint_rotated_quad(
+                painter,
+                btn,
+                base,
+                center,
+                scale,
+                ang,
+                a(Color32::from_rgb(232, 234, 237)),
+            );
+            paint_rotated_text(
+                painter,
+                xform(btn.center(), base, center, scale, ang),
+                ang,
+                &face.btn_primary,
+                FontId::proportional(body_fs),
+                a(Color32::from_rgb(42, 46, 52)),
+                Align2::CENTER_CENTER,
+            );
+        }
+        _ => {
+            // Cancel button (1, 2).
+            let btn = Rect::from_center_size(
+                Pos2::new(r.center().x + 42.0, r.min.y + r.height() * 0.80),
+                Vec2::new(76.0, 24.0),
+            );
+            paint_rotated_quad(
+                painter,
+                btn,
+                base,
+                center,
+                scale,
+                ang,
+                a(Color32::from_rgb(232, 234, 237)),
+            );
+            paint_rotated_text(
+                painter,
+                xform(btn.center(), base, center, scale, ang),
+                ang,
+                &face.btn_cancel,
+                FontId::proportional(body_fs),
+                a(Color32::from_rgb(42, 46, 52)),
+                Align2::CENTER_CENTER,
+            );
+        }
     }
 }
