@@ -15,7 +15,8 @@ use crate::{fonts, theme};
 use connection_mgr::{ConnectFailure, ConnectionManager, ConnError, ConnErrorKey};
 use session_tree::BackendKind;
 use eframe::egui;
-use session_tree::{AppPaths, SessionConfig, SessionStore, SessionTree};
+use session_tree::{AppPaths, SessionConfig, SessionStore, SessionTree, TreeNode};
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::Arc;
 use vault::Vault;
@@ -81,6 +82,8 @@ pub struct VsTermApp {
     reconnect_target: Option<connection_mgr::ConnectionId>,
     host_bind_gen: u64,
     tree_selection: Option<TreeSelection>,
+    /// `session_ref` → configured/detected OS icon id (`None` = auto / unknown).
+    session_icons: HashMap<String, Option<String>>,
     session_editor: Option<SessionEditorState>,
     folder_dialog: Option<FolderDialogState>,
     delete_confirm: Option<DeleteTarget>,
@@ -127,6 +130,11 @@ impl VsTermApp {
         let metrics = MetricsService::start();
         let remote_host = RemoteHostService::start();
 
+        let mut session_icons = HashMap::new();
+        if let Some(store) = &store {
+            rebuild_session_icons(store, &tree, &mut session_icons);
+        }
+
         Self {
             store,
             tree,
@@ -151,6 +159,7 @@ impl VsTermApp {
             reconnect_target: None,
             host_bind_gen: 0,
             tree_selection: None,
+            session_icons,
             session_editor: None,
             folder_dialog: None,
             delete_confirm: None,
@@ -169,10 +178,59 @@ impl VsTermApp {
             match store.load_tree() {
                 Ok(tree) => {
                     self.tree = tree;
+                    rebuild_session_icons(store, &self.tree, &mut self.session_icons);
                     self.status = i18n::t("status.tree_reloaded");
                 }
                 Err(err) => self.status = format!("{}: {err}", i18n::t("status.open_failed")),
             }
+        }
+    }
+
+    /// When icon is auto (`None`) and remote metrics report an OS id, persist it.
+    fn maybe_writeback_session_icon(&mut self) {
+        let Some(os_id) = self
+            .remote_host
+            .snapshot()
+            .and_then(|s| s.os_id.clone())
+        else {
+            return;
+        };
+        let Some(session_id) = self
+            .connections
+            .with_active(|c| c.session_id.clone())
+            .flatten()
+        else {
+            return;
+        };
+        let session_ref = if session_id.ends_with(".yaml") {
+            session_id.clone()
+        } else {
+            format!("{session_id}.yaml")
+        };
+        // Already have a fixed icon in cache?
+        if self
+            .session_icons
+            .get(&session_ref)
+            .and_then(|o| o.as_ref())
+            .is_some()
+        {
+            return;
+        }
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let Ok(mut cfg) = store.load_session(&session_ref) else {
+            return;
+        };
+        if cfg.icon.is_some() {
+            self.session_icons
+                .insert(session_ref, cfg.icon.clone());
+            return;
+        }
+        cfg.icon = Some(os_id.clone());
+        if store.save_session(&cfg).is_ok() {
+            self.session_icons
+                .insert(session_ref, Some(os_id));
         }
     }
 
@@ -856,6 +914,8 @@ impl VsTermApp {
             return;
         }
 
+        self.session_icons
+            .insert(session_ref.clone(), built.config.icon.clone());
         self.session_editor = None;
         self.tree_selection = Some(TreeSelection::Session {
             name: built.config.name.clone(),
@@ -877,6 +937,7 @@ impl VsTermApp {
         }
         let _ = store.delete_session_file(session_ref);
         self.tree.remove_session_node(session_ref);
+        self.session_icons.remove(session_ref);
         if let Err(err) = store.save_tree(&self.tree) {
             self.status = format!("{}: {err}", i18n::t("status.save_failed"));
             return;
@@ -1228,6 +1289,7 @@ impl eframe::App for VsTermApp {
             self.host_bind_gen = gen;
             self.sync_host_binding();
         }
+        self.maybe_writeback_session_icon();
 
         if self.fx.take_spit_finished() {
             // Morph landed on the dialog rect — reveal the real (input-ready) dialog.
@@ -1521,6 +1583,7 @@ impl eframe::App for VsTermApp {
                                                 ui,
                                                 &self.tree,
                                                 &mut self.tree_selection,
+                                                &self.session_icons,
                                             );
                                             if let Some(action) = action {
                                                 self.handle_tree_action(action);
@@ -1816,6 +1879,23 @@ fn load_app_config() -> (Locale, ConnectFxMode) {
     (locale, connect_fx)
 }
 
+fn rebuild_session_icons(
+    store: &SessionStore,
+    tree: &SessionTree,
+    out: &mut HashMap<String, Option<String>>,
+) {
+    out.clear();
+    for node in tree.walk() {
+        if let TreeNode::Session { session_ref, .. } = node {
+            let icon = store
+                .load_session(session_ref)
+                .map(|c| c.icon)
+                .unwrap_or(None);
+            out.insert(session_ref.clone(), icon);
+        }
+    }
+}
+
 fn save_app_config(locale: Locale, connect_fx: ConnectFxMode) {
     let root = AppPaths::default_root();
     let _ = std::fs::create_dir_all(&root);
@@ -1858,6 +1938,7 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
             password_ref: None,
         },
         color_tag: Some("#ff5555".into()),
+        icon: None,
         term_type: "xterm-256color".into(),
     };
     let db = SessionConfig {
@@ -1871,6 +1952,7 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
             password_ref: Some("vault://demo-db-01-pwd".into()),
         },
         color_tag: Some("#50fa7b".into()),
+        icon: None,
         term_type: "xterm-256color".into(),
     };
 

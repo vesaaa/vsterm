@@ -38,12 +38,19 @@ pub fn show(
     ui: &mut Ui,
     tree: &SessionTree,
     selection: &mut Option<TreeSelection>,
+    session_icons: &std::collections::HashMap<String, Option<String>>,
 ) -> Option<TreeAction> {
     let mut action = None;
+    const BTN_H: f32 = 24.0;
 
     ui.horizontal(|ui| {
+        let gap = ui.spacing().item_spacing.x;
+        let half = ((ui.available_width() - gap) / 2.0).max(40.0);
         if ui
-            .button(egui::RichText::new(i18n::t("tree.add_server")).size(12.0))
+            .add(
+                egui::Button::new(egui::RichText::new(i18n::t("tree.add_server")).size(12.0))
+                    .min_size([half, BTN_H].into()),
+            )
             .on_hover_text(i18n::t("tree.add_server_hint"))
             .clicked()
         {
@@ -57,7 +64,10 @@ pub fn show(
             action = Some(TreeAction::AddServer { folder_id });
         }
         if ui
-            .button(egui::RichText::new(i18n::t("tree.add_folder")).size(12.0))
+            .add(
+                egui::Button::new(egui::RichText::new(i18n::t("tree.add_folder")).size(12.0))
+                    .min_size([half, BTN_H].into()),
+            )
             .on_hover_text(i18n::t("tree.add_folder_hint"))
             .clicked()
         {
@@ -74,8 +84,8 @@ pub fn show(
 
     if ui
         .add(
-            egui::Button::new(i18n::t("tree.local_shell"))
-                .min_size([ui.available_width(), 28.0].into()),
+            egui::Button::new(egui::RichText::new(i18n::t("tree.local_shell")).size(12.0))
+                .min_size([ui.available_width(), BTN_H].into()),
         )
         .clicked()
     {
@@ -98,7 +108,7 @@ pub fn show(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for node in &tree.root {
-                if let Some(a) = render_node(ui, tree, node, selection) {
+                if let Some(a) = render_node(ui, tree, node, selection, session_icons) {
                     action = Some(a);
                 }
             }
@@ -142,6 +152,7 @@ fn render_node(
     tree: &SessionTree,
     node: &TreeNode,
     selection: &mut Option<TreeSelection>,
+    session_icons: &std::collections::HashMap<String, Option<String>>,
 ) -> Option<TreeAction> {
     match node {
         TreeNode::Folder {
@@ -170,7 +181,7 @@ fn render_node(
             let (_, header_inner, body_opt) = header.body(|ui| {
                 let mut action = None;
                 for child in children {
-                    if let Some(a) = render_node(ui, tree, child, selection) {
+                    if let Some(a) = render_node(ui, tree, child, selection, session_icons) {
                         action = Some(a);
                     }
                 }
@@ -274,13 +285,27 @@ fn render_node(
             } else {
                 Color32::from_rgb(32, 34, 40)
             };
-            let label = ui_icon::with_label(Icon::Server, name, 14.0, color);
-            let resp = ui.add(
-                egui::Button::new(label)
-                    .frame(false)
-                    .sense(Sense::click_and_drag())
-                    .min_size([ui.available_width(), 22.0].into()),
-            );
+            let icon_id = session_icons
+                .get(session_ref)
+                .and_then(|o| o.as_deref());
+            // Keep icon + name tight (like folder rows). Do not stretch the
+            // name button to full width — that centers the label far from the icon.
+            let resp = ui
+                .horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let icon_r = crate::os_icon::add(ui, icon_id, 14.0);
+                    let text_r = ui.add(
+                        egui::Button::new(RichText::new(name).size(13.0).color(color))
+                            .frame(false)
+                            .sense(Sense::click_and_drag()),
+                    );
+                    let (_pad, pad_r) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 22.0),
+                        Sense::click_and_drag(),
+                    );
+                    icon_r.union(text_r).union(pad_r)
+                })
+                .inner;
             resp.dnd_set_drag_payload(SessionDragPayload {
                 session_ref: session_ref.clone(),
                 name: name.clone(),

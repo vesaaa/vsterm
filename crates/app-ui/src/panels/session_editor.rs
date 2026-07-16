@@ -30,6 +30,8 @@ pub struct SessionEditorState {
     pub save_passphrase: bool,
     pub has_saved_passphrase: bool,
     pub color_tag: Option<String>,
+    /// OS icon id; `None` = auto-detect after connect.
+    pub icon: Option<String>,
     /// `None` = root; `Some(folder_id)` = into that folder.
     pub folder_id: Option<String>,
     pub error: Option<String>,
@@ -55,6 +57,7 @@ impl SessionEditorState {
             save_passphrase: false,
             has_saved_passphrase: false,
             color_tag: None,
+            icon: None,
             folder_id,
             error: None,
             focus_name: true,
@@ -100,6 +103,7 @@ impl SessionEditorState {
             save_passphrase: pass_ref.as_ref().is_some_and(|r| !r.trim().is_empty()),
             has_saved_passphrase: pass_ref.as_ref().is_some_and(|r| !r.trim().is_empty()),
             color_tag: cfg.color_tag.clone(),
+            icon: cfg.icon.clone(),
             folder_id,
             error: None,
             focus_name: true,
@@ -314,6 +318,29 @@ pub fn show(
                 }
             });
 
+            ui.add_space(8.0);
+            ui.label(i18n::t("dialog.session.icon"));
+            ui.horizontal_wrapped(|ui| {
+                let auto = state.icon.is_none();
+                if ui
+                    .selectable_label(auto, i18n::t("dialog.session.icon_auto"))
+                    .on_hover_text(i18n::t("dialog.session.icon_auto_tip"))
+                    .clicked()
+                {
+                    state.icon = None;
+                }
+                for id in crate::os_icon::PRESETS {
+                    let selected = state.icon.as_deref() == Some(*id);
+                    let tip = i18n::t(&crate::os_icon::i18n_key(id));
+                    if crate::os_icon::selectable(ui, id, selected, 22.0)
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        state.icon = Some((*id).to_string());
+                    }
+                }
+            });
+
             if let Some(err) = &state.error {
                 ui.add_space(8.0);
                 ui.colored_label(Color32::from_rgb(200, 60, 60), err);
@@ -483,6 +510,7 @@ pub fn build_session(state: &SessionEditorState) -> Result<BuiltSession, String>
             backend: state.backend,
             auth,
             color_tag: state.color_tag.clone(),
+            icon: state.icon.clone(),
             term_type: "xterm-256color".into(),
         },
         folder_id: state.folder_id.clone(),

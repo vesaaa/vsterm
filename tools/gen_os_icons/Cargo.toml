@@ -1,0 +1,12 @@
+[package]
+name = "gen_os_icons"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+resvg = "0.45"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }

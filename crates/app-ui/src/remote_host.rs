@@ -23,6 +23,56 @@ uname -sr 2>/dev/null || echo Linux
 uname -m 2>/dev/null || echo unknown
 ( grep -m1 -E 'model name|cpu model|Hardware|system type' /proc/cpuinfo 2>/dev/null || true ) | head -n 1 | sed 's/^[^:]*:[ \t]*//'
 awk '/^cpu /{u=$2+$4;t=$2+$4+$5; if(t>0) print (u/t)*100; else print 0; exit}' /proc/stat 2>/dev/null || echo 0
+echo __SEC_OSREL__
+echo "UNAME_S=`uname -s 2>/dev/null || echo Linux`"
+echo "UNAME_O=`uname -o 2>/dev/null || true`"
+# WSL / Microsoft Linux subsystem (before distro ID so icon can be Windows).
+if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null \
+  || uname -r 2>/dev/null | grep -qiE 'microsoft|wsl' \
+  || [ -n "${WSL_DISTRO_NAME:-}" ] \
+  || [ -d /run/WSL ] 2>/dev/null; then
+  echo WINDOWS=1
+fi
+if [ -r /etc/os-release ]; then
+  grep -E '^(ID|ID_LIKE|PRETTY_NAME)=' /etc/os-release 2>/dev/null || true
+elif [ -r /usr/lib/os-release ]; then
+  grep -E '^(ID|ID_LIKE|PRETTY_NAME)=' /usr/lib/os-release 2>/dev/null || true
+fi
+for f in /etc/openwrt_release /rom/etc/openwrt_release; do
+  [ -r "$f" ] || continue
+  echo OPENWRT=1
+  grep -E '^(DISTRIB_ID|DISTRIB_DESCRIPTION|DISTRIB_RELEASE)=' "$f" 2>/dev/null || true
+done
+# Asuswrt-Merlin / 官改 / Koolshare 梅林改版：通常无标准 os-release。
+# 社区判定：uname -o 含 Merlin、/koolshare、或 nvram + productid/buildno。
+case "`uname -o 2>/dev/null`" in *[Mm]erlin*) echo MERLIN=1 ;; esac
+[ -d /koolshare ] && echo MERLIN=1
+[ -d /jffs/koolshare ] && echo MERLIN=1
+NVRAM=
+if command -v nvram >/dev/null 2>&1; then
+  NVRAM=nvram
+elif [ -x /usr/sbin/nvram ]; then
+  NVRAM=/usr/sbin/nvram
+elif [ -x /sbin/nvram ]; then
+  NVRAM=/sbin/nvram
+elif [ -x /bin/nvram ]; then
+  NVRAM=/bin/nvram
+fi
+if [ -n "$NVRAM" ]; then
+  bn=`$NVRAM get buildno 2>/dev/null`
+  en=`$NVRAM get extendno 2>/dev/null`
+  pd=`$NVRAM get productid 2>/dev/null`
+  [ -n "$bn" ] && echo "NVRAM_BUILDNO=$bn"
+  [ -n "$en" ] && echo "NVRAM_EXTENDNO=$en"
+  [ -n "$pd" ] && echo "NVRAM_PRODUCT=$pd"
+  if [ -n "$bn" ] || [ -n "$pd" ]; then
+    echo MERLIN=1
+  fi
+fi
+for f in /etc/os-release /usr/lib/os-release /etc/openwrt_release /rom/etc/openwrt_release; do
+  [ -r "$f" ] || continue
+  grep -qiE 'merlin|asuswrt|koolshare' "$f" 2>/dev/null && echo MERLIN=1
+done
 echo __SEC_MEM__
 grep -E '^(MemTotal|MemAvailable|MemFree|Buffers|Cached|SwapTotal|SwapFree):' /proc/meminfo 2>/dev/null || true
 echo __SEC_PS__
@@ -520,6 +570,12 @@ fn parse_metrics(raw: &str) -> Option<HostSnapshot> {
         .find(|s| !s.is_empty() && is_plausible_nic(s))
         .map(str::to_string);
 
+    let osrel: Vec<&str> = sections
+        .get("OSREL")
+        .map(|v| v.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    let os_id = parse_osrel_section(&osrel);
+
     let os_name = uname
         .split_whitespace()
         .next()
@@ -551,7 +607,104 @@ fn parse_metrics(raw: &str) -> Option<HostSnapshot> {
         disks,
         net_history,
         default_if,
+        os_id,
     })
+}
+
+fn parse_osrel_section(lines: &[&str]) -> Option<String> {
+    let mut uname_s = String::new();
+    let mut uname_o = String::new();
+    let mut id = String::new();
+    let mut id_like = String::new();
+    let mut pretty = String::new();
+    let mut distrib_id = String::new();
+    let mut distrib_desc = String::new();
+    let mut openwrt = false;
+    let mut merlin = false;
+    let mut windows = false;
+    let mut nvram_build = false;
+    let mut nvram_product = false;
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line == "OPENWRT=1" {
+            openwrt = true;
+            continue;
+        }
+        if line == "MERLIN=1" {
+            merlin = true;
+            continue;
+        }
+        if line == "WINDOWS=1" {
+            windows = true;
+            continue;
+        }
+        // Legacy: first bare token was `uname -s`.
+        if !line.contains('=') {
+            if uname_s.is_empty() {
+                uname_s = line.to_string();
+            }
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let v = v.trim().trim_matches('"').trim_matches('\'');
+        match k {
+            "UNAME_S" => uname_s = v.to_string(),
+            "UNAME_O" => uname_o = v.to_string(),
+            "ID" => id = v.to_string(),
+            "ID_LIKE" => id_like = v.to_string(),
+            "PRETTY_NAME" => pretty = v.to_string(),
+            "DISTRIB_ID" => distrib_id = v.to_string(),
+            "DISTRIB_DESCRIPTION" => distrib_desc = v.to_string(),
+            "NVRAM_BUILDNO" => {
+                if !v.is_empty() {
+                    nvram_build = true;
+                }
+            }
+            "NVRAM_PRODUCT" => {
+                if !v.is_empty() {
+                    nvram_product = true;
+                }
+            }
+            "NVRAM_EXTENDNO" => {
+                let low = v.to_ascii_lowercase();
+                if low.contains("koolshare") || low.contains("merlin") {
+                    merlin = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if !merlin {
+        let uo = uname_o.to_ascii_lowercase();
+        if uo.contains("merlin") {
+            merlin = true;
+        }
+    }
+    if !merlin && (nvram_build || nvram_product) {
+        merlin = true;
+    }
+    // Fold OpenWrt DISTRIB_* into the pretty/id signals used by the mapper.
+    if pretty.is_empty() && !distrib_desc.is_empty() {
+        pretty = distrib_desc.clone();
+    }
+    if id.is_empty() && !distrib_id.is_empty() {
+        id = distrib_id;
+    }
+    if !pretty.is_empty() {
+        let pl = pretty.to_ascii_lowercase();
+        if pl.contains("merlin") || pl.contains("asuswrt") || pl.contains("koolshare") {
+            merlin = true;
+        }
+    }
+    crate::os_icon::detect_id_from_release(
+        &uname_s, &id, &id_like, &pretty, openwrt, merlin, windows,
+    )
+    .map(str::to_string)
 }
 
 fn parse_disk_line(line: &str) -> Option<DiskInfo> {
@@ -795,5 +948,82 @@ VSTERM_END
         assert!(is_plausible_nic("vmbr0"));
         assert!(is_plausible_nic("eth0@if2"));
         assert!(!is_plausible_nic("/run/foo"));
+    }
+
+    #[test]
+    fn osrel_detects_merlin_from_uname_o() {
+        let lines = [
+            "UNAME_S=Linux",
+            "UNAME_O=Merlin",
+            "MERLIN=1",
+        ];
+        assert_eq!(parse_osrel_section(&lines).as_deref(), Some("merlin"));
+    }
+
+    #[test]
+    fn osrel_detects_merlin_from_nvram_product() {
+        let lines = [
+            "UNAME_S=Linux",
+            "UNAME_O=GNU/Linux",
+            "NVRAM_BUILDNO=386.7",
+            "NVRAM_PRODUCT=RT-AX86U",
+            "MERLIN=1",
+        ];
+        assert_eq!(parse_osrel_section(&lines).as_deref(), Some("merlin"));
+    }
+
+    #[test]
+    fn osrel_detects_merlin_before_openwrt() {
+        let lines = [
+            "UNAME_S=Linux",
+            "OPENWRT=1",
+            "DISTRIB_ID=OpenWrt",
+            "DISTRIB_DESCRIPTION=Koolshare Merlin",
+            "MERLIN=1",
+        ];
+        assert_eq!(parse_osrel_section(&lines).as_deref(), Some("merlin"));
+    }
+
+    #[test]
+    fn osrel_detects_plain_openwrt() {
+        let lines = [
+            "UNAME_S=Linux",
+            "OPENWRT=1",
+            "DISTRIB_ID=OpenWrt",
+            "DISTRIB_DESCRIPTION=\"OpenWrt SNAPSHOT\"",
+        ];
+        assert_eq!(parse_osrel_section(&lines).as_deref(), Some("openwrt"));
+    }
+
+    #[test]
+    fn osrel_detects_ubuntu() {
+        let lines = [
+            "UNAME_S=Linux",
+            "ID=ubuntu",
+            "ID_LIKE=debian",
+            "PRETTY_NAME=\"Ubuntu 22.04.4 LTS\"",
+        ];
+        assert_eq!(parse_osrel_section(&lines).as_deref(), Some("ubuntu"));
+    }
+
+    #[test]
+    fn osrel_detects_wsl_as_windows() {
+        let lines = [
+            "UNAME_S=Linux",
+            "WINDOWS=1",
+            "ID=ubuntu",
+            "PRETTY_NAME=\"Ubuntu 22.04.4 LTS\"",
+        ];
+        assert_eq!(parse_osrel_section(&lines).as_deref(), Some("windows"));
+    }
+
+    #[test]
+    fn osrel_detects_openeuler() {
+        let lines = [
+            "UNAME_S=Linux",
+            "ID=openEuler",
+            "PRETTY_NAME=\"openEuler 22.03\"",
+        ];
+        assert_eq!(parse_osrel_section(&lines).as_deref(), Some("openeuler"));
     }
 }

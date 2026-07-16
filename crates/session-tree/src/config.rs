@@ -92,6 +92,9 @@ pub struct SessionConfig {
     pub auth: AuthConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_tag: Option<String>,
+    /// OS icon id (`debian`, `ubuntu`, …). `None` = auto-detect after connect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     #[serde(default = "default_term_type")]
     pub term_type: String,
 }

@@ -14,6 +14,7 @@ mod fx;
 mod icon;
 mod i18n;
 mod metrics;
+mod os_icon;
 mod panels;
 mod term_highlight;
 mod terminal_view;

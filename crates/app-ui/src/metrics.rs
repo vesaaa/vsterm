@@ -59,6 +59,8 @@ pub struct HostSnapshot {
     pub net_history: HashMap<String, VecDeque<(f64, f64)>>,
     /// Interface carrying the default route (e.g. `ppp0` on Merlin WAN).
     pub default_if: Option<String>,
+    /// Normalized OS icon id from remote detection (`ubuntu`, `debian`, …).
+    pub os_id: Option<String>,
 }
 
 impl HostSnapshot {
@@ -324,5 +326,6 @@ fn tick(sys: &mut System, state: &Arc<Mutex<SamplerState>>) {
         disks: disk_rows,
         net_history: std::mem::take(&mut guard.snapshot.net_history),
         default_if: None,
+        os_id: None,
     };
 }
