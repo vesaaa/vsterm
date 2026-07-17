@@ -1,12 +1,115 @@
 //! Recursive SFTP tree transfer (files + directories).
+//!
+//! Download uses pipelined `SSH_FXP_READ` via [`RawSftpSession`] so throughput
+//! is not capped at one round-trip per chunk. Upload uses `SftpSession`'s
+//! write pipeline and avoids per-file `fsync`.
 
-use crate::remote_fs::{join_remote, ArcProgress};
+use crate::remote_fs::{join_remote, ArcProgress, RemoteDirEntry};
 use crate::ConnError;
-use russh_sftp::client::SftpSession;
-use russh_sftp::protocol::FileType;
-use std::io::{Read, Write};
+use futures::stream::{FuturesUnordered, StreamExt};
+use russh_sftp::client::error::Error as SftpError;
+use russh_sftp::client::rawsession::Limits;
+use russh_sftp::client::{Config as SftpConfig, RawSftpSession};
+use russh_sftp::extensions;
+use russh_sftp::protocol::{FileAttributes, FileType, OpenFlags, StatusCode};
+use std::collections::BTreeMap;
 use std::path::Path;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::Arc;
+use tokio::io::AsyncReadExt;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+/// Default max SFTP packet size (capped further by server `limits@openssh.com`).
+pub const SFTP_MAX_PACKET_LEN: u32 = 1024 * 1024;
+/// In-flight WRITE requests for uploads.
+pub const SFTP_MAX_CONCURRENT_WRITES: usize = 64;
+/// In-flight READ requests for downloads.
+/// Kept modest: each reply is a ~256 KiB buffer, and russh 0.50 also holds a
+/// CryptoVec copy per in-flight channel message. 16 × 256 KiB ≈ 4 MiB peak.
+const DOWNLOAD_PIPELINE: usize = 16;
+/// Fallback chunk when server does not advertise read limits (~256 KiB − overhead).
+const DEFAULT_READ_CHUNK: u32 = 256 * 1024 - 9;
+/// Local buffer size for uploads (russh-sftp splits + pipelines internally).
+const UPLOAD_BUF: usize = 512 * 1024;
+/// Chunks queued for the background disk writer (~4 MiB at 256 KiB/chunk).
+/// Deliberately small: progress is counted at disk-commit, so the queue only
+/// needs to absorb write jitter — not decouple the bar from the disk. A large
+/// queue lets the network race ~hundreds of MiB ahead of the disk, which shows
+/// a bar that sprints then freezes and pins that RAM for the whole transfer.
+const DOWNLOAD_WRITE_QUEUE: usize = 16;
+/// Max chunks waiting for in-order reassembly (reorder map). Caps RAM and
+/// applies read backpressure so a slow disk cannot pull the file into memory.
+const DOWNLOAD_REORDER_CAP: usize = 32;
+/// Buffered-writer capacity for the background disk writer.
+const DOWNLOAD_WRITE_BUF: usize = 512 * 1024;
+/// Flush + fsync the output file every this many bytes. Without this the OS
+/// write-back cache grows unbounded at line rate; on Windows that eventually
+/// throttles `WriteFile` (the mid-transfer stall) and trims the GUI process
+/// working set, so the app's menus lag more with every large download. Pacing
+/// the writer to the disk keeps dirty pages bounded and the UI responsive.
+/// 64 MiB keeps stalls short; 128 MiB made the bar freeze noticeably on HDD/AV.
+const DOWNLOAD_SYNC_INTERVAL: u64 = 64 * 1024 * 1024;
+
+fn open_download_file(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Hint the cache manager that we write the file once, sequentially —
+        // reduces mid-transfer cache flushes that stall progress.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(0x0800_0000) // FILE_FLAG_SEQUENTIAL_SCAN
+            .open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::File::create(path)
+    }
+}
+
+pub fn transfer_sftp_config() -> SftpConfig {
+    SftpConfig {
+        max_packet_len: SFTP_MAX_PACKET_LEN,
+        max_concurrent_writes: SFTP_MAX_CONCURRENT_WRITES,
+        // Large files / high latency must not trip the default 10s request timeout.
+        request_timeout_secs: 600,
+    }
+}
+
+/// Open a raw SFTP session with limits applied; returns `(session, max_read_len)`.
+pub async fn init_raw_sftp<S>(stream: S) -> Result<(Arc<RawSftpSession>, u32), ConnError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let cfg = transfer_sftp_config();
+    let max_packet = cfg.max_packet_len;
+    let mut session = RawSftpSession::new_with_config(stream, cfg);
+    let version = session
+        .init()
+        .await
+        .map_err(|e| ConnError::Connect(format!("sftp init: {e}")))?;
+    let has_limits = version
+        .extensions
+        .get(extensions::LIMITS)
+        .is_some_and(|v| v == "1");
+    let mut max_read = DEFAULT_READ_CHUNK.min(max_packet.saturating_sub(9));
+    if has_limits {
+        let ext = session
+            .limits()
+            .await
+            .map_err(|e| ConnError::Connect(format!("sftp limits: {e}")))?;
+        let limits = Limits::from(ext);
+        if let Some(r) = limits.read_len {
+            if r > 0 {
+                max_read = (r as u32).min(max_packet.saturating_sub(9)).max(32 * 1024);
+            }
+        }
+        session.set_limits(limits);
+    }
+    Ok((Arc::new(session), max_read))
+}
 
 struct TransferCtx {
     progress: Option<ArcProgress>,
@@ -27,11 +130,7 @@ impl TransferCtx {
     }
 
     fn check_cancel(&self) -> Result<(), ConnError> {
-        if self
-            .progress
-            .as_ref()
-            .is_some_and(|p| p.is_cancelled())
-        {
+        if self.progress.as_ref().is_some_and(|p| p.is_cancelled()) {
             Err(ConnError::Connect("sftp transfer cancelled".into()))
         } else {
             Ok(())
@@ -46,107 +145,401 @@ impl TransferCtx {
     }
 }
 
-pub async fn remote_tree_bytes(sftp: &SftpSession, remote_path: &str) -> Result<u64, ConnError> {
-    let meta = sftp
-        .metadata(remote_path)
+fn sftp_err(ctx: &str, e: SftpError) -> ConnError {
+    ConnError::Connect(format!("{ctx}: {e}"))
+}
+
+async fn raw_tree_bytes(raw: &RawSftpSession, remote_path: &str) -> Result<u64, ConnError> {
+    let attrs = raw
+        .lstat(remote_path)
         .await
-        .map_err(|e| ConnError::Connect(format!("sftp stat {remote_path}: {e}")))?;
-    if meta.file_type() == FileType::Symlink {
+        .map_err(|e| sftp_err(&format!("sftp lstat {remote_path}"), e))?
+        .attrs;
+    if attrs.file_type() == FileType::Symlink {
         return Ok(0);
     }
-    if meta.file_type().is_dir() {
+    if attrs.file_type().is_dir() {
         let mut total = 0u64;
-        let dir = sftp
-            .read_dir(remote_path)
-            .await
-            .map_err(|e| ConnError::Connect(format!("sftp list {remote_path}: {e}")))?;
-        for entry in dir {
-            let name = entry.file_name();
-            if name == "." || name == ".." {
+        for (name, child_attrs) in raw_read_dir(raw, remote_path).await? {
+            if child_attrs.file_type() == FileType::Symlink {
                 continue;
             }
-            total += Box::pin(remote_tree_bytes(
-                sftp,
-                &join_remote(remote_path, &name),
-            ))
-            .await?;
+            let child = join_remote(remote_path, &name);
+            if child_attrs.file_type().is_dir() {
+                total += Box::pin(raw_tree_bytes(raw, &child)).await?;
+            } else {
+                total += child_attrs.size.unwrap_or(0);
+            }
         }
         Ok(total)
     } else {
-        Ok(meta.size.unwrap_or(0))
+        Ok(attrs.size.unwrap_or(0))
     }
 }
 
-pub async fn download_path(
-    sftp: &SftpSession,
+async fn raw_read_dir(
+    raw: &RawSftpSession,
+    remote_path: &str,
+) -> Result<Vec<(String, FileAttributes)>, ConnError> {
+    let handle = raw
+        .opendir(remote_path)
+        .await
+        .map_err(|e| sftp_err(&format!("sftp opendir {remote_path}"), e))?
+        .handle;
+    let mut out = Vec::new();
+    loop {
+        match raw.readdir(handle.as_str()).await {
+            Ok(name) => {
+                for f in name.files {
+                    if f.filename == "." || f.filename == ".." {
+                        continue;
+                    }
+                    out.push((f.filename, f.attrs));
+                }
+            }
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
+            Err(e) => {
+                let _ = raw.close(handle.as_str()).await;
+                return Err(sftp_err(&format!("sftp readdir {remote_path}"), e));
+            }
+        }
+    }
+    let _ = raw.close(handle.as_str()).await;
+    Ok(out)
+}
+
+async fn download_path_raw(
+    raw: &Arc<RawSftpSession>,
     remote_path: &str,
     local_path: &Path,
+    max_read: u32,
     ctx: &mut TransferCtx,
 ) -> Result<(), ConnError> {
     ctx.check_cancel()?;
-    let meta = sftp
-        .metadata(remote_path)
+    let attrs = raw
+        .lstat(remote_path)
         .await
-        .map_err(|e| ConnError::Connect(format!("sftp stat {remote_path}: {e}")))?;
-    if meta.file_type() == FileType::Symlink {
+        .map_err(|e| sftp_err(&format!("sftp lstat {remote_path}"), e))?
+        .attrs;
+    if attrs.file_type() == FileType::Symlink {
         return Ok(());
     }
-    if meta.file_type().is_dir() {
-        std::fs::create_dir_all(local_path).map_err(ConnError::Io)?;
-        let dir = sftp
-            .read_dir(remote_path)
+    if attrs.file_type().is_dir() {
+        tokio::fs::create_dir_all(local_path)
             .await
-            .map_err(|e| ConnError::Connect(format!("sftp list {remote_path}: {e}")))?;
-        for entry in dir {
-            let name = entry.file_name();
-            if name == "." || name == ".." {
-                continue;
-            }
+            .map_err(ConnError::Io)?;
+        for (name, _) in raw_read_dir(raw, remote_path).await? {
             let child_remote = join_remote(remote_path, &name);
             let child_local = local_path.join(&name);
-            Box::pin(download_path(
-                sftp,
+            Box::pin(download_path_raw(
+                raw,
                 &child_remote,
                 &child_local,
+                max_read,
                 ctx,
             ))
             .await?;
         }
         return Ok(());
     }
-    download_file(sftp, remote_path, local_path, ctx).await
+    download_file_pipelined(
+        raw,
+        remote_path,
+        local_path,
+        max_read,
+        attrs.size,
+        ctx,
+    )
+    .await
 }
 
-async fn download_file(
-    sftp: &SftpSession,
+async fn download_file_pipelined(
+    raw: &Arc<RawSftpSession>,
     remote_path: &str,
     local_path: &Path,
+    max_read: u32,
+    known_size: Option<u64>,
     ctx: &mut TransferCtx,
 ) -> Result<(), ConnError> {
-    let mut remote = sftp
-        .open(remote_path)
+    let handle = raw
+        .open(
+            remote_path,
+            OpenFlags::READ,
+            FileAttributes::default(),
+        )
         .await
-        .map_err(|e| ConnError::Connect(format!("sftp open {remote_path}: {e}")))?;
+        .map_err(|e| sftp_err(&format!("sftp open {remote_path}"), e))?
+        .handle;
+
     if let Some(parent) = local_path.parent() {
-        std::fs::create_dir_all(parent).map_err(ConnError::Io)?;
-    }
-    let mut local = std::fs::File::create(local_path).map_err(ConnError::Io)?;
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        ctx.check_cancel()?;
-        let n = remote
-            .read(&mut buf)
+        tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| ConnError::Connect(format!("sftp read {remote_path}: {e}")))?;
-        if n == 0 {
+            .map_err(ConnError::Io)?;
+    }
+
+    // Disk writes run on a dedicated blocking thread. Progress is counted here —
+    // when bytes are committed to the OS, not when they arrive from the network —
+    // so the bar reflects real on-disk progress instead of sprinting ahead on
+    // buffered reads and then freezing. The writer also fsyncs periodically so
+    // the OS write-back cache stays bounded (see DOWNLOAD_SYNC_INTERVAL).
+    let base = ctx.transferred;
+    let total = ctx.total;
+    let progress = ctx.progress.clone();
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(DOWNLOAD_WRITE_QUEUE);
+    let write_path = local_path.to_path_buf();
+    let writer: JoinHandle<std::io::Result<u64>> = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let file = open_download_file(&write_path)?;
+        let mut w = std::io::BufWriter::with_capacity(DOWNLOAD_WRITE_BUF, file);
+        let mut written: u64 = 0;
+        let mut since_sync: u64 = 0;
+        while let Some(buf) = rx.blocking_recv() {
+            w.write_all(&buf)?;
+            written += buf.len() as u64;
+            since_sync += buf.len() as u64;
+            if let Some(p) = &progress {
+                p.set(base.saturating_add(written), total);
+            }
+            if since_sync >= DOWNLOAD_SYNC_INTERVAL {
+                w.flush()?;
+                w.get_ref().sync_data()?;
+                since_sync = 0;
+            }
+        }
+        w.flush()?;
+        w.get_ref().sync_data()?;
+        if let Some(p) = &progress {
+            p.set(base.saturating_add(written), total);
+        }
+        Ok(written)
+    });
+
+    let chunk = max_read.max(32 * 1024);
+    let mut next_offset = 0u64;
+    let mut expect_offset = 0u64;
+    let mut stop_issuing = known_size == Some(0);
+    let mut pending = FuturesUnordered::new();
+    let mut reorder: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+
+    let issue = |raw: Arc<RawSftpSession>, handle: String, offset: u64, len: u32| async move {
+        let result = raw.read(handle, offset, len).await;
+        (offset, len, result)
+    };
+
+    let mut read_err: Option<ConnError> = None;
+    'download: loop {
+        if let Err(e) = ctx.check_cancel() {
+            read_err = Some(e);
             break;
         }
-        local.write_all(&buf[..n]).map_err(ConnError::Io)?;
-        ctx.add_bytes(n as u64);
+
+        // Backpressure: stop issuing once reorder is full so a slow disk cannot
+        // pull the remainder of the file into RAM.
+        while pending.len() < DOWNLOAD_PIPELINE
+            && !stop_issuing
+            && reorder.len() < DOWNLOAD_REORDER_CAP
+        {
+            if let Some(sz) = known_size {
+                if next_offset >= sz {
+                    stop_issuing = true;
+                    break;
+                }
+            }
+            let offset = next_offset;
+            let this_len = match known_size {
+                Some(sz) => ((sz - offset) as u32).min(chunk).max(1),
+                None => chunk,
+            };
+            next_offset = next_offset.saturating_add(this_len as u64);
+            pending.push(issue(
+                Arc::clone(raw),
+                handle.clone(),
+                offset,
+                this_len,
+            ));
+        }
+
+        // Push contiguous bytes to the writer (progress already counted on recv).
+        while let Some(buf) = reorder.remove(&expect_offset) {
+            let n = buf.len() as u64;
+            match tx.try_send(buf) {
+                Ok(()) => {
+                    expect_offset = expect_offset.saturating_add(n);
+                }
+                Err(mpsc::error::TrySendError::Full(buf)) => {
+                    reorder.insert(expect_offset, buf);
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    read_err = Some(ConnError::Io(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "download disk writer stopped",
+                    )));
+                    break 'download;
+                }
+            }
+        }
+
+        if stop_issuing && pending.is_empty() && reorder.is_empty() {
+            break;
+        }
+
+        let reorder_full = reorder.len() >= DOWNLOAD_REORDER_CAP;
+        let need_flush = reorder.contains_key(&expect_offset);
+
+        if need_flush && (tx.capacity() == 0 || reorder_full) {
+            // Wait for writer space. Only accept more reads if reorder still has room.
+            if reorder_full {
+                match tx.reserve().await {
+                    Ok(permit) => {
+                        let buf = reorder.remove(&expect_offset).expect("checked");
+                        let n = buf.len() as u64;
+                        permit.send(buf);
+                        expect_offset = expect_offset.saturating_add(n);
+                    }
+                    Err(_) => {
+                        read_err = Some(ConnError::Io(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "download disk writer stopped",
+                        )));
+                        break;
+                    }
+                }
+            } else {
+                tokio::select! {
+                    permit = tx.reserve() => {
+                        match permit {
+                            Ok(permit) => {
+                                let buf = reorder.remove(&expect_offset).expect("checked");
+                                let n = buf.len() as u64;
+                                permit.send(buf);
+                                expect_offset = expect_offset.saturating_add(n);
+                            }
+                            Err(_) => {
+                                read_err = Some(ConnError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::BrokenPipe,
+                                    "download disk writer stopped",
+                                )));
+                                break;
+                            }
+                        }
+                    }
+                    Some((offset, req_len, result)) = pending.next() => {
+                        match handle_read_result(
+                            offset,
+                            req_len,
+                            result,
+                            chunk,
+                            known_size,
+                            &mut reorder,
+                            &mut stop_issuing,
+                            remote_path,
+                        ) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                read_err = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        let Some((offset, req_len, result)) = pending.next().await else {
+            break;
+        };
+        match handle_read_result(
+            offset,
+            req_len,
+            result,
+            chunk,
+            known_size,
+            &mut reorder,
+            &mut stop_issuing,
+            remote_path,
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                read_err = Some(e);
+                break;
+            }
+        }
     }
-    local.flush().map_err(ConnError::Io)?;
-    let _ = remote.shutdown().await;
+
+    // Consume leftover in-flight reads before tearing down the writer. Dropping
+    // the FuturesUnordered alone leaves oneshot receivers gone while russh still
+    // holds CHANNEL_DATA CryptoVecs in the channel mpsc until the SFTP reader
+    // delivers them — under load that can pin several MiB past transfer end.
+    while pending.next().await.is_some() {}
+
+    // Drop sender so the writer can finish (EOF on rx).
+    drop(tx);
+    let write_result = writer
+        .await
+        .map_err(|e| ConnError::Backend(format!("disk writer task: {e}")))?;
+    let _ = raw.close(handle.as_str()).await;
+
+    if let Some(e) = read_err {
+        return Err(e);
+    }
+    let written = write_result.map_err(ConnError::Io)?;
+    // Advance the running total so the next file in a tree download resumes from
+    // the correct base (the writer drives the live bar during the transfer).
+    ctx.transferred = base.saturating_add(written);
+
+    if let Some(sz) = known_size {
+        if written != sz {
+            return Err(ConnError::Connect(format!(
+                "sftp download size mismatch for {remote_path}: got {written} bytes, expected {sz}"
+            )));
+        }
+    }
     Ok(())
+}
+
+fn handle_read_result(
+    offset: u64,
+    req_len: u32,
+    result: Result<russh_sftp::protocol::Data, SftpError>,
+    chunk: u32,
+    known_size: Option<u64>,
+    reorder: &mut BTreeMap<u64, Vec<u8>>,
+    stop_issuing: &mut bool,
+    remote_path: &str,
+) -> Result<u64, ConnError> {
+    match result {
+        Ok(data) => {
+            let bytes = data.data;
+            let n = bytes.len() as u32;
+            let counted = n as u64;
+            if n > 0 {
+                reorder.insert(offset, bytes);
+            }
+            if n == 0 {
+                *stop_issuing = true;
+            } else if n < req_len {
+                // Short read: EOF for unknown size, or a hole if size was known.
+                if let Some(sz) = known_size {
+                    if offset.saturating_add(n as u64) < sz {
+                        return Err(ConnError::Connect(format!(
+                            "sftp short read for {remote_path} at offset {offset}: got {n}, wanted {req_len}"
+                        )));
+                    }
+                }
+                *stop_issuing = true;
+            } else if known_size.is_none() && n < chunk {
+                *stop_issuing = true;
+            }
+            Ok(counted)
+        }
+        Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => {
+            *stop_issuing = true;
+            Ok(0)
+        }
+        Err(e) => Err(sftp_err(&format!("sftp read {remote_path}"), e)),
+    }
 }
 
 pub fn local_tree_bytes(local_path: &Path) -> Result<u64, ConnError> {
@@ -166,98 +559,153 @@ pub fn local_tree_bytes(local_path: &Path) -> Result<u64, ConnError> {
     }
 }
 
-pub async fn upload_path(
-    sftp: &SftpSession,
-    local_path: &Path,
-    remote_path: &str,
-    ctx: &mut TransferCtx,
-) -> Result<(), ConnError> {
-    ctx.check_cancel()?;
-    let meta = std::fs::symlink_metadata(local_path).map_err(ConnError::Io)?;
-    if meta.file_type().is_symlink() {
-        return Ok(());
-    }
-    if meta.is_dir() {
-        if !sftp
-            .try_exists(remote_path)
-            .await
-            .unwrap_or(false)
-        {
-            sftp.create_dir(remote_path)
-                .await
-                .map_err(|e| ConnError::Connect(format!("sftp mkdir {remote_path}: {e}")))?;
-        }
-        for entry in std::fs::read_dir(local_path).map_err(ConnError::Io)? {
-            let entry = entry.map_err(ConnError::Io)?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let child_local = entry.path();
-            let child_remote = join_remote(remote_path, &name);
-            Box::pin(upload_path(
-                sftp,
-                &child_local,
-                &child_remote,
-                ctx,
-            ))
-            .await?;
-        }
-        return Ok(());
-    }
-    upload_file(sftp, local_path, remote_path, ctx).await
-}
-
-async fn upload_file(
-    sftp: &SftpSession,
-    local_path: &Path,
-    remote_path: &str,
-    ctx: &mut TransferCtx,
-) -> Result<(), ConnError> {
-    let mut local = std::fs::File::open(local_path).map_err(ConnError::Io)?;
-    let mut remote = sftp
-        .create(remote_path)
-        .await
-        .map_err(|e| ConnError::Connect(format!("sftp create {remote_path}: {e}")))?;
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        ctx.check_cancel()?;
-        let n = local.read(&mut buf).map_err(ConnError::Io)?;
-        if n == 0 {
-            break;
-        }
-        remote
-            .write_all(&buf[..n])
-            .await
-            .map_err(|e| ConnError::Connect(format!("sftp write {remote_path}: {e}")))?;
-        ctx.add_bytes(n as u64);
-    }
-    remote
-        .flush()
-        .await
-        .map_err(|e| ConnError::Connect(format!("sftp flush {remote_path}: {e}")))?;
-    let _ = remote.shutdown().await;
-    Ok(())
-}
-
-pub async fn run_download(
-    sftp: &SftpSession,
+pub async fn run_download_raw(
+    raw: &Arc<RawSftpSession>,
+    max_read: u32,
     remote_path: &str,
     local_path: &Path,
     progress: Option<&ArcProgress>,
 ) -> Result<(), ConnError> {
-    let total = remote_tree_bytes(sftp, remote_path).await.ok();
+    let total = raw_tree_bytes(raw, remote_path).await.ok();
     let mut ctx = TransferCtx::new(progress.cloned(), total);
-    download_path(sftp, remote_path, local_path, &mut ctx).await
+    download_path_raw(raw, remote_path, local_path, max_read, &mut ctx).await
 }
 
-pub async fn run_upload(
-    sftp: &SftpSession,
+pub async fn list_dir_raw(
+    raw: &RawSftpSession,
+    path: &str,
+) -> Result<Vec<RemoteDirEntry>, ConnError> {
+    let mut entries = Vec::new();
+    for (name, attrs) in raw_read_dir(raw, path).await? {
+        let is_dir = attrs.file_type().is_dir();
+        entries.push(RemoteDirEntry {
+            name,
+            is_dir,
+            size: attrs.size,
+            mtime: attrs.mtime.map(|t| t as u64),
+        });
+    }
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+    Ok(entries)
+}
+
+pub async fn write_file_raw(
+    raw: &RawSftpSession,
+    remote_path: &str,
+    data: &[u8],
+) -> Result<(), ConnError> {
+    let handle = raw
+        .open(
+            remote_path,
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            FileAttributes::default(),
+        )
+        .await
+        .map_err(|e| sftp_err(&format!("sftp create {remote_path}"), e))?
+        .handle;
+    if !data.is_empty() {
+        let mut offset = 0u64;
+        while offset < data.len() as u64 {
+            let end = ((offset as usize) + UPLOAD_BUF).min(data.len());
+            let chunk = data[offset as usize..end].to_vec();
+            let n = chunk.len() as u64;
+            raw.write(handle.as_str(), offset, chunk)
+                .await
+                .map_err(|e| sftp_err(&format!("sftp write {remote_path}"), e))?;
+            offset += n;
+        }
+    }
+    raw.close(handle.as_str())
+        .await
+        .map_err(|e| sftp_err(&format!("sftp close {remote_path}"), e))?;
+    Ok(())
+}
+
+pub async fn run_upload_raw(
+    raw: &RawSftpSession,
     local_path: &Path,
     remote_path: &str,
     progress: Option<&ArcProgress>,
 ) -> Result<(), ConnError> {
     let total = local_tree_bytes(local_path).ok();
     let mut ctx = TransferCtx::new(progress.cloned(), total);
-    upload_path(sftp, local_path, remote_path, &mut ctx).await
+    upload_path_raw(raw, local_path, remote_path, &mut ctx).await
+}
+
+async fn upload_path_raw(
+    raw: &RawSftpSession,
+    local_path: &Path,
+    remote_path: &str,
+    ctx: &mut TransferCtx,
+) -> Result<(), ConnError> {
+    ctx.check_cancel()?;
+    let meta = tokio::fs::symlink_metadata(local_path)
+        .await
+        .map_err(ConnError::Io)?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    if meta.is_dir() {
+        if raw.stat(remote_path).await.is_err() {
+            raw.mkdir(remote_path, FileAttributes::default())
+                .await
+                .map_err(|e| sftp_err(&format!("sftp mkdir {remote_path}"), e))?;
+        }
+        let mut rd = tokio::fs::read_dir(local_path)
+            .await
+            .map_err(ConnError::Io)?;
+        while let Some(entry) = rd.next_entry().await.map_err(ConnError::Io)? {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let child_local = entry.path();
+            let child_remote = join_remote(remote_path, &name);
+            Box::pin(upload_path_raw(raw, &child_local, &child_remote, ctx)).await?;
+        }
+        return Ok(());
+    }
+    upload_file_raw(raw, local_path, remote_path, ctx).await
+}
+
+async fn upload_file_raw(
+    raw: &RawSftpSession,
+    local_path: &Path,
+    remote_path: &str,
+    ctx: &mut TransferCtx,
+) -> Result<(), ConnError> {
+    let mut local = tokio::fs::File::open(local_path)
+        .await
+        .map_err(ConnError::Io)?;
+    let handle = raw
+        .open(
+            remote_path,
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            FileAttributes::default(),
+        )
+        .await
+        .map_err(|e| sftp_err(&format!("sftp create {remote_path}"), e))?
+        .handle;
+    let mut buf = vec![0u8; UPLOAD_BUF];
+    let mut offset = 0u64;
+    loop {
+        ctx.check_cancel()?;
+        let n = local.read(&mut buf).await.map_err(ConnError::Io)?;
+        if n == 0 {
+            break;
+        }
+        raw.write(handle.as_str(), offset, buf[..n].to_vec())
+            .await
+            .map_err(|e| ConnError::Connect(format!("sftp write {remote_path}: {e}")))?;
+        offset += n as u64;
+        ctx.add_bytes(n as u64);
+    }
+    raw.close(handle.as_str())
+        .await
+        .map_err(|e| sftp_err(&format!("sftp close {remote_path}"), e))?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ members = [
 default-members = ["crates/app-ui"]
 
 [workspace.package]
-version = "1.0.14"
+version = "1.0.15"
 edition = "2021"
 license-file = "LICENSE"
 authors = ["vesaa"]
@@ -19,7 +19,7 @@ description = "Cross-platform SSH terminal manager built with Rust (egui + alacr
 
 [workspace.dependencies]
 # Async
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process", "net", "fs"] }
 async-trait = "0.1"
 futures = "0.3"
 
@@ -67,9 +67,25 @@ encoding_rs = "0.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
 arboard = "3"
 iconflow = { version = "1", default-features = false, features = ["pack-lucide"] }
+# Allocator: SFTP transfers free packet buffers across russh and disk-writer
+# threads. mimalloc handles that churn without serializing the UI heap.
+mimalloc = "0.1"
 
 # Internal crates
 session-tree = { path = "crates/session-tree" }
 vault = { path = "crates/vault" }
 term-core = { path = "crates/term-core" }
 connection-mgr = { path = "crates/connection-mgr" }
+
+# Optimize dependencies (esp. crypto: aes-gcm, aes, chacha20, ghash) even in dev
+# builds. At opt-level=0 the cipher throughput is crippled, which directly caps
+# SFTP transfer speed. Our own crates stay unoptimized for fast iteration.
+[profile.dev.package."*"]
+opt-level = 3
+
+# russh 0.50 VirtualLocks every channel payload via CryptoVec; on Windows that
+# pins the working set during SFTP and leaves the UI laggy after the first large
+# download. Patch mlock to no-op until we upgrade to a russh that uses Bytes for
+# non-secret channel data (upstream #653 / #629).
+[patch.crates-io]
+russh-cryptovec = { path = "crates/patches/russh-cryptovec" }

@@ -17,8 +17,18 @@ use russh::client::{AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{load_secret_key, PrivateKeyWithHashAlg, PublicKey};
 use russh::MethodKind;
 use russh::{client, ChannelMsg};
-use russh_sftp::client::SftpSession;
-use russh_sftp::protocol::FileType;
+use russh_sftp::protocol::FileAttributes;
+
+/// Cipher negotiation order. AES-256-GCM first so we use CPU AES instructions
+/// (AES-NI) instead of software chacha20-poly1305, then fall back to CTR ciphers,
+/// with chacha20 kept last for servers that lack AES-GCM.
+static CIPHER_PREFERENCE: &[russh::cipher::Name] = &[
+    russh::cipher::AES_256_GCM,
+    russh::cipher::AES_256_CTR,
+    russh::cipher::AES_192_CTR,
+    russh::cipher::AES_128_CTR,
+    russh::cipher::CHACHA20_POLY1305,
+];
 use session_tree::{AuthConfig, SessionConfig};
 use std::io::{self, Cursor, Read, Write};
 use std::path::Path;
@@ -36,6 +46,8 @@ pub struct RusshEstablished {
 }
 
 pub struct RusshBackend;
+
+const RUSSH_WORKER_THREADS: usize = 4;
 
 impl RusshBackend {
     pub fn new() -> Self {
@@ -84,7 +96,9 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .worker_threads(2)
+            // SFTP transfers + interactive shell share this runtime; keep enough
+            // workers so disk IO and packet pumping do not serialize on 2 threads.
+            .worker_threads(RUSSH_WORKER_THREADS)
             .thread_name("vsterm-russh")
             .build()
             .expect("vsterm russh runtime")
@@ -107,6 +121,28 @@ async fn connect_and_shell(
     let conf = Arc::new(client::Config {
         inactivity_timeout: None,
         keepalive_interval: Some(Duration::from_secs(30)),
+        // Channel window for SFTP throughput. Keep modest: russh 0.50 stores
+        // each CHANNEL_DATA as a CryptoVec; a large window + deep mpsc queue
+        // multiplies peak RAM during pipelined downloads.
+        window_size: 2 * 1024 * 1024,
+        maximum_packet_size: 65535,
+        // In-flight channel messages before TCP backpressure. Match the
+        // download pipeline so we do not queue far ahead of the disk writer.
+        channel_buffer_size: 32,
+        // Prefer AES-256-GCM: it uses AES-NI hardware acceleration on x86/ARM,
+        // whereas russh's default (chacha20-poly1305) is software-only and caps
+        // a single connection at ~15 MB/s. This is the main throughput lever.
+        preferred: russh::Preferred {
+            cipher: std::borrow::Cow::Borrowed(CIPHER_PREFERENCE),
+            ..russh::Preferred::DEFAULT
+        },
+        // Default rekey is 1 GiB; on a fast LAN that pauses a ~1 GiB download
+        // right at the end. AES-GCM is safe well above this; set 8 GiB.
+        limits: russh::Limits {
+            rekey_write_limit: 8 * 1024 * 1024 * 1024,
+            rekey_read_limit: 8 * 1024 * 1024 * 1024,
+            rekey_time_limit: Duration::from_secs(3600),
+        },
         ..Default::default()
     });
 
@@ -125,6 +161,7 @@ async fn connect_and_shell(
     let shared = Arc::new(RusshRemoteExec {
         session: Arc::clone(&session),
         host: config.host.clone(),
+        sftp: tokio::sync::Mutex::new(None),
     });
     let remote = RemoteSession::from_exec_fs(
         config.username.clone(),
@@ -461,6 +498,51 @@ impl Write for PipeWriter {
 struct RusshRemoteExec {
     session: Arc<Handle<ClientHandler>>,
     host: String,
+    /// One SFTP subsystem for the life of this SSH connection. Opening a new
+    /// channel per list/download leaked ~10 MiB RSS each time (russh channel
+    /// window + buffers; `close_session` / `Drop` try_send Close is best-effort).
+    sftp: tokio::sync::Mutex<Option<SharedSftp>>,
+}
+
+struct SharedSftp {
+    raw: Arc<russh_sftp::client::RawSftpSession>,
+    max_read: u32,
+}
+
+impl Drop for RusshRemoteExec {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.sftp.try_lock() {
+            if let Some(s) = g.take() {
+                let _ = s.raw.close_session();
+            }
+        }
+    }
+}
+
+impl RusshRemoteExec {
+    /// Lazily open (or reuse) the connection-scoped SFTP session.
+    async fn shared_sftp(
+        &self,
+    ) -> Result<(Arc<russh_sftp::client::RawSftpSession>, u32), ConnError> {
+        let mut guard = self.sftp.lock().await;
+        if let Some(s) = guard.as_ref() {
+            return Ok((Arc::clone(&s.raw), s.max_read));
+        }
+        let (raw, max_read) = open_raw_sftp(Arc::clone(&self.session), &self.host).await?;
+        *guard = Some(SharedSftp {
+            raw: Arc::clone(&raw),
+            max_read,
+        });
+        Ok((raw, max_read))
+    }
+
+    /// Drop a dead SFTP session so the next call re-opens cleanly.
+    async fn invalidate_sftp(&self) {
+        let mut guard = self.sftp.lock().await;
+        if let Some(s) = guard.take() {
+            let _ = s.raw.close_session();
+        }
+    }
 }
 
 impl RemoteExec for RusshRemoteExec {
@@ -529,37 +611,18 @@ impl RemoteExec for RusshRemoteExec {
 
 impl RemoteFs for RusshRemoteExec {
     fn list_dir(&self, path: &str) -> Result<Vec<RemoteDirEntry>, ConnError> {
-        let session = Arc::clone(&self.session);
-        let host = self.host.clone();
         let path = path.to_string();
         runtime().block_on(async move {
-            let sftp = open_sftp(session, &host).await?;
-            let mut entries = Vec::new();
-            let dir = sftp
-                .read_dir(&path)
-                .await
-                .map_err(|e| ConnError::Connect(format!("sftp list {path}: {e}")))?;
-            for entry in dir {
-                let name = entry.file_name();
-                if name == "." || name == ".." {
-                    continue;
+            let (raw, _) = self.shared_sftp().await?;
+            match remote_tree::list_dir_raw(&raw, &path).await {
+                Ok(entries) => Ok(entries),
+                Err(e) => {
+                    if sftp_session_dead(&e) {
+                        self.invalidate_sftp().await;
+                    }
+                    Err(e)
                 }
-                let meta = entry.metadata();
-                let is_dir = meta.file_type() == FileType::Dir;
-                entries.push(RemoteDirEntry {
-                    name,
-                    is_dir,
-                    size: meta.size,
-                    mtime: meta.mtime.map(|t| t as u64),
-                });
             }
-            entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            });
-            let _ = sftp.close().await;
-            Ok(entries)
         })
     }
 
@@ -578,23 +641,29 @@ impl RemoteFs for RusshRemoteExec {
         local_path: &Path,
         progress: Option<&ArcProgress>,
     ) -> Result<(), ConnError> {
-        let session = Arc::clone(&self.session);
-        let host = self.host.clone();
         let remote_path = remote_path.to_string();
         let local_path = local_path.to_path_buf();
         let progress_ui = progress.cloned();
         let progress_worker = progress_ui.clone();
         let result: Result<(), ConnError> = runtime().block_on(async move {
-            let sftp = open_sftp(session, &host).await?;
-            remote_tree::run_download(
-                &sftp,
+            let (raw, max_read) = self.shared_sftp().await?;
+            match remote_tree::run_download_raw(
+                &raw,
+                max_read,
                 &remote_path,
                 &local_path,
                 progress_worker.as_ref(),
             )
-            .await?;
-            let _ = sftp.close().await;
-            Ok(())
+            .await
+            {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    if sftp_session_dead(&e) {
+                        self.invalidate_sftp().await;
+                    }
+                    Err(e)
+                }
+            }
         });
         finish_transfer(&result, progress_ui.as_ref());
         result
@@ -615,106 +684,110 @@ impl RemoteFs for RusshRemoteExec {
         remote_path: &str,
         progress: Option<&ArcProgress>,
     ) -> Result<(), ConnError> {
-        let session = Arc::clone(&self.session);
-        let host = self.host.clone();
         let remote_path = remote_path.to_string();
         let local_path = local_path.to_path_buf();
         let progress_ui = progress.cloned();
         let progress_worker = progress_ui.clone();
         let result: Result<(), ConnError> = runtime().block_on(async move {
-            let sftp = open_sftp(session, &host).await?;
-            remote_tree::run_upload(
-                &sftp,
+            let (raw, _) = self.shared_sftp().await?;
+            match remote_tree::run_upload_raw(
+                &raw,
                 &local_path,
                 &remote_path,
                 progress_worker.as_ref(),
             )
-            .await?;
-            let _ = sftp.close().await;
-            Ok(())
+            .await
+            {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    if sftp_session_dead(&e) {
+                        self.invalidate_sftp().await;
+                    }
+                    Err(e)
+                }
+            }
         });
         finish_transfer(&result, progress_ui.as_ref());
         result
     }
 
     fn remove(&self, remote_path: &str, is_dir: bool) -> Result<(), ConnError> {
-        let session = Arc::clone(&self.session);
-        let host = self.host.clone();
         let remote_path = remote_path.to_string();
         runtime().block_on(async move {
-            let sftp = open_sftp(session, &host).await?;
+            let (raw, _) = self.shared_sftp().await?;
             let res = if is_dir {
-                sftp.remove_dir(&remote_path)
+                raw.rmdir(&remote_path)
                     .await
                     .map_err(|e| ConnError::Connect(format!("sftp rmdir {remote_path}: {e}")))
             } else {
-                sftp.remove_file(&remote_path)
+                raw.remove(&remote_path)
                     .await
                     .map_err(|e| ConnError::Connect(format!("sftp rm {remote_path}: {e}")))
             };
-            let _ = sftp.close().await;
-            res
+            match res {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    if sftp_session_dead(&e) {
+                        self.invalidate_sftp().await;
+                    }
+                    Err(e)
+                }
+            }
         })
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<(), ConnError> {
-        let session = Arc::clone(&self.session);
-        let host = self.host.clone();
         let from = from.to_string();
         let to = to.to_string();
         runtime().block_on(async move {
-            let sftp = open_sftp(session, &host).await?;
-            sftp.rename(&from, &to)
-                .await
-                .map_err(|e| ConnError::Connect(format!("sftp rename {from} → {to}: {e}")))?;
-            let _ = sftp.close().await;
-            Ok(())
+            let (raw, _) = self.shared_sftp().await?;
+            match raw.rename(&from, &to).await {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    let err = ConnError::Connect(format!("sftp rename {from} → {to}: {e}"));
+                    if sftp_session_dead(&err) {
+                        self.invalidate_sftp().await;
+                    }
+                    Err(err)
+                }
+            }
         })
     }
 
     fn mkdir(&self, remote_path: &str) -> Result<(), ConnError> {
-        let session = Arc::clone(&self.session);
-        let host = self.host.clone();
         let remote_path = remote_path.to_string();
         runtime().block_on(async move {
-            let sftp = open_sftp(session, &host).await?;
-            sftp.create_dir(&remote_path)
+            let (raw, _) = self.shared_sftp().await?;
+            match raw
+                .mkdir(&remote_path, FileAttributes::default())
                 .await
-                .map_err(|e| ConnError::Connect(format!("sftp mkdir {remote_path}: {e}")))?;
-            let _ = sftp.close().await;
-            Ok(())
+            {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    let err = ConnError::Connect(format!("sftp mkdir {remote_path}: {e}"));
+                    if sftp_session_dead(&err) {
+                        self.invalidate_sftp().await;
+                    }
+                    Err(err)
+                }
+            }
         })
     }
 
     fn write_file(&self, remote_path: &str, data: &[u8]) -> Result<(), ConnError> {
-        let session = Arc::clone(&self.session);
-        let host = self.host.clone();
         let remote_path = remote_path.to_string();
         let data = data.to_vec();
         runtime().block_on(async move {
-            let sftp = open_sftp(session, &host).await?;
-            let mut remote = sftp
-                .create(&remote_path)
-                .await
-                .map_err(|e| ConnError::Connect(format!("sftp create {remote_path}: {e}")))?;
-            use tokio::io::AsyncWriteExt;
-            if !data.is_empty() {
-                remote
-                    .write_all(&data)
-                    .await
-                    .map_err(|e| ConnError::Connect(format!("sftp write {remote_path}: {e}")))?;
-                remote
-                    .flush()
-                    .await
-                    .map_err(|e| ConnError::Connect(format!("sftp flush {remote_path}: {e}")))?;
+            let (raw, _) = self.shared_sftp().await?;
+            match remote_tree::write_file_raw(&raw, &remote_path, &data).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    if sftp_session_dead(&e) {
+                        self.invalidate_sftp().await;
+                    }
+                    Err(e)
+                }
             }
-            // Close the SFTP handle (required by russh-sftp; empty files still need this).
-            remote
-                .shutdown()
-                .await
-                .map_err(|e| ConnError::Connect(format!("sftp close {remote_path}: {e}")))?;
-            let _ = sftp.close().await;
-            Ok(())
         })
     }
 }
@@ -734,10 +807,19 @@ fn finish_transfer(result: &Result<(), ConnError>, progress: Option<&ArcProgress
     }
 }
 
-async fn open_sftp(
+fn sftp_session_dead(err: &ConnError) -> bool {
+    let s = err.to_string().to_ascii_lowercase();
+    s.contains("session closed")
+        || s.contains("channel closed")
+        || s.contains("broken pipe")
+        || s.contains("disconnected")
+        || s.contains("not connected")
+}
+
+async fn open_raw_sftp(
     session: Arc<Handle<ClientHandler>>,
     host: &str,
-) -> Result<SftpSession, ConnError> {
+) -> Result<(Arc<russh_sftp::client::RawSftpSession>, u32), ConnError> {
     let channel = session
         .channel_open_session()
         .await
@@ -746,9 +828,7 @@ async fn open_sftp(
         .request_subsystem(true, "sftp")
         .await
         .map_err(|e| ConnError::Connect(format!("sftp subsystem {host}: {e}")))?;
-    SftpSession::new(channel.into_stream())
-        .await
-        .map_err(|e| ConnError::Connect(format!("sftp init {host}: {e}")))
+    remote_tree::init_raw_sftp(channel.into_stream()).await
 }
 
 fn wrap_sh_c(script: &str) -> String {

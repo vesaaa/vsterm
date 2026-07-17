@@ -59,6 +59,11 @@ impl ArcProgress {
 
     pub fn finish_ok(&self) {
         let mut g = self.inner.lock();
+        // Snap the bar to 100% so the UI does not flash a stale mid-transfer
+        // fraction when the worker finishes between two paint frames.
+        if let Some(t) = g.total {
+            g.transferred = t;
+        }
         g.done = true;
         g.error = None;
     }

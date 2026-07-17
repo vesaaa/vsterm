@@ -164,6 +164,7 @@ impl HostSnapshot {
 pub struct MetricsService {
     inner: Arc<Mutex<SamplerState>>,
     stop: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
 }
 
 struct SamplerState {
@@ -180,31 +181,58 @@ impl MetricsService {
             selected_nic: None,
         }));
         let stop = Arc::new(AtomicBool::new(false));
+        // Off until the Monitor / System Info UI is visible — `refresh_processes(All)`
+        // every second is expensive on Windows and showed as ~40% CPU + "very high"
+        // power use while the user was only looking at a terminal.
+        let active = Arc::new(AtomicBool::new(false));
         let worker = Arc::clone(&inner);
         let stop_flag = Arc::clone(&stop);
+        let active_flag = Arc::clone(&active);
         std::thread::Builder::new()
             .name("vsterm-metrics".into())
             .spawn(move || {
-                let mut sys = System::new_all();
-                sys.refresh_all();
-                std::thread::sleep(Duration::from_millis(200));
+                let mut sys = System::new();
                 while !stop_flag.load(Ordering::SeqCst) {
-                    tick(&mut sys, &worker);
-                    // Sleep in small slices so shutdown reacts quickly.
-                    for _ in 0..20 {
-                        if stop_flag.load(Ordering::SeqCst) {
-                            break;
+                    if active_flag.load(Ordering::Relaxed) {
+                        tick(&mut sys, &worker);
+                        // ~1 s cadence while the metrics UI is open.
+                        for _ in 0..20 {
+                            if stop_flag.load(Ordering::SeqCst)
+                                || !active_flag.load(Ordering::Relaxed)
+                            {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
                         }
-                        std::thread::sleep(Duration::from_millis(50));
+                    } else {
+                        // Idle: do not touch sysinfo. Wake every 200 ms to notice activation.
+                        for _ in 0..4 {
+                            if stop_flag.load(Ordering::SeqCst)
+                                || active_flag.load(Ordering::Relaxed)
+                            {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
                     }
                 }
             })
             .ok();
-        Self { inner, stop }
+        Self {
+            inner,
+            stop,
+            active,
+        }
     }
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Enable/disable the background sampler. Call each frame from the UI with
+    /// whether any metrics panel is actually visible.
+    pub fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Relaxed);
     }
 
     pub fn snapshot(&self) -> HostSnapshot {

@@ -284,8 +284,18 @@ impl TerminalHandle {
                 }
             }
 
-            // Keep the open block's end at the current cursor (output growth).
             let history_size = state.term.history_size();
+            if history_size < hist_before {
+                let dropped = hist_before - history_size;
+                state.marks.note_history_trim(dropped);
+                if dropped >= state.line_times.len() {
+                    state.line_times.clear();
+                } else {
+                    state.line_times.drain(0..dropped);
+                }
+            }
+
+            // Keep the open block's end at the current cursor (output growth).
             let abs = cursor_abs(&state.term, history_size);
             state.marks.grow_open_to(abs);
 
@@ -586,9 +596,25 @@ fn line_text(
 }
 
 fn build_virtual_abs(marks: &ShellMarks, total_abs: usize) -> Vec<usize> {
-    (0..total_abs)
-        .filter(|&a| !marks.is_folded_away(a))
-        .collect()
+    if marks.blocks().is_empty() {
+        return (0..total_abs).collect();
+    }
+    let blocks = marks.blocks();
+    let mut out = Vec::with_capacity(total_abs);
+    let mut bi = 0usize;
+    for abs in 0..total_abs {
+        while bi + 1 < blocks.len() && blocks[bi + 1].header_abs <= abs {
+            bi += 1;
+        }
+        let folded = blocks[bi].header_abs <= abs
+            && blocks[bi].folded
+            && abs > blocks[bi].header_abs
+            && abs <= blocks[bi].end_abs;
+        if !folded {
+            out.push(abs);
+        }
+    }
+    out
 }
 
 fn virtual_len(state: &TermState) -> usize {

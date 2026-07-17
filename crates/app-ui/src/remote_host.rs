@@ -175,6 +175,8 @@ const SKIP_FS: &[&str] = &[
 pub struct RemoteHostService {
     inner: Arc<Mutex<RemoteState>>,
     stop: Arc<AtomicBool>,
+    /// When false, do not run remote SSH collect (terminal-only use).
+    sampling: Arc<AtomicBool>,
 }
 
 struct RemoteState {
@@ -215,13 +217,15 @@ impl RemoteHostService {
             rate_baseline_pending: false,
         }));
         let stop = Arc::new(AtomicBool::new(false));
+        let sampling = Arc::new(AtomicBool::new(false));
         let worker = Arc::clone(&inner);
         let stop_flag = Arc::clone(&stop);
+        let sampling_flag = Arc::clone(&sampling);
         std::thread::Builder::new()
             .name("vsterm-remote-metrics".into())
             .spawn(move || {
                 while !stop_flag.load(Ordering::SeqCst) {
-                    let should_poll = {
+                    let should_poll = sampling_flag.load(Ordering::Relaxed) && {
                         let g = worker.lock();
                         g.target.is_some()
                     };
@@ -302,7 +306,13 @@ impl RemoteHostService {
                             }
                         }
                     }
-                    for _ in 0..40 {
+                    // ~2 s between remote collects while sampling; shorter wake when idle.
+                    let slices = if sampling_flag.load(Ordering::Relaxed) {
+                        40
+                    } else {
+                        4
+                    };
+                    for _ in 0..slices {
                         if stop_flag.load(Ordering::SeqCst) {
                             break;
                         }
@@ -311,12 +321,21 @@ impl RemoteHostService {
                 }
             })
             .ok();
-        Self { inner, stop }
+        Self {
+            inner,
+            stop,
+            sampling,
+        }
     }
 
     pub fn stop(&self) {
         self.inner.lock().target = None;
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Only collect over SSH while a metrics / system-info surface is visible.
+    pub fn set_sampling(&self, on: bool) {
+        self.sampling.store(on, Ordering::Relaxed);
     }
 
     pub fn bind(&self, remote: Option<RemoteSession>, vault_path: Option<PathBuf>) {

@@ -125,25 +125,28 @@ impl ShellMarks {
 
     /// Find a block whose header is `abs`, if any.
     pub fn header_at(&self, abs: usize) -> Option<&CommandBlock> {
-        self.blocks.iter().find(|b| b.header_abs == abs)
+        self.blocks
+            .binary_search_by_key(&abs, |b| b.header_abs)
+            .ok()
+            .map(|i| &self.blocks[i])
     }
 
     /// Find an expanded (or foldable) block that covers `abs` (header..=end).
     pub fn block_covering(&self, abs: usize) -> Option<&CommandBlock> {
-        self.blocks
-            .iter()
-            .find(|b| abs >= b.header_abs && abs <= b.end_abs && b.end_abs > b.header_abs)
-    }
-
-    /// True if `abs` is output inside a folded block (not the header).
-    pub fn is_folded_away(&self, abs: usize) -> bool {
-        self.blocks.iter().any(|b| {
-            b.folded && abs > b.header_abs && abs <= b.end_abs
-        })
+        if self.blocks.is_empty() {
+            return None;
+        }
+        let idx = self.blocks.partition_point(|b| b.header_abs <= abs);
+        for i in idx.checked_sub(1).into_iter().chain((idx < self.blocks.len()).then_some(idx)) {
+            let b = &self.blocks[i];
+            if abs >= b.header_abs && abs <= b.end_abs && b.end_abs > b.header_abs {
+                return Some(b);
+            }
+        }
+        None
     }
 
     /// Adjust absolute indices after history is truncated at the top.
-    #[allow(dead_code)] // wired when scrollback rotisserie detection is added
     pub fn note_history_trim(&mut self, dropped: usize) {
         if dropped == 0 {
             return;

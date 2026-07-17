@@ -238,6 +238,7 @@ impl VsTermApp {
         match self.connections.open_local_shell(title) {
             Ok(_) => {
                 self.status = i18n::t("status.opened_shell");
+                // Local shell ≡ a host tab: open Monitor so the rail tracks this host.
                 self.left_tab = LeftTab::Monitor;
                 self.main_tab = MainTab::Terminal;
                 self.sync_host_binding();
@@ -573,6 +574,7 @@ impl VsTermApp {
         };
         match pending.rx.try_recv() {
             Ok(Ok(())) => {
+                // Connected host tab ↔ Monitor rail (active host only samples).
                 self.left_tab = LeftTab::Monitor;
                 self.main_tab = MainTab::Terminal;
                 self.sync_host_binding();
@@ -1255,6 +1257,10 @@ impl eframe::App for VsTermApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Opt-in perf probe (set VSTERM_DIAG=1): prints real repaint rate and
+        // per-frame UI cost every 2 s. Lets us tell a continuous-repaint bug
+        // (fps pinned high) from expensive frames / background CPU (fps low).
+        let _diag = FrameDiag::start();
         // One-shot: let PTY reader threads wake egui when output arrives.
         if !self.repaint_wake_bound {
             let ctx_wake = ctx.clone();
@@ -1271,16 +1277,28 @@ impl eframe::App for VsTermApp {
                 .list_meta()
                 .iter()
                 .any(|m| m.state == connection_mgr::ConnectionState::Connecting);
-        let wants_metrics = self.left_tab == LeftTab::Monitor
-            || matches!(
-                self.main_tab,
-                MainTab::SystemInfo | MainTab::Routes
-            );
+        // Sampling rules (product):
+        // - Connect / activate a host tab → left rail opens Monitor (see connect
+        //   / Select paths). Collect only for the *active* host while Monitor
+        //   is open, or while System Info is open (needs the same snapshot).
+        // - Non-active host tabs: `sync_host_binding` rebinds/clears the target
+        //   so their collectors stop; only one RemoteHostService target exists.
+        // - Routes: fetch only inside the Routes panel when that main tab is
+        //   selected — do not keep metrics sampling alive for Routes alone.
+        let monitor_rail = self.left_tab == LeftTab::Monitor;
+        let system_info = self.main_tab == MainTab::SystemInfo;
+        let wants_live_host_data = monitor_rail || system_info;
+        let has_local_host = self.connections.active_local_metrics();
+        let has_remote_host = self.connections.active_remote().is_some();
+        self.metrics
+            .set_active(wants_live_host_data && has_local_host);
+        self.remote_host
+            .set_sampling(wants_live_host_data && has_remote_host);
+        let wants_metrics = wants_live_host_data;
         let auth_animating = self.auth_prompt.is_some()
             || self.pending_spit_auth.is_some()
             || self.fx.is_active();
         schedule_repaint(ctx, connecting, wants_metrics, auth_animating);
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(i18n::t("app.name")));
 
         self.poll_pending_connect();
         self.connections.reap_dead();
@@ -1668,7 +1686,16 @@ impl eframe::App for VsTermApp {
                                             self.main_tab = MainTab::Terminal;
                                         }
                                         Some(connection_list::ConnAction::Close(id)) => {
+                                            let host_key = self
+                                                .connections
+                                                .remote_display_key(id);
                                             self.connections.close(id);
+                                            if let Some(key) = host_key {
+                                                bottom_panel::forget_saved_host(
+                                                    &mut self.bottom,
+                                                    &key,
+                                                );
+                                            }
                                             self.sync_host_binding();
                                             self.status = i18n::t("status.closed");
                                         }
@@ -1725,7 +1752,6 @@ impl eframe::App for VsTermApp {
             ui.add_space(2.0);
             ui.separator();
 
-            let snap = self.host_snapshot();
             let vault_path = self.store.as_ref().map(|s| s.paths().vault_path());
             let remote = self.connections.active_remote();
             let active_cwd = self.connections.active_cwd();
@@ -1807,6 +1833,7 @@ impl eframe::App for VsTermApp {
                     ui.advance_cursor_after_rect(full);
                 }
                 MainTab::SystemInfo => {
+                    let snap = self.host_snapshot();
                     let connected = self
                         .connections
                         .with_active(|c| {
@@ -1843,6 +1870,19 @@ impl eframe::App for VsTermApp {
         });
 
         self.fx.paint_overlay(ctx);
+
+        // Open OS file dialogs only after egui has painted a frame with the
+        // context menu closed (click → close_menu → this arm → next paint → open).
+        match bottom_panel::take_native_dialog_after_paint(&mut self.bottom) {
+            Some(kind) => {
+                let remote = self.connections.active_remote();
+                bottom_panel::run_native_dialog(&mut self.bottom, remote.as_ref(), kind);
+            }
+            None if bottom_panel::has_pending_native_dialog(&self.bottom) => {
+                ctx.request_repaint();
+            }
+            None => {}
+        }
     }
 }
 
@@ -1990,42 +2030,102 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Scope guard that times one `update()` call and periodically reports the real
+/// repaint rate + per-frame UI-thread cost. Enabled only when `VSTERM_DIAG` is set.
+struct FrameDiag(std::time::Instant);
+
+impl FrameDiag {
+    fn start() -> Self {
+        FrameDiag(std::time::Instant::now())
+    }
+}
+
+impl Drop for FrameDiag {
+    fn drop(&mut self) {
+        static ENABLED: once_cell::sync::Lazy<bool> =
+            once_cell::sync::Lazy::new(|| std::env::var_os("VSTERM_DIAG").is_some());
+        if !*ENABLED {
+            return;
+        }
+        use std::cell::RefCell;
+        use std::time::Instant;
+        thread_local! {
+            static ACC: RefCell<(u32, f64, f64, Option<Instant>)> =
+                const { RefCell::new((0, 0.0, 0.0, None)) };
+        }
+        let dt_ms = self.0.elapsed().as_secs_f64() * 1000.0;
+        ACC.with(|c| {
+            let mut a = c.borrow_mut();
+            a.0 += 1;
+            a.1 += dt_ms;
+            if dt_ms > a.2 {
+                a.2 = dt_ms;
+            }
+            let start = a.3.get_or_insert_with(Instant::now);
+            let win = start.elapsed().as_secs_f64();
+            if win >= 2.0 {
+                let fps = a.0 as f64 / win;
+                let avg = a.1 / a.0 as f64;
+                tracing::warn!(
+                    "VSTERM_DIAG: {:.1} fps | frame avg {:.2} ms max {:.2} ms ({} frames / {:.1}s)",
+                    fps,
+                    avg,
+                    a.2,
+                    a.0,
+                    win
+                );
+                *a = (0, 0.0, 0.0, Some(Instant::now()));
+            }
+        });
+    }
+}
+
 /// Event-driven painting: wake on input / terminal output; slow timer only for
-/// cursor blink, connecting polls, and metrics panels. Avoids a fixed ~30 FPS loop.
+/// connecting polls and metrics panels. Fully idle windows do not schedule timers.
 fn schedule_repaint(ctx: &egui::Context, connecting: bool, wants_metrics: bool, fx_active: bool) {
     use std::time::Duration;
 
-    let interactive = ctx.input(|i| {
+    // Only real pointer *events* count — do not use `pointer.delta()`, which on
+    // some Windows setups stays non-zero and forced a continuous ~60 FPS loop
+    // (high idle CPU / "very high" power) even when the user was not moving.
+    let pointer_active = ctx.input(|i| {
         i.pointer.any_down()
             || i.events.iter().any(|e| {
                 matches!(
                     e,
-                    egui::Event::Text(_)
-                        | egui::Event::Paste(_)
-                        | egui::Event::Key {
-                            pressed: true,
-                            ..
-                        }
-                        | egui::Event::PointerButton { pressed: true, .. }
+                    egui::Event::PointerMoved(_)
+                        | egui::Event::PointerButton { .. }
                         | egui::Event::MouseWheel { .. }
                 )
             })
     });
+    let keyboard_active = ctx.input(|i| {
+        i.events.iter().any(|e| {
+            matches!(
+                e,
+                egui::Event::Text(_)
+                    | egui::Event::Paste(_)
+                    | egui::Event::Key {
+                        pressed: true,
+                        ..
+                    }
+            )
+        })
+    });
+    let interactive = pointer_active || keyboard_active;
 
     if interactive || fx_active {
         ctx.request_repaint();
     }
 
-    let ms = if fx_active {
-        16
+    // Only schedule a timer when something actually needs periodic updates.
+    // A fixed ~530 ms idle timer kept waking ~2 FPS with no visual change.
+    if fx_active || pointer_active {
+        ctx.request_repaint_after(Duration::from_millis(16));
     } else if connecting {
-        200
+        ctx.request_repaint_after(Duration::from_millis(200));
     } else if wants_metrics {
-        400
-    } else {
-        // Terminal cursor blink cadence when idle.
-        530
-    };
-    ctx.request_repaint_after(Duration::from_millis(ms));
+        ctx.request_repaint_after(Duration::from_millis(400));
+    }
 }
 

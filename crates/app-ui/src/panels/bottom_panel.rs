@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BottomTab {
@@ -70,15 +70,6 @@ struct InlineRename {
     request_focus: bool,
 }
 
-/// Waiting for a fresh OSC 7 after injecting a PTY cwd probe.
-struct CwdSyncPending {
-    started: Instant,
-    min_generation: u64,
-}
-
-/// Injected into the interactive PTY so the shell emits OSC 7 with `$PWD`.
-const CWD_PROBE_CMD: &str = "printf '\\033]7;file://localhost%s\\007' \"$PWD\"\n";
-
 #[derive(Debug, Clone)]
 struct RemoteDragPayload {
     names: Vec<String>,
@@ -123,6 +114,21 @@ enum EntryAction {
     ToggleTree(String),
 }
 
+/// Native OS file dialogs open only after egui has painted one frame with the
+/// context menu already closed. Flow: click → `close_menu` → queue here → next
+/// frame paints without the menu → end-of-frame opens `rfd` (see `App::update`).
+struct PendingNativeDialog {
+    /// False on the click frame; true after one subsequent UI pass.
+    menu_closed_painted: bool,
+    kind: NativeDialogKind,
+}
+
+pub enum NativeDialogKind {
+    Download { names: Vec<String> },
+    UploadFile,
+    UploadFolder,
+}
+
 pub struct BottomPanelState {
     pub tab: BottomTab,
     pub height: f32,
@@ -148,7 +154,101 @@ pub struct BottomPanelState {
     transfer_list_open: bool,
     status_line: Option<String>,
     inline_rename: Option<InlineRename>,
-    cwd_sync_pending: Option<CwdSyncPending>,
+    /// Set by a menu/button click; drained at the start of the next `tick_files`
+    /// so the context menu can close and repaint before the blocking OS dialog.
+    pending_native_dialog: Option<PendingNativeDialog>,
+    /// Per-server file-browser views, keyed by `user@host`. Switching server
+    /// tabs stashes the outgoing view here and restores the target's, so the
+    /// panel keeps each host's directory/listing instead of resetting to `/`
+    /// and re-listing every time (which was both jarring and leaked memory).
+    saved: HashMap<String, ServerFiles>,
+}
+
+/// Snapshot of the per-server file-browser state (everything except the shared
+/// UI chrome like panel height and column widths).
+struct ServerFiles {
+    remote_path: String,
+    selected: HashSet<String>,
+    selection_anchor: Option<String>,
+    remote_entries: Vec<RemoteDirEntry>,
+    remote_error: Option<String>,
+    remote_loading: bool,
+    pending_list: Option<PendingList>,
+    pending_queue: Vec<(String, bool)>,
+    dir_cache: HashMap<String, Vec<RemoteDirEntry>>,
+    tree_expanded: HashSet<String>,
+    transfer: Option<ActiveTransfer>,
+    transfer_queue: VecDeque<QueuedTransfer>,
+    transfer_log: VecDeque<TransferLogItem>,
+    transfer_list_open: bool,
+    status_line: Option<String>,
+    inline_rename: Option<InlineRename>,
+}
+
+impl ServerFiles {
+    /// A clean view for a server that is being visited for the first time.
+    fn fresh() -> Self {
+        Self {
+            remote_path: "/".into(),
+            selected: HashSet::new(),
+            selection_anchor: None,
+            remote_entries: Vec::new(),
+            remote_error: None,
+            remote_loading: false,
+            pending_list: None,
+            pending_queue: Vec::new(),
+            dir_cache: HashMap::new(),
+            tree_expanded: HashSet::from(["/".into()]),
+            transfer: None,
+            transfer_queue: VecDeque::new(),
+            transfer_log: VecDeque::new(),
+            transfer_list_open: false,
+            status_line: None,
+            inline_rename: None,
+        }
+    }
+
+    /// Move the live per-server fields out of `state` for stashing.
+    fn capture(state: &mut BottomPanelState) -> Self {
+        Self {
+            remote_path: std::mem::take(&mut state.remote_path),
+            selected: std::mem::take(&mut state.selected),
+            selection_anchor: state.selection_anchor.take(),
+            remote_entries: std::mem::take(&mut state.remote_entries),
+            remote_error: state.remote_error.take(),
+            remote_loading: state.remote_loading,
+            pending_list: state.pending_list.take(),
+            pending_queue: std::mem::take(&mut state.pending_queue),
+            dir_cache: std::mem::take(&mut state.dir_cache),
+            tree_expanded: std::mem::take(&mut state.tree_expanded),
+            transfer: state.transfer.take(),
+            transfer_queue: std::mem::take(&mut state.transfer_queue),
+            transfer_log: std::mem::take(&mut state.transfer_log),
+            transfer_list_open: state.transfer_list_open,
+            status_line: state.status_line.take(),
+            inline_rename: state.inline_rename.take(),
+        }
+    }
+
+    /// Install this view as the live one.
+    fn restore(self, state: &mut BottomPanelState) {
+        state.remote_path = self.remote_path;
+        state.selected = self.selected;
+        state.selection_anchor = self.selection_anchor;
+        state.remote_entries = self.remote_entries;
+        state.remote_error = self.remote_error;
+        state.remote_loading = self.remote_loading;
+        state.pending_list = self.pending_list;
+        state.pending_queue = self.pending_queue;
+        state.dir_cache = self.dir_cache;
+        state.tree_expanded = self.tree_expanded;
+        state.transfer = self.transfer;
+        state.transfer_queue = self.transfer_queue;
+        state.transfer_log = self.transfer_log;
+        state.transfer_list_open = self.transfer_list_open;
+        state.status_line = self.status_line;
+        state.inline_rename = self.inline_rename;
+    }
 }
 
 impl Default for BottomPanelState {
@@ -178,7 +278,8 @@ impl Default for BottomPanelState {
             transfer_list_open: false,
             status_line: None,
             inline_rename: None,
-            cwd_sync_pending: None,
+            pending_native_dialog: None,
+            saved: HashMap::new(),
         }
     }
 }
@@ -335,29 +436,29 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
     let mode = remote_mode(remote);
     let key = remote.map(|r| r.display_key());
 
-    if state.bound_key.as_deref() != key.as_deref() {
-        if let Some(t) = state.transfer.take() {
-            t.progress.request_cancel();
+    if state.bound_key != key {
+        // Stash the outgoing server's view so returning to its tab restores the
+        // exact directory + listing. In-flight transfers are NOT cancelled —
+        // they belong to that host and keep running in the background.
+        if let Some(old) = state.bound_key.take() {
+            let view = ServerFiles::capture(state);
+            state.saved.insert(old, view);
         }
-        state.transfer_queue.clear();
-        state.transfer_log.clear();
-        state.transfer_list_open = false;
-        state.cwd_sync_pending = None;
-        state.bound_key = key;
-        state.remote_entries.clear();
-        state.selected.clear();
-        state.selection_anchor = None;
-        state.remote_error = None;
-        state.pending_list = None;
-        state.pending_queue.clear();
-        state.dir_cache.clear();
-        state.tree_expanded = HashSet::from(["/".into()]);
-        state.remote_loading = false;
-        state.status_line = None;
-        state.inline_rename = None;
-        if mode == RemotePaneMode::Ready {
-            state.remote_path = "/".into();
-            request_dir(state, remote, "/", true);
+        state.bound_key = key.clone();
+        match key {
+            Some(k) => {
+                if let Some(view) = state.saved.remove(&k) {
+                    // Seen before: restore its view without touching the network.
+                    view.restore(state);
+                } else {
+                    // First visit to this host: start clean and list the root once.
+                    ServerFiles::fresh().restore(state);
+                    if mode == RemotePaneMode::Ready {
+                        request_dir(state, remote, "/", true);
+                    }
+                }
+            }
+            None => ServerFiles::fresh().restore(state),
         }
     }
 
@@ -776,26 +877,6 @@ fn show_files_content(
     let mut send_cmd = None;
     let list_h = (area_h - PATH_H).max(40.0);
 
-    // Complete or time out a terminal→files cwd probe.
-    if let Some(pending) = state.cwd_sync_pending.as_ref() {
-        let timed_out = pending.started.elapsed() > Duration::from_secs(2);
-        let ready = active_cwd.is_some_and(|(_, gen)| *gen >= pending.min_generation);
-        if ready {
-            if let Some((path, _)) = active_cwd {
-                let path = normalize_remote(path);
-                state.cwd_sync_pending = None;
-                state.status_line = None;
-                state.dir_cache.remove(&path);
-                actions.push(EntryAction::Nav(path));
-            }
-        } else if timed_out {
-            state.cwd_sync_pending = None;
-            state.status_line = Some(i18n::t("bottom.files.sync_from_term.failed").into());
-        } else {
-            ui.ctx().request_repaint_after(Duration::from_millis(50));
-        }
-    }
-
     ui.spacing_mut().item_spacing.y = 0.0;
     ui.allocate_ui_with_layout(
         egui::vec2(ui.available_width(), PATH_H),
@@ -865,13 +946,11 @@ fn show_files_content(
                             state.dir_cache.remove(&path);
                             actions.push(EntryAction::Nav(path));
                         } else {
-                            state.cwd_sync_pending = Some(CwdSyncPending {
-                                started: Instant::now(),
-                                min_generation: 1,
-                            });
+                            // Never inject probe commands into the interactive PTY —
+                            // that would echo into the user's shell. Cwd is only known
+                            // when the remote shell passively reports OSC 7.
                             state.status_line =
-                                Some(i18n::t("bottom.files.sync_from_term.probing").into());
-                            send_cmd = Some(CWD_PROBE_CMD.to_string());
+                                Some(i18n::t("bottom.files.sync_from_term.failed").into());
                         }
                     }
                     if from_term.has_focus() {
@@ -971,6 +1050,11 @@ fn show_files_content(
 
     for act in actions {
         apply_entry_action(state, remote, act);
+    }
+    // Dismiss menus and wake so deferred rfd runs after a clean paint.
+    if state.pending_native_dialog.is_some() {
+        ui.ctx().memory_mut(|m| m.close_popup());
+        ui.ctx().request_repaint();
     }
 
     if commit_path || do_refresh {
@@ -1483,11 +1567,10 @@ fn apply_entry_action(
             state.inline_rename = None;
         }
         EntryAction::Download { names } => {
-            if names.len() == 1 {
-                prompt_download(state, remote, &names[0]);
-            } else {
-                prompt_download_selection(state, remote, names);
-            }
+            state.pending_native_dialog = Some(PendingNativeDialog {
+                menu_closed_painted: false,
+                kind: NativeDialogKind::Download { names },
+            });
         }
         EntryAction::NewFolder => {
             create_remote_folder(state, remote);
@@ -1496,11 +1579,67 @@ fn apply_entry_action(
             create_remote_file(state, remote, ext, initial);
         }
         EntryAction::UploadFile => {
-            prompt_upload_file(state, remote);
+            state.pending_native_dialog = Some(PendingNativeDialog {
+                menu_closed_painted: false,
+                kind: NativeDialogKind::UploadFile,
+            });
         }
         EntryAction::UploadFolder => {
-            prompt_upload_folder(state, remote);
+            state.pending_native_dialog = Some(PendingNativeDialog {
+                menu_closed_painted: false,
+                kind: NativeDialogKind::UploadFolder,
+            });
         }
+    }
+}
+
+/// After the UI pass: arm a queued dialog once the menu has painted closed, or
+/// return it ready to open (blocking `rfd`). Called from `App::update` end.
+pub fn take_native_dialog_after_paint(
+    state: &mut BottomPanelState,
+) -> Option<NativeDialogKind> {
+    let Some(pending) = state.pending_native_dialog.take() else {
+        return None;
+    };
+    if !pending.menu_closed_painted {
+        state.pending_native_dialog = Some(PendingNativeDialog {
+            menu_closed_painted: true,
+            kind: pending.kind,
+        });
+        None
+    } else {
+        Some(pending.kind)
+    }
+}
+
+/// Drop a closed host's stashed file-browser state so `dir_cache` does not
+/// accumulate for tabs that will never be reopened.
+pub fn forget_saved_host(state: &mut BottomPanelState, host_key: &str) {
+    state.saved.remove(host_key);
+    if state.bound_key.as_deref() == Some(host_key) {
+        state.bound_key = None;
+    }
+}
+
+pub fn has_pending_native_dialog(state: &BottomPanelState) -> bool {
+    state.pending_native_dialog.is_some()
+}
+
+pub fn run_native_dialog(
+    state: &mut BottomPanelState,
+    remote: Option<&RemoteSession>,
+    kind: NativeDialogKind,
+) {
+    match kind {
+        NativeDialogKind::Download { names } => {
+            if names.len() == 1 {
+                prompt_download(state, remote, &names[0]);
+            } else {
+                prompt_download_selection(state, remote, names);
+            }
+        }
+        NativeDialogKind::UploadFile => prompt_upload_file(state, remote),
+        NativeDialogKind::UploadFolder => prompt_upload_folder(state, remote),
     }
 }
 

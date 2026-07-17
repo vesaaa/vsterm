@@ -368,6 +368,13 @@ impl ConnectionManager {
             && (conn.is_local_shell || conn.remote.is_none())
     }
 
+    /// `user@host` key used by the file panel stash, if this tab had SFTP.
+    pub fn remote_display_key(&self, id: ConnectionId) -> Option<String> {
+        let conns = self.connections.lock();
+        let conn = conns.get(&id)?;
+        conn.remote.as_ref().map(|r| r.display_key())
+    }
+
     pub fn close(&self, id: ConnectionId) {
         let removed = self.connections.lock().remove(&id);
         self.order.lock().retain(|x| *x != id);

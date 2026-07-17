@@ -37,6 +37,7 @@ regex = { workspace = true }
 once_cell = { workspace = true }
 arboard = { workspace = true }
 iconflow = { workspace = true }
+mimalloc = { workspace = true }
 
 [build-dependencies]
 winres = "0.1"
