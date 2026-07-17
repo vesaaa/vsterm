@@ -30,6 +30,7 @@ pub use remote_fs::{
 };
 pub use ssh_ident::probe_ssh_software_ident;
 pub use user_error::{ConnErrorKey, ConnectFailure};
+pub use term_core::{ZmodemBridge, ZmodemStatus};
 
 pub mod russh_backend;
 pub use russh_backend::RusshBackend;

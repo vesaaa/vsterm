@@ -5892,12 +5892,14 @@ dependencies = [
  "anyhow",
  "bytes",
  "chrono",
+ "dirs",
  "parking_lot",
  "portable-pty",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "zmodem2",
 ]
 
 [[package]]
@@ -7664,6 +7666,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "zmodem2"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "150fc94907268863d0b20d505210665e600b016f16a5abc2f4fd233cc4ac6681"
+dependencies = [
+ "bitflags 2.13.0",
+ "hex",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

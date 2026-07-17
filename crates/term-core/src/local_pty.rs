@@ -1,5 +1,6 @@
 use crate::error::TermError;
 use crate::terminal::TerminalHandle;
+use crate::zmodem::ZmodemBridge;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
@@ -17,6 +18,7 @@ pub struct LocalPtySession {
     alive: Arc<AtomicBool>,
     reader_thread: Option<JoinHandle<()>>,
     child_killer: Option<Box<dyn ChildKiller + Send + Sync>>,
+    zmodem: Arc<ZmodemBridge>,
 }
 
 impl LocalPtySession {
@@ -52,6 +54,7 @@ impl LocalPtySession {
         let killer = child.clone_killer();
 
         let terminal = TerminalHandle::new(cols, rows);
+        let zmodem = Arc::new(ZmodemBridge::new());
         let mut reader = pair
             .master
             .try_clone_reader()
@@ -64,6 +67,9 @@ impl LocalPtySession {
         let alive = Arc::new(AtomicBool::new(true));
         let alive_reader = Arc::clone(&alive);
         let term_reader = terminal.clone();
+        let writer_slot = Arc::new(Mutex::new(Some(writer)));
+        let writer_for_reader = Arc::clone(&writer_slot);
+        let zmodem_reader = Arc::clone(&zmodem);
 
         let reader_thread = thread::Builder::new()
             .name("vsterm-pty-reader".into())
@@ -72,7 +78,19 @@ impl LocalPtySession {
                 while alive_reader.load(Ordering::SeqCst) {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
-                        Ok(n) => term_reader.advance_bytes(&buf[..n]),
+                        Ok(n) => {
+                            let rx = zmodem_reader.on_rx(&buf[..n]);
+                            if !rx.to_wire.is_empty() {
+                                let mut guard = writer_for_reader.lock();
+                                if let Some(w) = guard.as_mut() {
+                                    let _ = w.write_all(&rx.to_wire);
+                                    let _ = w.flush();
+                                }
+                            }
+                            if !rx.to_terminal.is_empty() {
+                                term_reader.advance_bytes(&rx.to_terminal);
+                            }
+                        }
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                         // Closing the PTY (Drop/shutdown) unblocks read with an error on Windows.
                         Err(_) => break,
@@ -87,11 +105,12 @@ impl LocalPtySession {
 
         Ok(Self {
             terminal,
-            writer: Arc::new(Mutex::new(Some(writer))),
+            writer: writer_slot,
             master: Arc::new(Mutex::new(Some(pair.master))),
             alive,
             reader_thread: Some(reader_thread),
             child_killer: Some(killer),
+            zmodem,
         })
     }
 
@@ -99,11 +118,30 @@ impl LocalPtySession {
         &self.terminal
     }
 
+    pub fn zmodem(&self) -> &Arc<ZmodemBridge> {
+        &self.zmodem
+    }
+
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
     }
 
     pub fn write_all(&self, data: &[u8]) -> Result<(), TermError> {
+        if !self.is_alive() {
+            return Err(TermError::NotRunning);
+        }
+        if self.zmodem.is_transferring() {
+            return Ok(());
+        }
+        let mut guard = self.writer.lock();
+        let writer = guard.as_mut().ok_or(TermError::NotRunning)?;
+        writer.write_all(data).map_err(TermError::from)?;
+        writer.flush().map_err(TermError::from)?;
+        Ok(())
+    }
+
+    /// Write raw bytes even during a transfer (protocol ACKs / cancel).
+    pub fn write_raw(&self, data: &[u8]) -> Result<(), TermError> {
         if !self.is_alive() {
             return Err(TermError::NotRunning);
         }
