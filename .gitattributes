@@ -1,0 +1,5 @@
+# Shell integration scripts are embedded into remote SSH bootstraps.
+# Force LF so Windows checkouts / builds never bake CRLF into remote bash.
+assets/shell/** text eol=lf
+*.sh text eol=lf
+*.fish text eol=lf
