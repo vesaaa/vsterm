@@ -285,6 +285,12 @@ fn read_font_file(path: &Path, index: u32) -> Option<FontData> {
     if bytes.len() < 64 {
         return None;
     }
+    tracing::info!(
+        "fonts: loaded system face {} ({} KB, ttc_index={})",
+        path.display(),
+        bytes.len() / 1024,
+        index
+    );
     let mut data = FontData::from_owned(bytes);
     data.index = index;
     Some(data)
