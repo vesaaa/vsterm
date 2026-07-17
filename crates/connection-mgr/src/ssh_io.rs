@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use term_core::TerminalHandle;
+use term_core::{TerminalHandle, ZmodemBridge};
 
 /// Keeps SSH shell channel I/O alive and feeds the terminal grid.
 pub struct SshIoSession {
@@ -17,6 +17,7 @@ pub struct SshIoSession {
     alive: Arc<AtomicBool>,
     reader_thread: Option<JoinHandle<()>>,
     resize: Option<Arc<dyn Fn(u16, u16) -> Result<(), ConnError> + Send + Sync>>,
+    zmodem: Arc<ZmodemBridge>,
 }
 
 impl SshIoSession {
@@ -29,13 +30,21 @@ impl SshIoSession {
         initial_output: Vec<u8>,
     ) -> Result<Self, ConnError> {
         let terminal = TerminalHandle::new(cols, rows);
+        let zmodem = Arc::new(ZmodemBridge::new());
         if !initial_output.is_empty() {
-            terminal.advance_bytes(&initial_output);
+            // Initial banner is plain text — still run through the gate in case
+            // a transfer was already mid-flight (unlikely on fresh connect).
+            let rx = zmodem.on_rx(&initial_output);
+            if !rx.to_terminal.is_empty() {
+                terminal.advance_bytes(&rx.to_terminal);
+            }
         }
         let alive = Arc::new(AtomicBool::new(true));
         let alive_reader = Arc::clone(&alive);
         let term_reader = terminal.clone();
         let writer_slot = Arc::new(Mutex::new(Some(writer)));
+        let writer_for_reader = Arc::clone(&writer_slot);
+        let zmodem_reader = Arc::clone(&zmodem);
 
         let reader_thread = thread::Builder::new()
             .name("vsterm-ssh-reader".into())
@@ -45,7 +54,19 @@ impl SshIoSession {
                 while alive_reader.load(Ordering::SeqCst) {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
-                        Ok(n) => term_reader.advance_bytes(&buf[..n]),
+                        Ok(n) => {
+                            let rx = zmodem_reader.on_rx(&buf[..n]);
+                            if !rx.to_wire.is_empty() {
+                                let mut guard = writer_for_reader.lock();
+                                if let Some(w) = guard.as_mut() {
+                                    let _ = w.write_all(&rx.to_wire);
+                                    let _ = w.flush();
+                                }
+                            }
+                            if !rx.to_terminal.is_empty() {
+                                term_reader.advance_bytes(&rx.to_terminal);
+                            }
+                        }
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                         // The russh PipeReader already waits up to 20 ms for
                         // data. Sleeping after a timeout creates an avoidable
@@ -64,6 +85,7 @@ impl SshIoSession {
             alive,
             reader_thread: Some(reader_thread),
             resize,
+            zmodem,
         })
     }
 
@@ -71,11 +93,31 @@ impl SshIoSession {
         &self.terminal
     }
 
+    pub fn zmodem(&self) -> &Arc<ZmodemBridge> {
+        &self.zmodem
+    }
+
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
     }
 
     pub fn write_all(&self, data: &[u8]) -> Result<(), ConnError> {
+        if !self.is_alive() {
+            return Err(ConnError::NotConnected);
+        }
+        // Drop keystrokes while a ZMODEM session owns the channel.
+        if self.zmodem.is_transferring() {
+            return Ok(());
+        }
+        let mut guard = self.writer.lock();
+        let writer = guard.as_mut().ok_or(ConnError::NotConnected)?;
+        writer.write_all(data).map_err(ConnError::Io)?;
+        writer.flush().map_err(ConnError::Io)?;
+        Ok(())
+    }
+
+    /// Write raw bytes even during a transfer (protocol ACKs / cancel).
+    pub fn write_raw(&self, data: &[u8]) -> Result<(), ConnError> {
         if !self.is_alive() {
             return Err(ConnError::NotConnected);
         }

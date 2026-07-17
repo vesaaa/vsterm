@@ -12,7 +12,7 @@ use crate::panels::session_tree_panel::{self, TreeSelection};
 use crate::panels::{connection_list, monitor, routes, status_bar, toolbar};
 use crate::terminal_view::TerminalView;
 use crate::{fonts, theme};
-use connection_mgr::{ConnectFailure, ConnectionManager, ConnError, ConnErrorKey};
+use connection_mgr::{ConnectFailure, ConnectionManager, ConnError, ConnErrorKey, ZmodemStatus};
 use eframe::egui;
 use session_tree::{AppPaths, SessionConfig, SessionStore, SessionTree, TreeNode};
 use std::collections::HashMap;
@@ -100,6 +100,14 @@ pub struct VsTermApp {
     spit_measuring: bool,
     /// Central (terminal) region from the last frame — shatter shards disperse here.
     last_central_rect: Option<egui::Rect>,
+    /// Deferred OS file picker for remote `rz` (ZMODEM upload).
+    pending_zmodem_pick: Option<ZmodemPickPhase>,
+}
+
+/// Two-phase arming so the picker opens after a clean paint (same idea as SFTP).
+enum ZmodemPickPhase {
+    Arm,
+    Open,
 }
 
 impl VsTermApp {
@@ -169,6 +177,7 @@ impl VsTermApp {
             pending_spit_from: None,
             spit_measuring: false,
             last_central_rect: None,
+            pending_zmodem_pick: None,
         }
     }
 
@@ -1273,7 +1282,16 @@ impl eframe::App for VsTermApp {
         let auth_animating = self.auth_prompt.is_some()
             || self.pending_spit_auth.is_some()
             || self.fx.is_active();
-        let transfer_active = bottom_panel::needs_transfer_poll(&self.bottom);
+        let transfer_active = bottom_panel::needs_transfer_poll(&self.bottom)
+            || matches!(
+                self.connections.active_zmodem_status(),
+                Some(
+                    ZmodemStatus::Receiving { .. }
+                        | ZmodemStatus::Sending { .. }
+                        | ZmodemStatus::AwaitingUpload
+                )
+            );
+        self.poll_zmodem();
         // Remote metrics share the same SSH session/runtime as the interactive
         // shell and SFTP. Keep collecting only when the UI needs it *and* no
         // transfer is saturating the session — otherwise typing echo waits
@@ -1535,11 +1553,23 @@ impl eframe::App for VsTermApp {
         });
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            let zmodem_busy = matches!(
+                self.connections.active_zmodem_status(),
+                Some(
+                    ZmodemStatus::Receiving { .. }
+                        | ZmodemStatus::Sending { .. }
+                        | ZmodemStatus::AwaitingUpload
+                )
+            );
             status_bar::show(
                 ui,
                 &self.status,
                 self.connections.list_meta().len(),
                 crate::render_policy::is_software_renderer(),
+                zmodem_busy,
+                || {
+                    let _ = self.connections.cancel_zmodem();
+                },
             );
         });
 
@@ -1896,6 +1926,101 @@ impl eframe::App for VsTermApp {
             }
             None => {}
         }
+
+        match self.pending_zmodem_pick.take() {
+            Some(ZmodemPickPhase::Arm) => {
+                self.pending_zmodem_pick = Some(ZmodemPickPhase::Open);
+                ctx.request_repaint();
+            }
+            Some(ZmodemPickPhase::Open) => {
+                let paths = rfd::FileDialog::new()
+                    .set_title(i18n::t("zmodem.pick_title"))
+                    .pick_files()
+                    .unwrap_or_default();
+                match self.connections.provide_zmodem_upload(paths) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        self.status = format!("ZMODEM: {err}");
+                    }
+                }
+                ctx.request_repaint();
+            }
+            None => {}
+        }
+    }
+}
+
+impl VsTermApp {
+    fn poll_zmodem(&mut self) {
+        match self.connections.active_zmodem_status() {
+            Some(ZmodemStatus::Receiving {
+                file_name,
+                bytes,
+                total,
+            }) => {
+                self.status =
+                    format_zmodem_progress(i18n::t("zmodem.receiving"), &file_name, bytes, total);
+                self.pending_zmodem_pick = None;
+            }
+            Some(ZmodemStatus::Sending {
+                file_name,
+                bytes,
+                total,
+            }) => {
+                self.status =
+                    format_zmodem_progress(i18n::t("zmodem.sending"), &file_name, bytes, total);
+                self.pending_zmodem_pick = None;
+            }
+            Some(ZmodemStatus::AwaitingUpload) => {
+                self.status = i18n::t("zmodem.await_upload");
+                if self.pending_zmodem_pick.is_none() {
+                    self.pending_zmodem_pick = Some(ZmodemPickPhase::Arm);
+                }
+            }
+            Some(ZmodemStatus::Done { summary }) => {
+                self.status = summary;
+                self.connections.clear_zmodem_finished();
+                self.pending_zmodem_pick = None;
+            }
+            Some(ZmodemStatus::Failed { message }) => {
+                self.status = message;
+                self.connections.clear_zmodem_finished();
+                self.pending_zmodem_pick = None;
+            }
+            Some(ZmodemStatus::Idle) | None => {
+                // Drop a stale Arm if the await went away before Open ran.
+                if matches!(self.pending_zmodem_pick, Some(ZmodemPickPhase::Arm)) {
+                    self.pending_zmodem_pick = None;
+                }
+            }
+        }
+    }
+}
+
+fn format_zmodem_progress(kind: String, name: &str, bytes: u64, total: Option<u64>) -> String {
+    let name = if name.is_empty() { "…" } else { name };
+    match total {
+        Some(t) if t > 0 => {
+            let pct = ((bytes as f64 / t as f64) * 100.0).clamp(0.0, 100.0);
+            format!("{kind}: {name}  {}/{}  ({pct:.0}%)", fmt_bytes(bytes), fmt_bytes(t))
+        }
+        _ => format!("{kind}: {name}  {}", fmt_bytes(bytes)),
+    }
+}
+
+fn fmt_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let n = n as f64;
+    if n >= GB {
+        format!("{:.2} GB", n / GB)
+    } else if n >= MB {
+        format!("{:.1} MB", n / MB)
+    } else if n >= KB {
+        format!("{:.0} KB", n / KB)
+    } else {
+        format!("{n:.0} B")
     }
 }
 

@@ -1,13 +1,14 @@
-use crate::error::ConnError;
+﻿use crate::error::ConnError;
 use crate::remote_exec::RemoteSession;
 use crate::russh_backend::RusshBackend;
 use crate::ssh_io::SshIoSession;
 use parking_lot::Mutex;
 use session_tree::SessionConfig;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use term_core::{LocalPtySession, OutputHook, TerminalHandle};
+use term_core::{LocalPtySession, OutputHook, TerminalHandle, ZmodemBridge, ZmodemStatus};
 use uuid::Uuid;
 use vault::Vault;
 
@@ -59,12 +60,28 @@ impl ConnectionIo {
         }
     }
 
+    fn zmodem(&self) -> &Arc<ZmodemBridge> {
+        match self {
+            Self::Local(p) => p.zmodem(),
+            Self::Ssh(s) => s.zmodem(),
+        }
+    }
+
     fn write_input(&self, data: &[u8]) -> Result<(), ConnError> {
         match self {
             Self::Local(p) => p
                 .write_all(data)
                 .map_err(|e| ConnError::Term(e.to_string())),
             Self::Ssh(s) => s.write_all(data),
+        }
+    }
+
+    fn write_raw(&self, data: &[u8]) -> Result<(), ConnError> {
+        match self {
+            Self::Local(p) => p
+                .write_raw(data)
+                .map_err(|e| ConnError::Term(e.to_string())),
+            Self::Ssh(s) => s.write_raw(data),
         }
     }
 
@@ -420,6 +437,52 @@ impl ConnectionManager {
         let conns = self.connections.lock();
         let conn = conns.get(&id).ok_or(ConnError::NotConnected)?;
         conn.write_input(data)
+    }
+
+    /// ZMODEM status for the active tab, if connected.
+    pub fn active_zmodem_status(&self) -> Option<ZmodemStatus> {
+        let id = self.active_id()?;
+        let conns = self.connections.lock();
+        let conn = conns.get(&id)?;
+        let io = conn.io.as_ref()?;
+        Some(io.zmodem().status())
+    }
+
+    /// Provide local files for a pending remote `rz` upload on the active tab.
+    pub fn provide_zmodem_upload(&self, paths: Vec<PathBuf>) -> Result<(), String> {
+        let id = self.active_id().ok_or_else(|| "not connected".to_string())?;
+        let conns = self.connections.lock();
+        let conn = conns.get(&id).ok_or_else(|| "not connected".to_string())?;
+        let io = conn.io.as_ref().ok_or_else(|| "not connected".to_string())?;
+        let wire = io.zmodem().provide_upload_files(paths)?;
+        if !wire.is_empty() {
+            io.write_raw(&wire)
+                .map_err(|e| format!("zmodem write: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Cancel an in-flight ZMODEM transfer on the active tab.
+    pub fn cancel_zmodem(&self) -> Result<(), ConnError> {
+        let id = self.active_id().ok_or(ConnError::NotConnected)?;
+        let conns = self.connections.lock();
+        let conn = conns.get(&id).ok_or(ConnError::NotConnected)?;
+        let io = conn.io.as_ref().ok_or(ConnError::NotConnected)?;
+        let wire = io.zmodem().cancel();
+        io.write_raw(&wire)
+    }
+
+    /// Clear Done/Failed ZMODEM status text on the active tab.
+    pub fn clear_zmodem_finished(&self) {
+        let Some(id) = self.active_id() else {
+            return;
+        };
+        let conns = self.connections.lock();
+        if let Some(conn) = conns.get(&id) {
+            if let Some(io) = conn.io.as_ref() {
+                io.zmodem().clear_finished_status();
+            }
+        }
     }
 
     /// Interactive PTY cwd from OSC 7 (`path`, `generation`), if known.
