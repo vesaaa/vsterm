@@ -1,12 +1,14 @@
 use connection_mgr::ConnectionManager;
 use connection_mgr::ConnectionState;
-use egui::{Color32, FontId, Id, PointerButton, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{Align2, Color32, FontId, Id, PointerButton, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use std::sync::Arc;
 use term_core::{CellAttr, FoldControl, FoldGuide, Rgb, TerminalSnapshot};
 
 const CELL_W: f32 = 8.4;
 const CELL_H: f32 = 16.0;
 const TERM_BG: Color32 = Color32::BLACK;
+/// Solid amber block cursor, matching the product reference.
+const CURSOR_COLOR: Color32 = Color32::from_rgb(255, 183, 0);
 const SCROLL_W: f32 = 12.0;
 /// Left chrome: `[HH:MM:SS]` + lineno + fold control (WindTerm-style).
 const GUTTER_TIME_CHARS: f32 = 10.0;
@@ -279,7 +281,7 @@ impl TerminalView {
                 ui.painter().rect_filled(
                     cursor_rect,
                     0.0,
-                    Color32::from_rgba_unmultiplied(248, 248, 242, 160),
+                    CURSOR_COLOR,
                 );
             }
         }
@@ -519,43 +521,32 @@ fn paint_terminal_run(
     }
 
     let row_y = row as f32 * CELL_H;
-    for c in col..run_end {
-        let cell_rect = Rect::from_min_size(
-            grid_rect.min + Vec2::new(c as f32 * CELL_W, row_y),
-            Vec2::new(CELL_W, CELL_H),
+    // Background can be one rect for the whole run; glyphs must be pinned to
+    // cell columns. A single LayoutJob uses the font's natural advances, which
+    // diverge from CELL_W and make the block cursor drift away from the last
+    // character as the line grows — that is not how a grid terminal works.
+    let run_rect = Rect::from_min_size(
+        grid_rect.min + Vec2::new(col as f32 * CELL_W, row_y),
+        Vec2::new((run_end - col) as f32 * CELL_W, CELL_H),
+    );
+    if key.selected {
+        ui.painter().rect_filled(
+            run_rect,
+            0.0,
+            Color32::from_rgba_unmultiplied(70, 130, 210, 140),
         );
-        if key.selected {
-            ui.painter().rect_filled(
-                cell_rect,
-                0.0,
-                Color32::from_rgba_unmultiplied(70, 130, 210, 140),
-            );
-        } else if key.bg != TERM_BG {
-            ui.painter().rect_filled(cell_rect, 0.0, key.bg);
-        }
+    } else if key.bg != TERM_BG {
+        ui.painter().rect_filled(run_rect, 0.0, key.bg);
     }
 
-    let mut glyphs = String::with_capacity(run_end - col);
-    let mut visible = false;
+    let painter = ui.painter();
     for c in col..run_end {
         let ch = snapshot.cells[row * snapshot.cols + c].ch;
-        glyphs.push(ch);
-        if ch != ' ' {
-            visible = true;
+        if ch == ' ' {
+            continue;
         }
-    }
-    if visible {
-        let cell_rect = Rect::from_min_size(
-            grid_rect.min + Vec2::new(col as f32 * CELL_W, row_y),
-            Vec2::new((run_end - col) as f32 * CELL_W, CELL_H),
-        );
-        ui.painter().text(
-            cell_rect.left_top() + Vec2::new(0.0, 1.0),
-            egui::Align2::LEFT_TOP,
-            glyphs,
-            font.clone(),
-            key.fg,
-        );
+        let pos = grid_rect.min + Vec2::new(c as f32 * CELL_W, row_y + 1.0);
+        painter.text(pos, Align2::LEFT_TOP, ch, font.clone(), key.fg);
     }
     run_end
 }
