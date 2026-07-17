@@ -1,4 +1,4 @@
-﻿# Embedded fonts
+# Embedded fonts
 
 | File | Source | License | When embedded |
 |------|--------|---------|---------------|

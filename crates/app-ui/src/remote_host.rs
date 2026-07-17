@@ -43,8 +43,8 @@ for f in /etc/openwrt_release /rom/etc/openwrt_release; do
   echo OPENWRT=1
   grep -E '^(DISTRIB_ID|DISTRIB_DESCRIPTION|DISTRIB_RELEASE)=' "$f" 2>/dev/null || true
 done
-# Asuswrt-Merlin / 官改 / Koolshare 梅林改版：通常无标准 os-release。
-# 社区判定：uname -o 含 Merlin、/koolshare、或 nvram + productid/buildno。
+# Asuswrt-Merlin / Koolshare forks often lack a standard os-release.
+# Heuristics: uname -o contains Merlin, /koolshare present, or nvram productid/buildno.
 case "`uname -o 2>/dev/null`" in *[Mm]erlin*) echo MERLIN=1 ;; esac
 [ -d /koolshare ] && echo MERLIN=1
 [ -d /jffs/koolshare ] && echo MERLIN=1
@@ -1044,5 +1044,19 @@ VSTERM_END
             "PRETTY_NAME=\"openEuler 22.03\"",
         ];
         assert_eq!(parse_osrel_section(&lines).as_deref(), Some("openeuler"));
+    }
+
+    #[test]
+    fn metrics_cmd_is_posix_safe() {
+        assert!(
+            !METRICS_CMD.contains('\r'),
+            "METRICS_CMD must not contain CR (Windows CRLF breaks remote sh)"
+        );
+        assert!(
+            METRICS_CMD.is_ascii(),
+            "METRICS_CMD must stay ASCII so LC_ALL=C remotes never see multibyte comments"
+        );
+        assert!(METRICS_CMD.contains("VSTERM_BEGIN"));
+        assert!(METRICS_CMD.contains("export LC_ALL=C"));
     }
 }

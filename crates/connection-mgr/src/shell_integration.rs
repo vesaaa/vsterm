@@ -17,12 +17,17 @@ pub(crate) fn remote_bootstrap_command() -> String {
 }
 
 fn bootstrap_script(nonce: &str) -> String {
-    let posix = shell_single_quote(POSIX_INTEGRATION);
-    let fish = shell_single_quote(FISH_INTEGRATION);
+    // Windows checkouts / builds may embed CRLF via autocrlf. Remote POSIX shells
+    // treat `\r` as syntax (`do\r`, `$'\r': command not found`), so always emit LF.
+    use crate::posix_text::normalize_unix_newlines;
+
+    let posix = shell_single_quote(&normalize_unix_newlines(POSIX_INTEGRATION));
+    let fish = shell_single_quote(&normalize_unix_newlines(FISH_INTEGRATION));
     let nonce = shell_single_quote(nonce);
 
-    format!(
-        r#"umask 077
+    normalize_unix_newlines(
+        &format!(
+            r#"umask 077
 _vsterm_shell=${{SHELL:-/bin/sh}}
 _vsterm_name=`basename "$_vsterm_shell" 2>/dev/null || echo sh`
 _vsterm_tmp=`mktemp -d "${{TMPDIR:-/tmp}}/vsterm-shell.XXXXXXXX" 2>/dev/null` || {{
@@ -83,6 +88,7 @@ _vsterm_cleanup
 trap - EXIT HUP INT TERM
 exit "$_vsterm_status"
 "#
+        ),
     )
 }
 
@@ -109,5 +115,17 @@ mod tests {
         assert!(command.contains("fish)"));
         assert!(!command.contains(".bashrc\" >>"));
         assert!(!command.contains(".zshrc\" >>"));
+    }
+
+    #[test]
+    fn bootstrap_emits_unix_newlines_only() {
+        let command = remote_bootstrap_command();
+        assert!(
+            !command.contains('\r'),
+            "remote bootstrap must not contain CR (Windows CRLF breaks bash on Linux)"
+        );
+        assert!(command.contains('\n'));
+        assert!(command.contains("for __vsterm_rc in"));
+        assert!(!command.contains("do\r"));
     }
 }

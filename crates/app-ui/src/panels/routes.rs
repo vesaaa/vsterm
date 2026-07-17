@@ -832,4 +832,18 @@ __VSTERM_RULES__
         assert!(p.rules.is_empty());
         assert_eq!(p.ipv4.len(), 1);
     }
+
+    #[test]
+    fn remote_routes_cmd_is_posix_safe() {
+        assert!(
+            !REMOTE_ROUTES_CMD.contains('\r'),
+            "REMOTE_ROUTES_CMD must not contain CR (Windows CRLF breaks remote sh)"
+        );
+        assert!(
+            REMOTE_ROUTES_CMD.is_ascii(),
+            "REMOTE_ROUTES_CMD must stay ASCII for remote BusyBox/sh"
+        );
+        assert!(REMOTE_ROUTES_CMD.contains("__VSTERM_ROUTES4__"));
+        assert!(REMOTE_ROUTES_CMD.contains("export LC_ALL=C"));
+    }
 }
