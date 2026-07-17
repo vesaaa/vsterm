@@ -15,7 +15,9 @@ use crate::TermError;
 /// Invoked (possibly from a PTY reader thread) after the grid accepts new bytes.
 pub type OutputHook = Arc<dyn Fn() + Send + Sync>;
 
-const SCROLLBACK_LINES: usize = 10_000;
+/// Default scrollback depth. 10k lines of a wide grid can cost ~40–50 MB per
+/// busy session; 5k keeps useful history while roughly halving that ceiling.
+const SCROLLBACK_LINES: usize = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb {

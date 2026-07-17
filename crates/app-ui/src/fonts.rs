@@ -1,14 +1,15 @@
-//! Cross-platform UI fonts: OS native CJK on Windows/macOS; embed only on Linux.
+//! Cross-platform UI fonts: prefer compact CJK sources to keep RSS down.
 //!
-//! | Platform | UI proportional                         | Terminal mono        |
-//! |----------|-----------------------------------------|----------------------|
-//! | Windows  | Microsoft YaHei Light (`msyhl.ttc`)     | JetBrains Mono       |
-//! | macOS    | PingFang SC / Heiti SC Light            | JetBrains Mono       |
-//! | Linux    | System Noto CJK when present, else embed| JetBrains Mono       |
+//! | Platform | UI proportional                                      | Terminal mono  |
+//! |----------|------------------------------------------------------|----------------|
+//! | Windows  | Compact system CJK if small enough, else embedded    | JetBrains Mono |
+//! | macOS    | Compact system CJK if small enough, else embedded    | JetBrains Mono |
+//! | Linux    | System Noto CJK when compact, else embedded          | JetBrains Mono |
 //!
-//! Noto Sans SC Light is embedded **only on Linux** so Windows/macOS builds stay small.
-//! Loading system fonts for local rendering (not redistributing them) matches normal
-//! desktop-app practice.
+//! Large system TTCs (YaHei / PingFang / Noto CJK collections, often 11–40 MB)
+//! used to be `fs::read` wholesale into the process heap. egui needs the bytes
+//! resident, so we cap system font loads and fall back to the ~8 MB embedded
+//! Noto Sans SC Light subset instead of keeping a 20 MB+ TTC in RAM.
 
 use egui::{FontData, FontDefinitions, FontFamily, FontId, TextStyle};
 use std::path::{Path, PathBuf};
@@ -17,14 +18,19 @@ use std::sync::Arc;
 const JETBRAINS_MONO_REGULAR: &[u8] =
     include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
 
-#[cfg(target_os = "linux")]
+/// Compact SC subset (~8 MB). Used on every platform when the OS CJK file is
+/// missing or too large to keep resident for the whole process lifetime.
 const NOTO_SANS_SC_LIGHT: &[u8] =
     include_bytes!("../../../assets/fonts/NotoSansSC-Light.otf");
 
 const FAMILY_UI: &str = "VsTermUI";
 const FAMILY_MONO: &str = "JetBrainsMono";
-#[cfg(target_os = "linux")]
 const FAMILY_FALLBACK_CJK: &str = "NotoSansSC-Light";
+
+/// Skip system font files larger than the embedded subset. Loading YaHei /
+/// PingFang TTCs (often 11–40 MB) into `FontData` is the main controllable RSS
+/// spike on Windows/macOS cold start.
+const MAX_SYSTEM_UI_FONT_BYTES: u64 = NOTO_SANS_SC_LIGHT.len() as u64;
 
 pub fn install(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
@@ -34,52 +40,38 @@ pub fn install(ctx: &egui::Context) {
         Arc::new(FontData::from_static(JETBRAINS_MONO_REGULAR)),
     );
 
-    #[cfg(target_os = "linux")]
-    {
-        fonts.font_data.insert(
-            FAMILY_FALLBACK_CJK.to_owned(),
-            Arc::new(FontData::from_static(NOTO_SANS_SC_LIGHT)),
-        );
-    }
-
     let default_proportional = fonts
         .families
         .get(&FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
 
-    let (ui_source, ui_family) = match load_platform_ui_font() {
+    let (ui_source, ui_family, register_embedded_fallback) = match load_platform_ui_font() {
         Some((label, data)) => {
             fonts
                 .font_data
                 .insert(FAMILY_UI.to_owned(), Arc::new(data));
-            (label, Some(FAMILY_UI.to_owned()))
+            // System face already covers CJK — do not also keep the 8 MB embed.
+            (label, Some(FAMILY_UI.to_owned()), false)
         }
-        None => {
-            #[cfg(target_os = "linux")]
-            {
-                (
-                    "embedded Noto Sans SC Light".into(),
-                    Some(FAMILY_FALLBACK_CJK.to_owned()),
-                )
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                ("egui default (no system CJK font found)".into(), None)
-            }
-        }
+        None => (
+            "embedded Noto Sans SC Light".into(),
+            Some(FAMILY_FALLBACK_CJK.to_owned()),
+            true,
+        ),
     };
+
+    if register_embedded_fallback {
+        fonts.font_data.insert(
+            FAMILY_FALLBACK_CJK.to_owned(),
+            Arc::new(FontData::from_static(NOTO_SANS_SC_LIGHT)),
+        );
+    }
 
     if let Some(ref ui) = ui_family {
         // Keep egui defaults behind the UI font so rare symbols (menu ▸ / emoji)
         // still resolve instead of rendering as `?`.
         let mut proportional = vec![ui.clone()];
-        #[cfg(target_os = "linux")]
-        {
-            if ui.as_str() != FAMILY_FALLBACK_CJK {
-                proportional.push(FAMILY_FALLBACK_CJK.to_owned());
-            }
-        }
         for name in &default_proportional {
             if !proportional.iter().any(|n| n == name) {
                 proportional.push(name.clone());
@@ -94,12 +86,6 @@ pub fn install(ctx: &egui::Context) {
     if let Some(ref ui) = ui_family {
         mono.push(ui.clone());
     }
-    #[cfg(target_os = "linux")]
-    {
-        if ui_family.as_deref() != Some(FAMILY_FALLBACK_CJK) {
-            mono.push(FAMILY_FALLBACK_CJK.to_owned());
-        }
-    }
     if ui_family.is_none() {
         // Still cover CJK (where possible) via egui's default proportional stack.
         mono.extend(default_proportional);
@@ -111,13 +97,15 @@ pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
     apply_text_styles(ctx);
 
-    #[cfg(target_os = "linux")]
     tracing::info!(
-        "fonts: UI={ui_source}; mono=JetBrains Mono; CJK fallback=Noto Sans SC Light ({} KB); icons=Lucide",
+        "fonts: UI={ui_source}; mono=JetBrains Mono; CJK={} ({} KB); icons=Lucide",
+        if register_embedded_fallback {
+            "embedded Noto Sans SC Light"
+        } else {
+            "system (compact)"
+        },
         NOTO_SANS_SC_LIGHT.len() / 1024
     );
-    #[cfg(not(target_os = "linux"))]
-    tracing::info!("fonts: UI={ui_source}; mono=JetBrains Mono; CJK=system only; icons=Lucide");
 }
 
 fn register_lucide_fonts(fonts: &mut FontDefinitions) {
@@ -182,6 +170,8 @@ fn load_windows_ui_font() -> Option<(String, FontData)> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
     let fonts_dir = windir.join("Fonts");
+    // Prefer light faces, but only if the file stays under the RSS budget.
+    // Typical `msyhl.ttc` / `msyh.ttc` are 11–21 MB and will be skipped.
     let candidates: &[(&str, u32, &str)] = &[
         ("msyhl.ttc", 0, "Microsoft YaHei Light"),
         ("msyhl.ttc", 1, "Microsoft YaHei UI Light"),
@@ -238,16 +228,22 @@ fn load_macos_ui_font() -> Option<(String, FontData)> {
 
 #[cfg(target_os = "linux")]
 fn load_linux_ui_font() -> Option<(String, FontData)> {
+    // Prefer single-language OTF subsets over multi-script TTC collections.
     let candidates: &[(&str, u32, &str)] = &[
-        (
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Light.ttc",
-            0,
-            "Noto Sans CJK Light",
-        ),
         (
             "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Light.otf",
             0,
             "Noto Sans CJK SC Light",
+        ),
+        (
+            "/usr/share/fonts/truetype/noto/NotoSansSC-Light.otf",
+            0,
+            "Noto Sans SC Light",
+        ),
+        (
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Light.ttc",
+            0,
+            "Noto Sans CJK Light",
         ),
         (
             "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Light.ttc",
@@ -258,11 +254,6 @@ fn load_linux_ui_font() -> Option<(String, FontData)> {
             "/usr/share/fonts/noto-cjk/NotoSansCJK-Light.ttc",
             0,
             "Noto Sans CJK Light",
-        ),
-        (
-            "/usr/share/fonts/truetype/noto/NotoSansSC-Light.otf",
-            0,
-            "Noto Sans SC Light",
         ),
     ];
     for (path, index, label) in candidates {
@@ -293,6 +284,20 @@ fn read_font_file(path: &Path, index: u32) -> Option<FontData> {
     if !path.is_file() {
         return None;
     }
+    let meta = std::fs::metadata(path).ok()?;
+    let len = meta.len();
+    if len < 64 {
+        return None;
+    }
+    if len > MAX_SYSTEM_UI_FONT_BYTES {
+        tracing::info!(
+            "fonts: skip {} ({} KB) — exceeds {} KB RSS budget; using embedded subset",
+            path.display(),
+            len / 1024,
+            MAX_SYSTEM_UI_FONT_BYTES / 1024
+        );
+        return None;
+    }
     let bytes = std::fs::read(path).ok()?;
     if bytes.len() < 64 {
         return None;
@@ -300,4 +305,25 @@ fn read_font_file(path: &Path, index: u32) -> Option<FontData> {
     let mut data = FontData::from_owned(bytes);
     data.index = index;
     Some(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_cjk_subset_is_compact() {
+        // Guard against accidentally shipping a full multi-script CJK TTC.
+        assert!(
+            NOTO_SANS_SC_LIGHT.len() <= 9 * 1024 * 1024,
+            "embedded CJK subset unexpectedly large: {} bytes",
+            NOTO_SANS_SC_LIGHT.len()
+        );
+        assert!(NOTO_SANS_SC_LIGHT.len() > 1024 * 1024);
+    }
+
+    #[test]
+    fn system_font_budget_matches_embedded_subset() {
+        assert_eq!(MAX_SYSTEM_UI_FONT_BYTES, NOTO_SANS_SC_LIGHT.len() as u64);
+    }
 }

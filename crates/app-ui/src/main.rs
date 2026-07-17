@@ -75,6 +75,9 @@ fn main() -> Result<()> {
             // makes DX12 WARP busy-wait across several worker threads after a
             // restored window, so it is unsuitable for supported RDP/VM use.
             present_mode: wgpu::PresentMode::AutoNoVsync,
+            // One buffered frame is enough for a UI; default latency keeps more
+            // swapchain images resident and inflates working set.
+            desired_maximum_frame_latency: Some(1),
             ..Default::default()
         },
         ..Default::default()
@@ -118,7 +121,25 @@ fn preferred_backends() -> wgpu::Backends {
 fn wgpu_setup() -> eframe::egui_wgpu::WgpuSetupCreateNew {
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::default();
     setup.instance_descriptor.backends = preferred_backends();
-    setup.power_preference = wgpu::PowerPreference::HighPerformance;
+    // Prefer integrated GPU when available — discrete adapters often reserve
+    // far more driver/working-set memory for an egui UI than we need.
+    setup.power_preference = wgpu::PowerPreference::LowPower;
+    setup.device_descriptor = std::sync::Arc::new(|adapter| {
+        let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+            wgpu::Limits::downlevel_webgl2_defaults()
+        } else {
+            wgpu::Limits::default()
+        };
+        wgpu::DeviceDescriptor {
+            label: Some("egui wgpu device"),
+            required_features: wgpu::Features::default(),
+            required_limits: wgpu::Limits {
+                max_texture_dimension_2d: 8192,
+                ..base_limits
+            },
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+        }
+    });
     setup.native_adapter_selector = Some(std::sync::Arc::new(|adapters, surface| {
         if adapters.is_empty() {
             return Err(
@@ -134,15 +155,27 @@ fn wgpu_setup() -> eframe::egui_wgpu::WgpuSetupCreateNew {
                 info.device_type
             );
         }
-        let hardware = adapters.iter().find(|a| {
-            let ty = a.get_info().device_type;
-            matches!(
-                ty,
-                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
-            ) && surface_ok(a, surface)
-        });
-        if let Some(adapter) = hardware {
+        // Integrated first (lower RSS), then discrete — still skip CPU unless
+        // nothing else can present to the surface.
+        let pick = |ty: wgpu::DeviceType| {
+            adapters.iter().find(|a| {
+                a.get_info().device_type == ty && surface_ok(a, surface)
+            })
+        };
+        if let Some(adapter) = pick(wgpu::DeviceType::IntegratedGpu) {
             render_policy::set_software_renderer(false);
+            tracing::info!(
+                "wgpu selected integrated GPU: {}",
+                adapter.get_info().name
+            );
+            return Ok(adapter.clone());
+        }
+        if let Some(adapter) = pick(wgpu::DeviceType::DiscreteGpu) {
+            render_policy::set_software_renderer(false);
+            tracing::info!(
+                "wgpu selected discrete GPU: {}",
+                adapter.get_info().name
+            );
             return Ok(adapter.clone());
         }
         let any_non_cpu = adapters.iter().find(|a| {
