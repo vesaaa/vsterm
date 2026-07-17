@@ -100,14 +100,25 @@ pub struct VsTermApp {
     spit_measuring: bool,
     /// Central (terminal) region from the last frame — shatter shards disperse here.
     last_central_rect: Option<egui::Rect>,
-    /// Deferred OS file picker for remote `rz` (ZMODEM upload).
-    pending_zmodem_pick: Option<ZmodemPickPhase>,
+    /// Deferred OS file picker for remote `rz` / `sz` (ZMODEM).
+    pending_zmodem_pick: Option<PendingZmodemPick>,
 }
 
 /// Two-phase arming so the picker opens after a clean paint (same idea as SFTP).
 enum ZmodemPickPhase {
     Arm,
     Open,
+}
+
+#[derive(Clone)]
+enum ZmodemPickKind {
+    Upload,
+    SaveAs { suggested_name: String },
+}
+
+struct PendingZmodemPick {
+    phase: ZmodemPickPhase,
+    kind: ZmodemPickKind,
 }
 
 impl VsTermApp {
@@ -1289,6 +1300,7 @@ impl eframe::App for VsTermApp {
                     ZmodemStatus::Receiving { .. }
                         | ZmodemStatus::Sending { .. }
                         | ZmodemStatus::AwaitingUpload
+                        | ZmodemStatus::AwaitingSaveAs { .. }
                 )
             );
         self.poll_zmodem();
@@ -1559,6 +1571,7 @@ impl eframe::App for VsTermApp {
                     ZmodemStatus::Receiving { .. }
                         | ZmodemStatus::Sending { .. }
                         | ZmodemStatus::AwaitingUpload
+                        | ZmodemStatus::AwaitingSaveAs { .. }
                 )
             );
             status_bar::show(
@@ -1928,16 +1941,44 @@ impl eframe::App for VsTermApp {
         }
 
         match self.pending_zmodem_pick.take() {
-            Some(ZmodemPickPhase::Arm) => {
-                self.pending_zmodem_pick = Some(ZmodemPickPhase::Open);
+            Some(PendingZmodemPick {
+                phase: ZmodemPickPhase::Arm,
+                kind,
+            }) => {
+                self.pending_zmodem_pick = Some(PendingZmodemPick {
+                    phase: ZmodemPickPhase::Open,
+                    kind,
+                });
                 ctx.request_repaint();
             }
-            Some(ZmodemPickPhase::Open) => {
+            Some(PendingZmodemPick {
+                phase: ZmodemPickPhase::Open,
+                kind: ZmodemPickKind::Upload,
+            }) => {
                 let paths = rfd::FileDialog::new()
                     .set_title(i18n::t("zmodem.pick_title"))
                     .pick_files()
                     .unwrap_or_default();
                 match self.connections.provide_zmodem_upload(paths) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        self.status = format!("ZMODEM: {err}");
+                    }
+                }
+                ctx.request_repaint();
+            }
+            Some(PendingZmodemPick {
+                phase: ZmodemPickPhase::Open,
+                kind: ZmodemPickKind::SaveAs { suggested_name },
+            }) => {
+                let mut dlg = rfd::FileDialog::new()
+                    .set_title(i18n::t("zmodem.save_title"))
+                    .set_file_name(&suggested_name);
+                if let Some(dir) = self.connections.active_zmodem_download_dir() {
+                    dlg = dlg.set_directory(dir);
+                }
+                let path = dlg.save_file();
+                match self.connections.provide_zmodem_download(path) {
                     Ok(()) => {}
                     Err(err) => {
                         self.status = format!("ZMODEM: {err}");
@@ -1974,7 +2015,37 @@ impl VsTermApp {
             Some(ZmodemStatus::AwaitingUpload) => {
                 self.status = i18n::t("zmodem.await_upload");
                 if self.pending_zmodem_pick.is_none() {
-                    self.pending_zmodem_pick = Some(ZmodemPickPhase::Arm);
+                    self.pending_zmodem_pick = Some(PendingZmodemPick {
+                        phase: ZmodemPickPhase::Arm,
+                        kind: ZmodemPickKind::Upload,
+                    });
+                }
+            }
+            Some(ZmodemStatus::AwaitingSaveAs {
+                suggested_name,
+                total,
+            }) => {
+                self.status = match total {
+                    Some(t) if t > 0 => format!(
+                        "{}: {} ({})",
+                        i18n::t("zmodem.await_save"),
+                        suggested_name,
+                        fmt_bytes(t)
+                    ),
+                    _ => format!("{}: {suggested_name}", i18n::t("zmodem.await_save")),
+                };
+                let already = matches!(
+                    &self.pending_zmodem_pick,
+                    Some(PendingZmodemPick {
+                        kind: ZmodemPickKind::SaveAs { suggested_name: n },
+                        ..
+                    }) if n == &suggested_name
+                );
+                if !already {
+                    self.pending_zmodem_pick = Some(PendingZmodemPick {
+                        phase: ZmodemPickPhase::Arm,
+                        kind: ZmodemPickKind::SaveAs { suggested_name },
+                    });
                 }
             }
             Some(ZmodemStatus::Done { summary }) => {
@@ -1988,8 +2059,13 @@ impl VsTermApp {
                 self.pending_zmodem_pick = None;
             }
             Some(ZmodemStatus::Idle) | None => {
-                // Drop a stale Arm if the await went away before Open ran.
-                if matches!(self.pending_zmodem_pick, Some(ZmodemPickPhase::Arm)) {
+                if matches!(
+                    self.pending_zmodem_pick,
+                    Some(PendingZmodemPick {
+                        phase: ZmodemPickPhase::Arm,
+                        ..
+                    })
+                ) {
                     self.pending_zmodem_pick = None;
                 }
             }

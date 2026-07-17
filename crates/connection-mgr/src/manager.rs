@@ -462,6 +462,28 @@ impl ConnectionManager {
         Ok(())
     }
 
+    /// Confirm Save As path for a pending remote `sz` download. `None` cancels.
+    pub fn provide_zmodem_download(&self, path: Option<PathBuf>) -> Result<(), String> {
+        let id = self.active_id().ok_or_else(|| "not connected".to_string())?;
+        let conns = self.connections.lock();
+        let conn = conns.get(&id).ok_or_else(|| "not connected".to_string())?;
+        let io = conn.io.as_ref().ok_or_else(|| "not connected".to_string())?;
+        let wire = io.zmodem().provide_download_path(path)?;
+        if !wire.is_empty() {
+            io.write_raw(&wire)
+                .map_err(|e| format!("zmodem write: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Default folder for ZMODEM Save As (usually Downloads).
+    pub fn active_zmodem_download_dir(&self) -> Option<PathBuf> {
+        let id = self.active_id()?;
+        let conns = self.connections.lock();
+        let conn = conns.get(&id)?;
+        Some(conn.io.as_ref()?.zmodem().default_download_dir())
+    }
+
     /// Cancel an in-flight ZMODEM transfer on the active tab.
     pub fn cancel_zmodem(&self) -> Result<(), ConnError> {
         let id = self.active_id().ok_or(ConnError::NotConnected)?;
