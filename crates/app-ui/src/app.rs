@@ -13,7 +13,6 @@ use crate::panels::{connection_list, monitor, routes, status_bar, toolbar};
 use crate::terminal_view::TerminalView;
 use crate::{fonts, theme};
 use connection_mgr::{ConnectFailure, ConnectionManager, ConnError, ConnErrorKey};
-use session_tree::BackendKind;
 use eframe::egui;
 use session_tree::{AppPaths, SessionConfig, SessionStore, SessionTree, TreeNode};
 use std::collections::HashMap;
@@ -351,19 +350,6 @@ impl VsTermApp {
 
     /// Returns `Err(())` after surfacing an error dialog / clearing reconnect.
     fn preflight_before_auth(&mut self, config: &SessionConfig) -> Result<(), ()> {
-        let resolved = connection_mgr::resolve_backend(config.backend);
-        if resolved == BackendKind::System
-            && !connection_mgr::SystemSshBackend::is_available()
-        {
-            self.reconnect_target = None;
-            self.pending_spit_auth = None;
-            self.error_dialog = Some(format_conn_error(
-                &connection_mgr::backend_unavailable_error(BackendKind::System),
-            ));
-            self.status = i18n::t("status.open_failed");
-            return Err(());
-        }
-
         let vault = self
             .store
             .as_ref()
@@ -413,18 +399,6 @@ impl VsTermApp {
     ) {
         if self.pending_connect.is_some() {
             self.status = i18n::t("status.connecting");
-            return;
-        }
-
-        let resolved = connection_mgr::resolve_backend(config.backend);
-        if resolved == BackendKind::System
-            && !connection_mgr::SystemSshBackend::is_available()
-        {
-            self.reconnect_target = None;
-            self.error_dialog = Some(format_conn_error(
-                &connection_mgr::backend_unavailable_error(BackendKind::System),
-            ));
-            self.status = i18n::t("status.open_failed");
             return;
         }
 
@@ -1997,7 +1971,7 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    use session_tree::{AuthConfig, BackendKind, SessionConfig, TreeNode};
+    use session_tree::{AuthConfig, SessionConfig, TreeNode};
 
     let web = SessionConfig {
         id: "demo-web-01".into(),
@@ -2005,13 +1979,13 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
         host: "10.0.1.10".into(),
         port: 22,
         username: "deploy".into(),
-        backend: BackendKind::Auto,
         auth: AuthConfig::Password {
             password_ref: None,
         },
         color_tag: Some("#ff5555".into()),
         icon: None,
         term_type: "xterm-256color".into(),
+        shell_integration: true,
     };
     let db = SessionConfig {
         id: "demo-db-01".into(),
@@ -2019,13 +1993,13 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
         host: "10.0.1.20".into(),
         port: 22,
         username: "deploy".into(),
-        backend: BackendKind::Auto,
         auth: AuthConfig::Password {
             password_ref: Some("vault://demo-db-01-pwd".into()),
         },
         color_tag: Some("#50fa7b".into()),
         icon: None,
         term_type: "xterm-256color".into(),
+        shell_integration: true,
     };
 
     store.save_session(&web)?;

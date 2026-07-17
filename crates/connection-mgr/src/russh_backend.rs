@@ -4,13 +4,14 @@
 //! [`client::Handle`] living on a process-global multi-thread Tokio runtime
 //! (so the UI connect thread can return without dropping the session).
 
+use crate::auth::{expand_user_path, preflight, resolve_auth, AuthMaterial, PreflightOpts};
 use crate::backend::RemoteExec;
 use crate::known_hosts::{self, HostKeyCheck};
 use crate::remote_exec::RemoteSession;
 use crate::remote_fs::{ArcProgress, RemoteDirEntry, RemoteFs};
 use crate::remote_tree;
+use crate::shell_integration::remote_bootstrap_command;
 use crate::ssh_io::SshIoSession;
-use crate::system_ssh::{expand_user_path, preflight, resolve_auth, AuthMaterial, PreflightOpts};
 use crate::ConnError;
 use parking_lot::Mutex as ParkingMutex;
 use russh::client::{AuthResult, Handle, KeyboardInteractiveAuthResponse};
@@ -170,7 +171,14 @@ async fn connect_and_shell(
         shared as Arc<dyn RemoteFs>,
     );
 
-    let io = open_shell_io(Arc::clone(&session), &config.term_type, cols, rows).await?;
+    let io = open_shell_io(
+        Arc::clone(&session),
+        &config.term_type,
+        cols,
+        rows,
+        config.shell_integration,
+    )
+    .await?;
     Ok(RusshEstablished { io, remote })
 }
 
@@ -330,6 +338,7 @@ async fn open_shell_io(
     term_type: &str,
     cols: u16,
     rows: u16,
+    shell_integration: bool,
 ) -> Result<SshIoSession, ConnError> {
     let mut channel = session
         .channel_open_session()
@@ -352,10 +361,22 @@ async fn open_shell_io(
         )
         .await
         .map_err(|e| ConnError::Connect(format!("request pty: {e}")))?;
-    channel
-        .request_shell(true)
-        .await
-        .map_err(|e| ConnError::Connect(format!("request shell: {e}")))?;
+    let mut initial_output = wait_channel_request(&mut channel, "request pty").await?;
+    if shell_integration {
+        let bootstrap = remote_bootstrap_command();
+        channel
+            .exec(true, bootstrap.into_bytes())
+            .await
+            .map_err(|e| ConnError::Connect(format!("request integrated shell: {e}")))?;
+        initial_output
+            .extend(wait_channel_request(&mut channel, "request integrated shell").await?);
+    } else {
+        channel
+            .request_shell(true)
+            .await
+            .map_err(|e| ConnError::Connect(format!("request shell: {e}")))?;
+        initial_output.extend(wait_channel_request(&mut channel, "request shell").await?);
+    }
 
     // Unbounded: a full sync channel blocks the Tokio worker on `send`, which
     // stalls shell writes and SSH reads on the same runtime as SFTP.
@@ -461,7 +482,43 @@ async fn open_shell_io(
         Ok(())
     });
 
-    SshIoSession::spawn(reader, writer, cols, rows, Some(resize), Vec::new(), None)
+    SshIoSession::spawn(
+        reader,
+        writer,
+        cols,
+        rows,
+        Some(resize),
+        initial_output,
+    )
+}
+
+async fn wait_channel_request(
+    channel: &mut russh::Channel<client::Msg>,
+    operation: &str,
+) -> Result<Vec<u8>, ConnError> {
+    let mut early_output = Vec::new();
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Success) => return Ok(early_output),
+            Some(ChannelMsg::Failure) => {
+                return Err(ConnError::Connect(format!("{operation} rejected by server")));
+            }
+            Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                early_output.extend_from_slice(data.as_ref());
+            }
+            Some(ChannelMsg::Eof) | None => {
+                return Err(ConnError::Connect(format!(
+                    "connection closed during {operation}"
+                )));
+            }
+            Some(ChannelMsg::ExitStatus { exit_status }) => {
+                return Err(ConnError::Connect(format!(
+                    "{operation} exited with status {exit_status}"
+                )));
+            }
+            _ => {}
+        }
+    }
 }
 
 struct PipeReader {

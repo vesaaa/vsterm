@@ -1,11 +1,9 @@
-use crate::backend::SshSession;
-use crate::error::ConnError;
+﻿use crate::error::ConnError;
 use crate::remote_exec::RemoteSession;
 use crate::russh_backend::RusshBackend;
 use crate::ssh_io::SshIoSession;
-use crate::system_ssh::{backend_unavailable_error, resolve_backend, SystemSshBackend};
 use parking_lot::Mutex;
-use session_tree::{BackendKind, SessionConfig};
+use session_tree::SessionConfig;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -96,8 +94,6 @@ pub struct ActiveConnection {
     pub session_id: Option<String>,
     pub terminal: TerminalHandle,
     pub(crate) io: Option<ConnectionIo>,
-    #[allow(dead_code)]
-    pub(crate) ssh_session: Option<Box<dyn SshSession>>,
     pub error_message: Option<String>,
     /// Set for SSH session connections (not local shell).
     pub remote: Option<RemoteSession>,
@@ -154,7 +150,7 @@ impl ConnectionManager {
     pub fn set_repaint_wake(&self, hook: OutputHook) {
         *self.repaint_wake.lock() = Some(Arc::clone(&hook));
         // Apply to existing terminals without holding wake + connections in nested order
-        // that conflicts with finish_connect (wake → then connections).
+        // that conflicts with finish_connect (wake 鈫?then connections).
         let terminals: Vec<TerminalHandle> = self
             .connections
             .lock()
@@ -194,7 +190,6 @@ impl ConnectionManager {
             session_id: None,
             terminal,
             io: Some(ConnectionIo::Local(pty)),
-            ssh_session: None,
             error_message: None,
             remote: None,
             is_local_shell: true,
@@ -215,7 +210,6 @@ impl ConnectionManager {
             session_id: Some(config.id.clone()),
             terminal,
             io: None,
-            ssh_session: None,
             error_message: None,
             remote: None,
             is_local_shell: false,
@@ -274,7 +268,6 @@ impl ConnectionManager {
             session_id: Some(config.id.clone()),
             terminal,
             io: Some(ConnectionIo::Ssh(established.io)),
-            ssh_session: None,
             error_message: None,
             remote: Some(established.remote),
             is_local_shell: false,
@@ -291,41 +284,15 @@ impl ConnectionManager {
         cols: u16,
         rows: u16,
     ) -> Result<EstablishedSsh, ConnError> {
-        let resolved = resolve_backend(config.backend);
-        match resolved {
-            BackendKind::System => {
-                let io = SystemSshBackend::open_interactive(
-                    config,
-                    vault,
-                    interactive_password.clone(),
-                    cols,
-                    rows,
-                )
-                .await?;
-                Ok(EstablishedSsh {
-                    io,
-                    remote: RemoteSession::system(config.clone(), interactive_password),
-                })
-            }
-            BackendKind::Builtin => {
-                let est = RusshBackend::open_interactive(
-                    config,
-                    vault,
-                    interactive_password,
-                    cols,
-                    rows,
-                )
-                .await?;
-                Ok(EstablishedSsh {
-                    io: est.io,
-                    remote: est.remote,
-                })
-            }
-            BackendKind::Auto => Err(backend_unavailable_error(resolved)),
-        }
+        let est =
+            RusshBackend::open_interactive(config, vault, interactive_password, cols, rows).await?;
+        Ok(EstablishedSsh {
+            io: est.io,
+            remote: est.remote,
+        })
     }
 
-    /// Open a connection from a saved session config (dual backend).
+    /// Open a connection from a saved session config.
     pub async fn open_session(
         &self,
         config: &SessionConfig,
@@ -493,7 +460,6 @@ impl ConnectionManager {
                 conn.state = ConnectionState::Disconnected;
                 conn.io = None;
                 conn.remote = None;
-                conn.ssh_session = None;
             }
             self.bump();
         }
@@ -523,7 +489,6 @@ impl ConnectionManager {
         conn.error_message = None;
         conn.io = None;
         conn.remote = None;
-        conn.ssh_session = None;
         drop(conns);
         self.bump();
         true
@@ -538,7 +503,6 @@ impl ConnectionManager {
         conn.error_message = Some(message.into());
         conn.io = None;
         conn.remote = None;
-        conn.ssh_session = None;
         drop(conns);
         self.bump();
     }
@@ -560,7 +524,6 @@ impl ConnectionManager {
             session_id: Some(config.id.clone()),
             terminal,
             io: None,
-            ssh_session: None,
             error_message: Some(message.into()),
             remote: None,
             is_local_shell: false,
@@ -581,7 +544,6 @@ impl ConnectionManager {
         conn.error_message = None;
         conn.io = None;
         conn.remote = None;
-        conn.ssh_session = None;
         drop(conns);
         self.bump();
     }
@@ -608,7 +570,6 @@ impl ConnectionManager {
         }
         conn.io = Some(ConnectionIo::Ssh(established.io));
         conn.remote = Some(established.remote);
-        conn.ssh_session = None;
         conn.state = ConnectionState::Connected;
         conn.error_message = None;
         conn.is_local_shell = false;

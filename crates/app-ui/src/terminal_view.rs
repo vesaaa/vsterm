@@ -380,7 +380,22 @@ impl TerminalView {
                 ui.input(|i| {
                     for event in &i.events {
                         match event {
-                            egui::Event::Copy => {}
+                            // egui-winit converts Ctrl+C into Event::Copy before
+                            // producing a Key event. Preserve terminal SIGINT
+                            // when there is no selection; Ctrl+Shift+C remains
+                            // the explicit clipboard shortcut.
+                            egui::Event::Copy => {
+                                if let Some(text) = &selected_text {
+                                    ui.ctx().copy_text(text.clone());
+                                } else if !i.modifiers.shift {
+                                    let _ = mgr.write_to_active(&[0x03]);
+                                }
+                            }
+                            // Ctrl+X is also consumed by egui as a clipboard
+                            // command. Terminals need the CAN control byte.
+                            egui::Event::Cut => {
+                                let _ = mgr.write_to_active(&[0x18]);
+                            }
                             egui::Event::Paste(text) => {
                                 let _ = mgr.with_active(|c| c.terminal.scroll_to_bottom());
                                 paste_to_session(mgr, text);
@@ -913,28 +928,195 @@ fn event_to_bytes(event: &egui::Event) -> Option<Vec<u8>> {
 
 fn key_to_bytes(key: egui::Key, modifiers: &egui::Modifiers) -> Option<Vec<u8>> {
     use egui::Key;
-    if modifiers.ctrl {
-        if let Some(c) = key.name().chars().next() {
-            if c.is_ascii_alphabetic() {
-                let b = (c.to_ascii_uppercase() as u8) - b'A' + 1;
-                return Some(vec![b]);
-            }
+
+    // C0 control keys. Do not derive this from `key.name()`: names such as
+    // "ArrowUp" used to turn Ctrl+Up into Ctrl+A. Alt+Ctrl is commonly AltGr,
+    // so printable AltGr input must be left to Event::Text.
+    if modifiers.ctrl && !modifiers.alt {
+        let control = match key {
+            Key::A => Some(0x01),
+            Key::B => Some(0x02),
+            Key::C => Some(0x03), // SIGINT
+            Key::D => Some(0x04), // EOF
+            Key::E => Some(0x05),
+            Key::F => Some(0x06),
+            Key::G => Some(0x07),
+            Key::H => Some(0x08),
+            Key::I => Some(0x09),
+            Key::J => Some(0x0a),
+            Key::K => Some(0x0b),
+            Key::L => Some(0x0c),
+            Key::M => Some(0x0d),
+            Key::N => Some(0x0e),
+            Key::O => Some(0x0f),
+            Key::P => Some(0x10),
+            Key::Q => Some(0x11),
+            Key::R => Some(0x12),
+            Key::S => Some(0x13),
+            Key::T => Some(0x14),
+            Key::U => Some(0x15),
+            Key::V => Some(0x16),
+            Key::W => Some(0x17),
+            Key::X => Some(0x18),
+            Key::Y => Some(0x19),
+            Key::Z => Some(0x1a), // SIGTSTP
+            Key::Space | Key::Num2 => Some(0x00),
+            Key::OpenBracket | Key::Num3 => Some(0x1b),
+            Key::Backslash | Key::Num4 => Some(0x1c),
+            Key::CloseBracket | Key::Num5 => Some(0x1d),
+            Key::Num6 => Some(0x1e),
+            Key::Minus | Key::Num7 => Some(0x1f),
+            Key::Questionmark | Key::Num8 => Some(0x7f),
+            _ => None,
+        };
+        if let Some(control) = control {
+            return Some(vec![control]);
         }
     }
+
+    let modifier = xterm_modifier(modifiers);
+    let csi_final = |final_byte: u8| {
+        if modifier == 1 {
+            vec![0x1b, b'[', final_byte]
+        } else {
+            format!("\x1b[1;{modifier}{}", final_byte as char).into_bytes()
+        }
+    };
+
+    // Meta/Alt+letter and Alt+digit conventionally sends ESC then the key.
+    if modifiers.alt && !modifiers.ctrl {
+        if let Some(ch) = printable_key_char(key, modifiers.shift) {
+            return Some(vec![0x1b, ch]);
+        }
+    }
+
     match key {
         Key::Enter => Some(vec![b'\r']),
         Key::Backspace => Some(vec![0x7f]),
+        Key::Tab if modifiers.shift => Some(b"\x1b[Z".to_vec()),
         Key::Tab => Some(vec![b'\t']),
         Key::Escape => Some(vec![0x1b]),
-        Key::ArrowUp => Some(b"\x1b[A".to_vec()),
-        Key::ArrowDown => Some(b"\x1b[B".to_vec()),
-        Key::ArrowRight => Some(b"\x1b[C".to_vec()),
-        Key::ArrowLeft => Some(b"\x1b[D".to_vec()),
-        Key::Home => Some(b"\x1b[H".to_vec()),
-        Key::End => Some(b"\x1b[F".to_vec()),
-        Key::Delete => Some(b"\x1b[3~".to_vec()),
-        Key::PageUp => Some(b"\x1b[5~".to_vec()),
-        Key::PageDown => Some(b"\x1b[6~".to_vec()),
+        Key::ArrowUp => Some(csi_final(b'A')),
+        Key::ArrowDown => Some(csi_final(b'B')),
+        Key::ArrowRight => Some(csi_final(b'C')),
+        Key::ArrowLeft => Some(csi_final(b'D')),
+        Key::Home => Some(csi_final(b'H')),
+        Key::End => Some(csi_final(b'F')),
+        Key::Insert => Some(csi_tilde(2, modifier)),
+        Key::Delete => Some(csi_tilde(3, modifier)),
+        Key::PageUp => Some(csi_tilde(5, modifier)),
+        Key::PageDown => Some(csi_tilde(6, modifier)),
+        Key::F1 => Some(b"\x1bOP".to_vec()),
+        Key::F2 => Some(b"\x1bOQ".to_vec()),
+        Key::F3 => Some(b"\x1bOR".to_vec()),
+        Key::F4 => Some(b"\x1bOS".to_vec()),
+        Key::F5 => Some(csi_tilde(15, modifier)),
+        Key::F6 => Some(csi_tilde(17, modifier)),
+        Key::F7 => Some(csi_tilde(18, modifier)),
+        Key::F8 => Some(csi_tilde(19, modifier)),
+        Key::F9 => Some(csi_tilde(20, modifier)),
+        Key::F10 => Some(csi_tilde(21, modifier)),
+        Key::F11 => Some(csi_tilde(23, modifier)),
+        Key::F12 => Some(csi_tilde(24, modifier)),
         _ => None,
+    }
+}
+
+fn xterm_modifier(modifiers: &egui::Modifiers) -> u8 {
+    1 + u8::from(modifiers.shift)
+        + 2 * u8::from(modifiers.alt)
+        + 4 * u8::from(modifiers.ctrl)
+}
+
+fn csi_tilde(number: u8, modifier: u8) -> Vec<u8> {
+    if modifier == 1 {
+        format!("\x1b[{number}~").into_bytes()
+    } else {
+        format!("\x1b[{number};{modifier}~").into_bytes()
+    }
+}
+
+fn printable_key_char(key: egui::Key, shift: bool) -> Option<u8> {
+    use egui::Key;
+    let ch = match key {
+        Key::A => b'a',
+        Key::B => b'b',
+        Key::C => b'c',
+        Key::D => b'd',
+        Key::E => b'e',
+        Key::F => b'f',
+        Key::G => b'g',
+        Key::H => b'h',
+        Key::I => b'i',
+        Key::J => b'j',
+        Key::K => b'k',
+        Key::L => b'l',
+        Key::M => b'm',
+        Key::N => b'n',
+        Key::O => b'o',
+        Key::P => b'p',
+        Key::Q => b'q',
+        Key::R => b'r',
+        Key::S => b's',
+        Key::T => b't',
+        Key::U => b'u',
+        Key::V => b'v',
+        Key::W => b'w',
+        Key::X => b'x',
+        Key::Y => b'y',
+        Key::Z => b'z',
+        Key::Num0 => b'0',
+        Key::Num1 => b'1',
+        Key::Num2 => b'2',
+        Key::Num3 => b'3',
+        Key::Num4 => b'4',
+        Key::Num5 => b'5',
+        Key::Num6 => b'6',
+        Key::Num7 => b'7',
+        Key::Num8 => b'8',
+        Key::Num9 => b'9',
+        _ => return None,
+    };
+    Some(if shift && ch.is_ascii_lowercase() {
+        ch.to_ascii_uppercase()
+    } else {
+        ch
+    })
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_letters_emit_c0_codes() {
+        assert_eq!(
+            key_to_bytes(egui::Key::Z, &egui::Modifiers::CTRL),
+            Some(vec![0x1a])
+        );
+        assert_eq!(
+            key_to_bytes(egui::Key::C, &egui::Modifiers::CTRL),
+            Some(vec![0x03])
+        );
+    }
+
+    #[test]
+    fn ctrl_navigation_is_not_misread_as_letter() {
+        assert_eq!(
+            key_to_bytes(egui::Key::ArrowUp, &egui::Modifiers::CTRL),
+            Some(b"\x1b[1;5A".to_vec())
+        );
+    }
+
+    #[test]
+    fn common_terminal_keys_emit_xterm_sequences() {
+        assert_eq!(
+            key_to_bytes(egui::Key::Tab, &egui::Modifiers::SHIFT),
+            Some(b"\x1b[Z".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(egui::Key::F12, &egui::Modifiers::NONE),
+            Some(b"\x1b[24~".to_vec())
+        );
     }
 }

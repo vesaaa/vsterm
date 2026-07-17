@@ -15,12 +15,9 @@ pub enum ConnErrorKey {
     NotFound,
     NotConnected,
     Vault,
-    SystemSshMissing,
-    BuiltinUnavailable,
     PrivateKeyMissing,
     VaultSecretMissing,
     InvalidConfig,
-    BothBackendsUnavailable,
 }
 
 /// Payload for async UI when a connect attempt fails (Send + Clone).
@@ -46,15 +43,6 @@ impl ConnError {
             Self::HostKeyUnknown { .. } => ConnErrorKey::HostKeyUnknown,
             Self::Io(_) => ConnErrorKey::Io,
             Self::Term(_) => ConnErrorKey::Term,
-            Self::Backend(msg) if msg.starts_with("BUILTIN_UNAVAILABLE:") => {
-                ConnErrorKey::BuiltinUnavailable
-            }
-            Self::Backend(msg) if msg.starts_with("SYSTEM_SSH_MISSING:") => {
-                ConnErrorKey::SystemSshMissing
-            }
-            Self::Backend(msg) if msg.starts_with("BOTH_BACKENDS_UNAVAILABLE:") => {
-                ConnErrorKey::BothBackendsUnavailable
-            }
             Self::Backend(_) => ConnErrorKey::Backend,
             Self::NotFound(_) => ConnErrorKey::NotFound,
             Self::NotConnected => ConnErrorKey::NotConnected,
@@ -73,17 +61,12 @@ impl ConnError {
             | Self::HostKeyMismatch(s)
             | Self::Term(s)
             | Self::NotFound(s)
-            | Self::Vault(s) => Some(s.clone()),
-            Self::Backend(s) => {
-                let detail = s
-                    .splitn(2, ':')
-                    .nth(1)
-                    .unwrap_or(s.as_str())
-                    .trim();
-                if detail.is_empty() {
+            | Self::Vault(s)
+            | Self::Backend(s) => {
+                if s.is_empty() {
                     None
                 } else {
-                    Some(detail.to_string())
+                    Some(s.clone())
                 }
             }
             Self::HostKeyUnknown { fingerprint } => Some(fingerprint.clone()),

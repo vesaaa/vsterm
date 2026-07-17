@@ -13,6 +13,8 @@ pub enum Osc133Kind {
     OutputStart,
     /// Command finished; optional exit status.
     CommandEnd { exit: Option<i32> },
+    /// Property / handshake payload (e.g. `P;VSTERM;READY;<nonce>`).
+    Property,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,11 +123,16 @@ fn parse_osc133_kind(rest: &str) -> Option<Osc133Kind> {
         'C' => Some(Osc133Kind::OutputStart),
         'D' => {
             let exit = parts.next().and_then(|p| {
-                let p = p.split('=').next().unwrap_or(p);
-                p.parse().ok()
+                let value = p
+                    .strip_prefix("exit=")
+                    .or_else(|| p.strip_prefix("status="))
+                    .unwrap_or(p);
+                value.parse().ok()
             });
             Some(Osc133Kind::CommandEnd { exit })
         }
+        // Strip VsTerm handshake / future shell properties from the screen.
+        'P' => Some(Osc133Kind::Property),
         _ => None,
     }
 }
@@ -142,10 +149,20 @@ fn parse_osc7_uri(uri: &str) -> Option<String> {
         Some(idx) => &rest[idx..],
         None => return None,
     };
-    if path.is_empty() {
+    if path.is_empty() || path.len() > 4096 {
         return None;
     }
-    Some(percent_decode_path(path))
+    if path.as_bytes().iter().any(|&b| b == 0 || b == b'\n' || b == b'\r') {
+        return None;
+    }
+    let decoded = percent_decode_path(path);
+    if decoded.is_empty()
+        || decoded.len() > 4096
+        || decoded.chars().any(|c| c == '\0' || c == '\n' || c == '\r')
+    {
+        return None;
+    }
+    Some(decoded)
 }
 
 fn percent_decode_path(path: &str) -> String {
@@ -242,5 +259,29 @@ mod tests {
         f.push(b"3;A\x07y", &mut out, &mut events);
         assert_eq!(out, b"xy");
         assert_eq!(events, vec![OscEvent::Mark(Osc133Kind::PromptStart)]);
+    }
+
+    #[test]
+    fn parses_exit_named_status() {
+        assert_eq!(
+            parse_osc133_kind("D;exit=7"),
+            Some(Osc133Kind::CommandEnd { exit: Some(7) })
+        );
+    }
+
+    #[test]
+    fn strips_ready_property() {
+        let mut f = Osc133Filter::new();
+        let mut out = Vec::new();
+        let mut events = Vec::new();
+        let input = b"a\x1b]133;P;VSTERM;READY;abc\x07b";
+        f.push(input, &mut out, &mut events);
+        assert_eq!(out, b"ab");
+        assert_eq!(events, vec![OscEvent::Mark(Osc133Kind::Property)]);
+    }
+
+    #[test]
+    fn rejects_osc7_control_chars() {
+        assert_eq!(parse_osc7_uri("file://host/tmp/\nfoo"), None);
     }
 }

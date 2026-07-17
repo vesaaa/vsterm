@@ -11,7 +11,7 @@
 - GUI：`egui` + `eframe`（`wgpu`：Windows DX12 / macOS Metal / Linux Vulkan）
 - 字体：内嵌 JetBrains Mono（终端）；Windows/macOS 用系统中文界面字体，仅 Linux 内嵌 Noto Sans SC Light 作兜底
 - 终端仿真：`alacritty_terminal`
-- SSH：双内核 `russh`（内置）+ 系统 `ssh`（`portable-pty`）
+- SSH：内置 `russh` 引擎（终端、远程命令与 SFTP 复用同一认证会话）
 - 配置：YAML；凭据：系统 keyring + 加密 vault
 
 ## 当前进度
@@ -21,7 +21,7 @@
 | 1. 单连接 PTY + 终端渲染 | ✅ 骨架已通（本地 Shell） |
 | 2. 多连接 + 竖排列表 | ✅ 基础 UI |
 | 3. 会话树 + YAML 持久化 | ✅ 基础读写 + 演示数据 |
-| 4. 双内核 + 认证 | ✅ 默认内置 russh；系统 OpenSSH 可选手动 |
+| 4. SSH + 认证 | ✅ 内置 russh |
 | 5. 凭据加密 | 🚧 vault crate 已就位 |
 | 6. 主题 / 快捷键 / 布局 | ⏳ |
 

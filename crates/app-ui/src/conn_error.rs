@@ -22,12 +22,9 @@ fn suffix(key: ConnErrorKey) -> &'static str {
         ConnErrorKey::NotFound => "not_found",
         ConnErrorKey::NotConnected => "not_connected",
         ConnErrorKey::Vault => "vault",
-        ConnErrorKey::SystemSshMissing => "system_ssh_missing",
-        ConnErrorKey::BuiltinUnavailable => "builtin_unavailable",
         ConnErrorKey::PrivateKeyMissing => "private_key_missing",
         ConnErrorKey::VaultSecretMissing => "vault_secret_missing",
         ConnErrorKey::InvalidConfig => "invalid_config",
-        ConnErrorKey::BothBackendsUnavailable => "both_backends_unavailable",
     }
 }
 

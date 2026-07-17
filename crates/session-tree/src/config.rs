@@ -1,19 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Which SSH backend to use for a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum BackendKind {
-    /// Prefer builtin russh; users may pick system OpenSSH for special hosts.
-    #[default]
-    Auto,
-    /// Pure Rust russh engine.
-    Builtin,
-    /// System OpenSSH via portable-pty.
-    System,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthType {
@@ -87,8 +74,6 @@ pub struct SessionConfig {
     /// May be empty — UI collects username at connect time.
     #[serde(default)]
     pub username: String,
-    #[serde(default)]
-    pub backend: BackendKind,
     pub auth: AuthConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_tag: Option<String>,
@@ -97,6 +82,12 @@ pub struct SessionConfig {
     pub icon: Option<String>,
     #[serde(default = "default_term_type")]
     pub term_type: String,
+    /// Session-scoped OSC 7/133 shell integration. Default on; disable per host
+    /// when a server's audit policy rejects remote bootstrap commands.
+    ///
+    /// Legacy YAML may still contain a removed `backend` field — serde ignores it.
+    #[serde(default = "default_shell_integration")]
+    pub shell_integration: bool,
 }
 
 fn default_port() -> u16 {
@@ -105,6 +96,10 @@ fn default_port() -> u16 {
 
 fn default_term_type() -> String {
     "xterm-256color".into()
+}
+
+fn default_shell_integration() -> bool {
+    true
 }
 
 impl SessionConfig {
@@ -129,5 +124,41 @@ impl SessionConfig {
     /// Collect / confirm private key path for publickey auth.
     pub fn needs_key_dialog(&self) -> bool {
         matches!(self.auth, AuthConfig::Publickey { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_integration_defaults_on_and_ignores_legacy_backend() {
+        let yaml = r#"
+id: s-test
+name: demo
+host: 127.0.0.1
+username: root
+backend: system
+auth:
+  type: password
+"#;
+        let cfg: SessionConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.shell_integration);
+        assert_eq!(cfg.term_type, "xterm-256color");
+    }
+
+    #[test]
+    fn shell_integration_can_be_disabled() {
+        let yaml = r#"
+id: s-test
+name: demo
+host: 127.0.0.1
+username: root
+shell_integration: false
+auth:
+  type: password
+"#;
+        let cfg: SessionConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.shell_integration);
     }
 }

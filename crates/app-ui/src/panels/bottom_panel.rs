@@ -955,9 +955,10 @@ fn show_files_content(
                             state.dir_cache.remove(&path);
                             actions.push(EntryAction::Nav(path));
                         } else {
-                            // Never inject probe commands into the interactive PTY —
-                            // that would echo into the user's shell. Cwd is only known
-                            // when the remote shell passively reports OSC 7.
+                            // Cwd arrives via OSC 7 from the session-scoped shell
+                            // bootstrap (Bash/Zsh/Fish). Never inject probe commands
+                            // into the interactive PTY — that would echo into the
+                            // user's shell.
                             state.status_line =
                                 Some(i18n::t("bottom.files.sync_from_term.failed").into());
                         }

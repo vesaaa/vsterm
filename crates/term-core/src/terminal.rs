@@ -572,6 +572,7 @@ fn apply_mark(state: &mut TermState, mark: Osc133Kind) {
                 state.marks.on_command_end(end, None);
             }
         }
+        Osc133Kind::Property => {}
     }
 }
 

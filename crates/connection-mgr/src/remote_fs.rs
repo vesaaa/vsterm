@@ -1,8 +1,4 @@
 //! Remote filesystem (SFTP) over an authenticated SSH session.
-//!
-//! First ship: **russh builtin only**. System OpenSSH returns
-//! [`ConnError::Backend`] with a clear “not supported yet” message — never fake
-//! a remote listing with local data.
 
 use crate::ConnError;
 use std::path::Path;
@@ -129,7 +125,7 @@ pub trait RemoteFs: Send + Sync {
     fn write_file(&self, remote_path: &str, data: &[u8]) -> Result<(), ConnError>;
 }
 
-/// Honest stub for system-OpenSSH sessions (SFTP not wired in v1).
+/// Honest stub for exec-only sessions without a filesystem provider.
 pub struct UnsupportedRemoteFs;
 
 impl RemoteFs for UnsupportedRemoteFs {
@@ -138,7 +134,7 @@ impl RemoteFs for UnsupportedRemoteFs {
     }
 
     fn list_dir(&self, _path: &str) -> Result<Vec<RemoteDirEntry>, ConnError> {
-        Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
+        Err(ConnError::Backend(sftp_unsupported_msg().into()))
     }
 
     fn get_file(
@@ -147,7 +143,7 @@ impl RemoteFs for UnsupportedRemoteFs {
         _local_path: &Path,
         _progress: Option<&ArcProgress>,
     ) -> Result<(), ConnError> {
-        Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
+        Err(ConnError::Backend(sftp_unsupported_msg().into()))
     }
 
     fn put_file(
@@ -156,7 +152,7 @@ impl RemoteFs for UnsupportedRemoteFs {
         _remote_path: &str,
         _progress: Option<&ArcProgress>,
     ) -> Result<(), ConnError> {
-        Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
+        Err(ConnError::Backend(sftp_unsupported_msg().into()))
     }
 
     fn get_path(
@@ -165,7 +161,7 @@ impl RemoteFs for UnsupportedRemoteFs {
         _local_path: &Path,
         _progress: Option<&ArcProgress>,
     ) -> Result<(), ConnError> {
-        Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
+        Err(ConnError::Backend(sftp_unsupported_msg().into()))
     }
 
     fn put_path(
@@ -174,28 +170,28 @@ impl RemoteFs for UnsupportedRemoteFs {
         _remote_path: &str,
         _progress: Option<&ArcProgress>,
     ) -> Result<(), ConnError> {
-        Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
+        Err(ConnError::Backend(sftp_unsupported_msg().into()))
     }
 
     fn remove(&self, _remote_path: &str, _is_dir: bool) -> Result<(), ConnError> {
-        Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
+        Err(ConnError::Backend(sftp_unsupported_msg().into()))
     }
 
     fn rename(&self, _from: &str, _to: &str) -> Result<(), ConnError> {
-        Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
+        Err(ConnError::Backend(sftp_unsupported_msg().into()))
     }
 
     fn mkdir(&self, _remote_path: &str) -> Result<(), ConnError> {
-        Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
+        Err(ConnError::Backend(sftp_unsupported_msg().into()))
     }
 
     fn write_file(&self, _remote_path: &str, _data: &[u8]) -> Result<(), ConnError> {
-        Err(ConnError::Backend(sftp_system_unsupported_msg().into()))
+        Err(ConnError::Backend(sftp_unsupported_msg().into()))
     }
 }
 
-pub fn sftp_system_unsupported_msg() -> &'static str {
-    "SFTP is available with the built-in SSH engine only (system OpenSSH sessions are not supported yet)"
+pub fn sftp_unsupported_msg() -> &'static str {
+    "SFTP is unavailable for this remote session"
 }
 
 /// Join parent + name into a remote path (Unix-style).
