@@ -18,8 +18,10 @@ pub type OutputHook = Arc<dyn Fn() + Send + Sync>;
 /// Start small for idle sessions; grow only when the user actually produces history.
 const SCROLLBACK_INITIAL: usize = 5_000;
 const SCROLLBACK_MID: usize = 10_000;
-/// Hard ceiling. Beyond this, oldest history is discarded (FIFO) — we never grow further.
-const SCROLLBACK_MAX: usize = 20_000;
+const SCROLLBACK_HIGH: usize = 50_000;
+/// Hard ceiling (aligned with Alacritty's documented max). Beyond this, oldest
+/// history is discarded (FIFO) — we never grow further.
+const SCROLLBACK_MAX: usize = 100_000;
 /// First growth: once ~3k history lines exist, raise the cap to 10k.
 const SCROLLBACK_GROW_TO_MID_AT: usize = 3_000;
 /// Refuse to raise the cap when the host has less free RAM than this.
@@ -30,13 +32,15 @@ const SCROLLBACK_MIN_FREE_BYTES: u64 = 256 * 1024 * 1024;
 ///
 /// - default 5 000
 /// - ≥ 3 000 lines → 10 000
-/// - ≥ 4/5 of current cap → 20 000 (hard max)
+/// - ≥ 4/5 of current cap → 50 000, then 100 000 (hard max)
 fn next_scrollback_limit(used: usize, limit: usize) -> Option<usize> {
     if limit >= SCROLLBACK_MAX {
         return None;
     }
     if limit < SCROLLBACK_MID && used >= SCROLLBACK_GROW_TO_MID_AT {
         Some(SCROLLBACK_MID)
+    } else if limit < SCROLLBACK_HIGH && used.saturating_mul(5) >= limit.saturating_mul(4) {
+        Some(SCROLLBACK_HIGH)
     } else if used.saturating_mul(5) >= limit.saturating_mul(4) {
         Some(SCROLLBACK_MAX)
     } else {
@@ -826,10 +830,15 @@ mod tests {
         assert_eq!(next_scrollback_limit(7_999, SCROLLBACK_MID), None);
         assert_eq!(
             next_scrollback_limit(8_000, SCROLLBACK_MID),
+            Some(SCROLLBACK_HIGH)
+        );
+        assert_eq!(next_scrollback_limit(39_999, SCROLLBACK_HIGH), None);
+        assert_eq!(
+            next_scrollback_limit(40_000, SCROLLBACK_HIGH),
             Some(SCROLLBACK_MAX)
         );
         // Hard max: never propose another growth step.
-        assert_eq!(next_scrollback_limit(20_000, SCROLLBACK_MAX), None);
+        assert_eq!(next_scrollback_limit(100_000, SCROLLBACK_MAX), None);
         assert_eq!(next_scrollback_limit(usize::MAX, SCROLLBACK_MAX), None);
     }
 
@@ -843,10 +852,11 @@ mod tests {
     }
 
     #[test]
-    fn scrollback_hard_max_is_twenty_thousand() {
-        assert_eq!(SCROLLBACK_MAX, 20_000);
+    fn scrollback_hard_max_is_one_hundred_thousand() {
+        assert_eq!(SCROLLBACK_MAX, 100_000);
         assert!(SCROLLBACK_INITIAL < SCROLLBACK_MID);
-        assert!(SCROLLBACK_MID < SCROLLBACK_MAX);
+        assert!(SCROLLBACK_MID < SCROLLBACK_HIGH);
+        assert!(SCROLLBACK_HIGH < SCROLLBACK_MAX);
     }
 }
 
