@@ -1,5 +1,30 @@
-# Shell integration scripts are embedded into remote SSH bootstraps.
-# Force LF so Windows checkouts / builds never bake CRLF into remote bash.
-assets/shell/** text eol=lf
+# Force LF for sources and anything that can run on remote Linux.
+# Windows autocrlf otherwise embeds CR into multi-line Rust string literals
+# and shell assets, which breaks remote bash/BusyBox (`$'\r': command not found`).
+* text=auto eol=lf
+
+*.rs text eol=lf
 *.sh text eol=lf
 *.fish text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+*.desktop text eol=lf
+*.svg text eol=lf
+*.plist text eol=lf
+*.webmanifest text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+LICENSE text eol=lf
+
+# Binaries — never touch line endings
+*.png binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary

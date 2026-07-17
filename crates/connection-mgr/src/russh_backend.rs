@@ -946,8 +946,26 @@ async fn open_raw_sftp(
 }
 
 fn wrap_sh_c(script: &str) -> String {
-    format!(
-        "sh -s <<'VSTERM_EOF'\n{}\nVSTERM_EOF",
-        script.trim()
-    )
+    // Host metrics / routes scripts are multi-line Rust string literals. On a
+    // Windows checkout with autocrlf those literals can contain `\r`, which
+    // breaks remote BusyBox/bash the same way shell-integration did.
+    let script = crate::posix_text::normalize_unix_newlines(script.trim());
+    format!("sh -s <<'VSTERM_EOF'\n{script}\nVSTERM_EOF")
+}
+
+#[cfg(test)]
+mod wrap_sh_tests {
+    use super::wrap_sh_c;
+
+    #[test]
+    fn wrap_strips_crlf_from_remote_scripts() {
+        let out = wrap_sh_c("export LC_ALL=C\r\necho hi\r\ndo\r\n");
+        assert!(
+            !out.contains('\r'),
+            "wrapped remote script must not contain CR"
+        );
+        assert!(out.contains("export LC_ALL=C\necho hi\ndo"));
+        assert!(out.starts_with("sh -s <<'VSTERM_EOF'\n"));
+        assert!(out.ends_with("\nVSTERM_EOF"));
+    }
 }

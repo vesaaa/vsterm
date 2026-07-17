@@ -5,6 +5,7 @@ mod backend;
 mod error;
 mod known_hosts;
 mod manager;
+mod posix_text;
 mod process;
 mod remote_exec;
 mod remote_fs;

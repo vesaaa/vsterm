@@ -19,6 +19,8 @@ pub(crate) fn remote_bootstrap_command() -> String {
 fn bootstrap_script(nonce: &str) -> String {
     // Windows checkouts / builds may embed CRLF via autocrlf. Remote POSIX shells
     // treat `\r` as syntax (`do\r`, `$'\r': command not found`), so always emit LF.
+    use crate::posix_text::normalize_unix_newlines;
+
     let posix = shell_single_quote(&normalize_unix_newlines(POSIX_INTEGRATION));
     let fish = shell_single_quote(&normalize_unix_newlines(FISH_INTEGRATION));
     let nonce = shell_single_quote(nonce);
@@ -90,11 +92,6 @@ exit "$_vsterm_status"
     )
 }
 
-/// Strip CR so remote `/bin/sh` / bash never see Windows CRLF line endings.
-fn normalize_unix_newlines(value: &str) -> String {
-    value.replace('\r', "")
-}
-
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -130,12 +127,5 @@ mod tests {
         assert!(command.contains('\n'));
         assert!(command.contains("for __vsterm_rc in"));
         assert!(!command.contains("do\r"));
-    }
-
-    #[test]
-    fn normalize_unix_newlines_strips_cr() {
-        assert_eq!(normalize_unix_newlines("a\r\nb\r\nc\n"), "a\nb\nc\n");
-        assert_eq!(normalize_unix_newlines("do\r\n"), "do\n");
-        assert_eq!(normalize_unix_newlines("alone\r"), "alone");
     }
 }
