@@ -511,7 +511,9 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
             }
             Err(mpsc::TryRecvError::Empty) => {
                 state.pending_list = Some(pending);
-                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                ctx.request_repaint_after(crate::render_policy::limit_interval(
+                    std::time::Duration::from_millis(50),
+                ));
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 if pending.apply_browse {
@@ -527,7 +529,9 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
         let snap = xfer.progress.snapshot();
         if !snap.done {
             update_transfer_speed(xfer, snap.transferred);
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            ctx.request_repaint_after(crate::render_policy::limit_interval(
+                std::time::Duration::from_millis(33),
+            ));
         }
     }
 
@@ -592,7 +596,9 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
     }
 
     if state.remote_loading || state.pending_list.is_some() {
-        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        ctx.request_repaint_after(crate::render_policy::limit_interval(
+            std::time::Duration::from_millis(50),
+        ));
     }
 }
 

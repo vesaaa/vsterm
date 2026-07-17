@@ -47,6 +47,7 @@ vsterm/
 
 - Rust stable
 - Windows：Visual Studio Build Tools（MSVC + Windows SDK）
+- Windows RDP / 虚拟机：支持 DX12 WARP 软件渲染；无硬件 GPU 时自动启用约 15 FPS 的受限动画模式并在状态栏标识
 - macOS：Xcode Command Line Tools
 - Linux：`libxkbcommon-dev`、`libwayland-dev`、`libvulkan-dev` 等（见 CI）
 

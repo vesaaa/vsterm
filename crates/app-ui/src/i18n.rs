@@ -335,6 +335,10 @@ fn zh(key: &str) -> &'static str {
         "bottom.commands.send" => "发送",
         "status.stage" => "阶段 4 · SSH",
         "status.connections" => "连接",
+        "status.software_renderer" => "软件渲染 · 15 FPS",
+        "status.software_renderer_tip" => {
+            "当前 RDP/虚拟机没有可用硬件 GPU，已启用受限帧率的软件渲染"
+        }
         "status.opened_shell" => "已打开本地 Shell",
         "status.connecting" => "正在连接…",
         "status.connected" => "已连接",
@@ -667,6 +671,10 @@ fn en(key: &str) -> &'static str {
         "bottom.commands.send" => "Send",
         "status.stage" => "Stage 4 · SSH",
         "status.connections" => "Connections",
+        "status.software_renderer" => "Software rendering · 15 FPS",
+        "status.software_renderer_tip" => {
+            "No hardware GPU is available in this RDP/VM session; software rendering is active with a reduced frame rate"
+        }
         "status.opened_shell" => "Local shell opened",
         "status.connecting" => "Connecting…",
         "status.connected" => "Connected",

@@ -9,6 +9,7 @@ mod commands;
 mod conn_error;
 mod dialog_chrome;
 mod remote_host;
+mod render_policy;
 mod fonts;
 mod fx;
 mod icon;
@@ -70,17 +71,16 @@ fn main() -> Result<()> {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(wgpu_setup()),
-            // Prefer Mailbox, then Immediate — never Fifo. AutoVsync was quantising
-            // 16 ms repaint requests to a steady ~64 ms / 16 fps in VSTERM_DIAG.
+            // Repaint cadence is controlled by render_policy. Fifo/AutoVsync
+            // makes DX12 WARP busy-wait across several worker threads after a
+            // restored window, so it is unsuitable for supported RDP/VM use.
             present_mode: wgpu::PresentMode::AutoNoVsync,
             ..Default::default()
         },
         ..Default::default()
     };
 
-    tracing::info!(
-        "wgpu present_mode=AutoNoVsync (Mailbox→Immediate; avoids Fifo ~64 ms frame quantisation)"
-    );
+    tracing::info!("wgpu present_mode=AutoNoVsync (application-controlled cadence)");
 
     eframe::run_native(
         "VsTerm",
@@ -142,33 +142,29 @@ fn wgpu_setup() -> eframe::egui_wgpu::WgpuSetupCreateNew {
             ) && surface_ok(a, surface)
         });
         if let Some(adapter) = hardware {
+            render_policy::set_software_renderer(false);
             return Ok(adapter.clone());
         }
         let any_non_cpu = adapters.iter().find(|a| {
             a.get_info().device_type != wgpu::DeviceType::Cpu && surface_ok(a, surface)
         });
         if let Some(adapter) = any_non_cpu {
+            render_policy::set_software_renderer(false);
             tracing::warn!(
                 "using fallback wgpu adapter (no discrete/integrated GPU): {}",
                 adapter.get_info().name
             );
             return Ok(adapter.clone());
         }
-        if cfg!(debug_assertions) {
-            if let Some(adapter) = adapters.iter().find(|a| surface_ok(a, surface)) {
-                tracing::warn!(
-                    "wgpu using CPU software renderer ({}) — expect high idle CPU; \
-                     update GPU drivers or avoid remote-desktop WARP",
-                    adapter.get_info().name
-                );
-                return Ok(adapter.clone());
-            }
+        if let Some(adapter) = adapters.iter().find(|a| surface_ok(a, surface)) {
+            render_policy::set_software_renderer(true);
+            tracing::warn!(
+                "wgpu using supported CPU software renderer ({}) with reduced animation cadence",
+                adapter.get_info().name
+            );
+            return Ok(adapter.clone());
         }
-        Err(
-            "no hardware GPU adapter — install/update graphics drivers (DX12). \
-             VsTerm refuses CPU software rendering in release builds"
-                .into(),
-        )
+        Err("no wgpu adapter supports the application surface".into())
     }));
     setup
 }

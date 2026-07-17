@@ -31,5 +31,13 @@ pub fn apply(ctx: &Context) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     style.spacing.window_margin = egui::Margin::same(8);
+    if crate::render_policy::is_software_renderer() {
+        // Delayed tooltips and implicit widget transitions schedule extra
+        // future frames after an otherwise idle RDP window is restored.
+        // Keep all information available, but show it immediately and avoid
+        // driver-expensive transition-only presents on WARP.
+        style.animation_time = 0.0;
+        style.interaction.tooltip_delay = 0.0;
+    }
     ctx.set_style(style);
 }

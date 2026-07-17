@@ -1267,7 +1267,9 @@ impl eframe::App for VsTermApp {
         self.metrics
             .set_active(wants_live_host_data && has_local_host);
         // Sampling is set below once we know whether a transfer is active.
-        let wants_metrics = wants_live_host_data;
+        // Do not keep a 400 ms chart timer alive when the Monitor/System Info
+        // surface has no host from which it could obtain data.
+        let wants_metrics = wants_live_host_data && (has_local_host || has_remote_host);
         let auth_animating = self.auth_prompt.is_some()
             || self.pending_spit_auth.is_some()
             || self.fx.is_active();
@@ -1533,7 +1535,12 @@ impl eframe::App for VsTermApp {
         });
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            status_bar::show(ui, &self.status, self.connections.list_meta().len());
+            status_bar::show(
+                ui,
+                &self.status,
+                self.connections.list_meta().len(),
+                crate::render_policy::is_software_renderer(),
+            );
         });
 
         // Col1 + Col2 share ONE SidePanel (fixed widths, no resize).
@@ -2141,65 +2148,23 @@ fn schedule_repaint(
     transfer_active: bool,
     menu_open: bool,
 ) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
-    // Sticky interactivity: keyboard-only input used to get a single
-    // `request_repaint()` then fall through to the metrics 400 ms timer, which
-    // showed up as a steady ~384 ms FRAME GAP and "menus/typing not following
-    // the hand" while Monitor was open. Keep a short high-rate window after any
-    // real input.
-    static LAST_INTERACTIVE_MS: AtomicU64 = AtomicU64::new(0);
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    // Only real pointer *events* count — do not use `pointer.delta()`, which on
-    // some Windows setups stays non-zero and forced a continuous ~60 FPS loop
-    // (high idle CPU / "very high" power) even when the user was not moving.
-    let pointer_active = ctx.input(|i| {
-        i.pointer.any_down()
-            || i.events.iter().any(|e| {
-                matches!(
-                    e,
-                    egui::Event::PointerMoved(_)
-                        | egui::Event::PointerButton { .. }
-                        | egui::Event::MouseWheel { .. }
-                )
-            })
-    });
-    let keyboard_active = ctx.input(|i| {
-        i.events.iter().any(|e| {
-            matches!(
-                e,
-                egui::Event::Text(_)
-                    | egui::Event::Paste(_)
-                    | egui::Event::Key {
-                        pressed: true,
-                        ..
-                    }
-            )
-        })
-    });
-    let interactive = pointer_active || keyboard_active || menu_open;
-
-    if interactive || fx_active {
-        LAST_INTERACTIVE_MS.store(now_ms, Ordering::Relaxed);
-        ctx.request_repaint();
-    }
-
-    let recently_interactive = now_ms.saturating_sub(LAST_INTERACTIVE_MS.load(Ordering::Relaxed))
-        < 750;
+    // Input events already caused the current frame. Only a held pointer needs
+    // follow-up frames; a click, key press, or PointerMoved event must not start
+    // a blanket 750 ms redraw loop.
+    let pointer_held = ctx.input(|i| i.pointer.any_down());
 
     // Only schedule a timer when something actually needs periodic updates.
-    if fx_active || pointer_active || recently_interactive || menu_open {
-        ctx.request_repaint_after(Duration::from_millis(16));
+    if fx_active || pointer_held || menu_open {
+        ctx.request_repaint_after(crate::render_policy::animation_interval());
     } else if transfer_active {
         // Progress / list polls must keep the event loop alive even when the
         // transfer was started from a blocking native dialog (schedule_repaint
         // already ran before rfd returned).
-        ctx.request_repaint_after(Duration::from_millis(33));
+        ctx.request_repaint_after(crate::render_policy::limit_interval(
+            Duration::from_millis(33),
+        ));
     } else if connecting {
         ctx.request_repaint_after(Duration::from_millis(200));
     } else if wants_metrics {
