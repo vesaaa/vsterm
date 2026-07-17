@@ -15,9 +15,47 @@ use crate::TermError;
 /// Invoked (possibly from a PTY reader thread) after the grid accepts new bytes.
 pub type OutputHook = Arc<dyn Fn() + Send + Sync>;
 
-/// Default scrollback depth. 10k lines of a wide grid can cost ~40–50 MB per
-/// busy session; 5k keeps useful history while roughly halving that ceiling.
-const SCROLLBACK_LINES: usize = 5_000;
+/// Start small for idle sessions; grow only when the user actually produces history.
+const SCROLLBACK_INITIAL: usize = 5_000;
+const SCROLLBACK_MID: usize = 10_000;
+const SCROLLBACK_MAX: usize = 20_000;
+/// First growth: once ~3k history lines exist, raise the cap to 10k.
+const SCROLLBACK_GROW_TO_MID_AT: usize = 3_000;
+
+/// Next scrollback cap for `used` history lines under the current `limit`.
+///
+/// - default 5 000
+/// - ≥ 3 000 lines → 10 000
+/// - ≥ 4/5 of current cap → 20 000
+fn next_scrollback_limit(used: usize, limit: usize) -> Option<usize> {
+    if limit < SCROLLBACK_MID && used >= SCROLLBACK_GROW_TO_MID_AT {
+        Some(SCROLLBACK_MID)
+    } else if limit < SCROLLBACK_MAX && used.saturating_mul(5) >= limit.saturating_mul(4) {
+        Some(SCROLLBACK_MAX)
+    } else {
+        None
+    }
+}
+
+fn maybe_grow_scrollback(state: &mut TermState) {
+    let used = state.term.history_size();
+    let Some(next) = next_scrollback_limit(used, state.scrollback_limit) else {
+        return;
+    };
+    if next <= state.scrollback_limit {
+        return;
+    }
+    let mut config = Config::default();
+    config.scrolling_history = next;
+    state.term.set_options(config);
+    tracing::debug!(
+        "terminal scrollback grew {} → {} (history_lines={})",
+        state.scrollback_limit,
+        next,
+        used
+    );
+    state.scrollback_limit = next;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb {
@@ -138,6 +176,8 @@ struct TermState {
     line_times: Vec<Option<NaiveTime>>,
     /// Cursor abs after the previous advance (for stamping line ranges).
     prev_cursor_abs: usize,
+    /// Current scrollback capacity (grows with output; see `maybe_grow_scrollback`).
+    scrollback_limit: usize,
 }
 
 impl TerminalHandle {
@@ -149,7 +189,7 @@ impl TerminalHandle {
             rows: rows_usize,
         };
         let mut config = Config::default();
-        config.scrolling_history = SCROLLBACK_LINES;
+        config.scrolling_history = SCROLLBACK_INITIAL;
         let term = Term::new(config, &size, VoidListener);
         Self {
             inner: Arc::new(Mutex::new(TermState {
@@ -164,6 +204,7 @@ impl TerminalHandle {
                 view_offset: 0,
                 line_times: Vec::new(),
                 prev_cursor_abs: 0,
+                scrollback_limit: SCROLLBACK_INITIAL,
             })),
             output_hook: Arc::new(Mutex::new(None)),
         }
@@ -296,6 +337,8 @@ impl TerminalHandle {
                     state.line_times.drain(0..dropped);
                 }
             }
+
+            maybe_grow_scrollback(&mut state);
 
             // Keep the open block's end at the current cursor (output growth).
             let abs = cursor_abs(&state.term, history_size);
@@ -734,6 +777,36 @@ fn indexed_to_rgb(idx: u8) -> Rgb {
             let v = 8 + 10 * (idx - 232);
             Rgb::new(v, v, v)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollback_grows_at_three_thousand_then_four_fifths() {
+        assert_eq!(next_scrollback_limit(0, SCROLLBACK_INITIAL), None);
+        assert_eq!(next_scrollback_limit(2_999, SCROLLBACK_INITIAL), None);
+        assert_eq!(
+            next_scrollback_limit(3_000, SCROLLBACK_INITIAL),
+            Some(SCROLLBACK_MID)
+        );
+        assert_eq!(next_scrollback_limit(7_999, SCROLLBACK_MID), None);
+        assert_eq!(
+            next_scrollback_limit(8_000, SCROLLBACK_MID),
+            Some(SCROLLBACK_MAX)
+        );
+        assert_eq!(next_scrollback_limit(20_000, SCROLLBACK_MAX), None);
+    }
+
+    #[test]
+    fn scrollback_four_fifths_of_initial_still_goes_to_mid_first() {
+        // 4/5 of 5000 is 4000, but the 3000 threshold already raised us to mid.
+        assert_eq!(
+            next_scrollback_limit(4_000, SCROLLBACK_INITIAL),
+            Some(SCROLLBACK_MID)
+        );
     }
 }
 
