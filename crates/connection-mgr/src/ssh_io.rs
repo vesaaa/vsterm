@@ -68,9 +68,12 @@ impl SshIoSession {
                         Ok(0) => break,
                         Ok(n) => term_reader.advance_bytes(&buf[..n]),
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(15));
-                        }
+                        // The russh PipeReader already waits up to 20 ms for
+                        // data. Sleeping another 15 ms after a timeout creates
+                        // an avoidable blind window: output arriving there
+                        // cannot wake this reader and makes remote echo feel
+                        // noticeably behind the keyboard.
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => continue,
                         Err(_) => break,
                     }
                 }

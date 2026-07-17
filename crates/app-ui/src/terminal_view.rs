@@ -2,7 +2,7 @@ use connection_mgr::ConnectionManager;
 use connection_mgr::ConnectionState;
 use egui::{Color32, FontId, Id, PointerButton, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use std::sync::Arc;
-use term_core::{FoldControl, FoldGuide, Rgb, TerminalSnapshot};
+use term_core::{CellAttr, FoldControl, FoldGuide, Rgb, TerminalSnapshot};
 
 const CELL_W: f32 = 8.4;
 const CELL_H: f32 = 16.0;
@@ -245,46 +245,18 @@ impl TerminalView {
                 is_cursor_row,
             );
 
-            for col in 0..max_cols {
-                let idx = row * snapshot.cols + col;
-                let Some(cell) = snapshot.cells.get(idx) else {
-                    continue;
-                };
-                let mut fg = to_color32(cell.fg);
-                let mut bg = to_color32(cell.bg);
-                if cell.inverse {
-                    std::mem::swap(&mut fg, &mut bg);
-                }
-                if cell.dim {
-                    fg = Color32::from_rgb(
-                        (fg.r() as u16 * 2 / 3) as u8,
-                        (fg.g() as u16 * 2 / 3) as u8,
-                        (fg.b() as u16 * 2 / 3) as u8,
-                    );
-                }
-
-                let cell_rect = Rect::from_min_size(
-                    grid_rect.min + Vec2::new(col as f32 * CELL_W, row as f32 * CELL_H),
-                    Vec2::new(CELL_W, CELL_H),
+            let mut col = 0;
+            while col < max_cols {
+                col = paint_terminal_run(
+                    ui,
+                    &snapshot,
+                    grid_rect,
+                    row,
+                    col,
+                    max_cols,
+                    &font,
+                    &selection,
                 );
-                if selection.contains(col, row) {
-                    ui.painter().rect_filled(
-                        cell_rect,
-                        0.0,
-                        Color32::from_rgba_unmultiplied(70, 130, 210, 140),
-                    );
-                } else if bg != TERM_BG {
-                    ui.painter().rect_filled(cell_rect, 0.0, bg);
-                }
-                if cell.ch != ' ' {
-                    ui.painter().text(
-                        cell_rect.left_top() + Vec2::new(0.0, 1.0),
-                        egui::Align2::LEFT_TOP,
-                        cell.ch.to_string(),
-                        font.clone(),
-                        fg,
-                    );
-                }
             }
 
             // Collapsed block: boxed "···" after the command text.
@@ -442,7 +414,21 @@ impl TerminalView {
                                     if bytes.iter().any(|&b| b == b'\r' || b == b'\n') {
                                         let _ = mgr.with_active(|c| c.terminal.on_client_enter());
                                     }
-                                    let _ = mgr.write_to_active(&bytes);
+                                    if std::env::var_os("VSTERM_DIAG").is_some() {
+                                        let t0 = std::time::Instant::now();
+                                        let _ = mgr.write_to_active(&bytes);
+                                        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                                        // Only log slow writes — per-keystroke console I/O
+                                        // would itself inflate the latency under test.
+                                        if ms >= 1.0 {
+                                            tracing::warn!(
+                                                "VSTERM_DIAG: terminal write_to_active {ms:.2} ms ({} bytes)",
+                                                bytes.len()
+                                            );
+                                        }
+                                    } else {
+                                        let _ = mgr.write_to_active(&bytes);
+                                    }
                                 }
                             }
                         }
@@ -474,6 +460,104 @@ impl TerminalView {
 
         (cols, rows)
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CellPaintKey {
+    fg: Color32,
+    bg: Color32,
+    selected: bool,
+}
+
+fn cell_paint_key(cell: &CellAttr, col: usize, row: usize, selection: &TermSelection) -> CellPaintKey {
+    let mut fg = to_color32(cell.fg);
+    let mut bg = to_color32(cell.bg);
+    if cell.inverse {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    if cell.dim {
+        fg = Color32::from_rgb(
+            (fg.r() as u16 * 2 / 3) as u8,
+            (fg.g() as u16 * 2 / 3) as u8,
+            (fg.b() as u16 * 2 / 3) as u8,
+        );
+    }
+    CellPaintKey {
+        fg,
+        bg,
+        selected: selection.contains(col, row),
+    }
+}
+
+/// Paint one horizontal run of cells sharing the same colours/selection.
+/// Returns the next column index to paint.
+fn paint_terminal_run(
+    ui: &mut Ui,
+    snapshot: &TerminalSnapshot,
+    grid_rect: Rect,
+    row: usize,
+    col: usize,
+    max_cols: usize,
+    font: &FontId,
+    selection: &TermSelection,
+) -> usize {
+    let idx = row * snapshot.cols + col;
+    let Some(cell) = snapshot.cells.get(idx) else {
+        return col + 1;
+    };
+    let key = cell_paint_key(cell, col, row, selection);
+    let mut run_end = col + 1;
+    while run_end < max_cols {
+        let next = snapshot.cells.get(row * snapshot.cols + run_end);
+        let Some(next) = next else {
+            break;
+        };
+        if cell_paint_key(next, run_end, row, selection) != key {
+            break;
+        }
+        run_end += 1;
+    }
+
+    let row_y = row as f32 * CELL_H;
+    for c in col..run_end {
+        let cell_rect = Rect::from_min_size(
+            grid_rect.min + Vec2::new(c as f32 * CELL_W, row_y),
+            Vec2::new(CELL_W, CELL_H),
+        );
+        if key.selected {
+            ui.painter().rect_filled(
+                cell_rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(70, 130, 210, 140),
+            );
+        } else if key.bg != TERM_BG {
+            ui.painter().rect_filled(cell_rect, 0.0, key.bg);
+        }
+    }
+
+    let mut glyphs = String::with_capacity(run_end - col);
+    let mut visible = false;
+    for c in col..run_end {
+        let ch = snapshot.cells[row * snapshot.cols + c].ch;
+        glyphs.push(ch);
+        if ch != ' ' {
+            visible = true;
+        }
+    }
+    if visible {
+        let cell_rect = Rect::from_min_size(
+            grid_rect.min + Vec2::new(col as f32 * CELL_W, row_y),
+            Vec2::new((run_end - col) as f32 * CELL_W, CELL_H),
+        );
+        ui.painter().text(
+            cell_rect.left_top() + Vec2::new(0.0, 1.0),
+            egui::Align2::LEFT_TOP,
+            glyphs,
+            font.clone(),
+            key.fg,
+        );
+    }
+    run_end
 }
 
 /// Returns a new display_offset when the user drags the thumb.

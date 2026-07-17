@@ -28,8 +28,12 @@ enum Trailing<'a> {
 
 /// Call at the start of every menu / submenu body.
 pub fn prepare(ui: &mut Ui) {
-    // Keep painting while any menu is open so hover rows track the pointer.
+    // Continuous 16 ms cadence while any menu is open so hover rows track the
+    // pointer. A single `request_repaint()` only queues one extra frame — after
+    // that, idle Monitor's 400 ms timer made highlight feel detached.
     ui.ctx().request_repaint();
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(16));
     ui.set_min_width(MENU_WIDTH);
     ui.set_max_width(MENU_WIDTH);
     ui.spacing_mut().item_spacing.y = 1.0;

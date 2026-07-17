@@ -10,7 +10,7 @@ members = [
 default-members = ["crates/app-ui"]
 
 [workspace.package]
-version = "1.0.15"
+version = "1.0.16"
 edition = "2021"
 license-file = "LICENSE"
 authors = ["vesaa"]
@@ -43,7 +43,7 @@ alacritty_terminal = "0.25"
 portable-pty = "0.8"
 
 # SSH (full wiring in stage 4)
-russh = "0.50"
+russh = { version = "0.62.2", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.0.5"
 
 # Security
@@ -69,7 +69,10 @@ arboard = "3"
 iconflow = { version = "1", default-features = false, features = ["pack-lucide"] }
 # Allocator: SFTP transfers free packet buffers across russh and disk-writer
 # threads. mimalloc handles that churn without serializing the UI heap.
-mimalloc = "0.1"
+# `extended` exposes mi_collect / mi_option_* so we can reclaim worker heaps
+# after a transfer (cross-thread frees otherwise sit in abandoned segments).
+mimalloc = { version = "0.1", features = ["extended"] }
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
 
 # Internal crates
 session-tree = { path = "crates/session-tree" }
@@ -82,10 +85,3 @@ connection-mgr = { path = "crates/connection-mgr" }
 # SFTP transfer speed. Our own crates stay unoptimized for fast iteration.
 [profile.dev.package."*"]
 opt-level = 3
-
-# russh 0.50 VirtualLocks every channel payload via CryptoVec; on Windows that
-# pins the working set during SFTP and leaves the UI laggy after the first large
-# download. Patch mlock to no-op until we upgrade to a russh that uses Bytes for
-# non-secret channel data (upstream #653 / #629).
-[patch.crates-io]
-russh-cryptovec = { path = "crates/patches/russh-cryptovec" }

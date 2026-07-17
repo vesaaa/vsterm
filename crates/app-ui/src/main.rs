@@ -70,10 +70,17 @@ fn main() -> Result<()> {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(wgpu_setup()),
+            // Prefer Mailbox, then Immediate — never Fifo. AutoVsync was quantising
+            // 16 ms repaint requests to a steady ~64 ms / 16 fps in VSTERM_DIAG.
+            present_mode: wgpu::PresentMode::AutoNoVsync,
             ..Default::default()
         },
         ..Default::default()
     };
+
+    tracing::info!(
+        "wgpu present_mode=AutoNoVsync (Mailbox→Immediate; avoids Fifo ~64 ms frame quantisation)"
+    );
 
     eframe::run_native(
         "VsTerm",

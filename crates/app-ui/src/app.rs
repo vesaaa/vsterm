@@ -1292,13 +1292,29 @@ impl eframe::App for VsTermApp {
         let has_remote_host = self.connections.active_remote().is_some();
         self.metrics
             .set_active(wants_live_host_data && has_local_host);
-        self.remote_host
-            .set_sampling(wants_live_host_data && has_remote_host);
+        // Sampling is set below once we know whether a transfer is active.
         let wants_metrics = wants_live_host_data;
         let auth_animating = self.auth_prompt.is_some()
             || self.pending_spit_auth.is_some()
             || self.fx.is_active();
-        schedule_repaint(ctx, connecting, wants_metrics, auth_animating);
+        let transfer_active = bottom_panel::needs_transfer_poll(&self.bottom);
+        // Remote metrics share the same SSH session/runtime as the interactive
+        // shell and SFTP. Keep collecting only when the UI needs it *and* no
+        // transfer is saturating the session — otherwise typing echo waits
+        // behind pipelined reads / exec channels.
+        self.remote_host.set_sampling(
+            wants_live_host_data && has_remote_host && !transfer_active,
+        );
+        let menu_open = ctx.is_context_menu_open()
+            || ctx.memory(|m| m.any_popup_open());
+        schedule_repaint(
+            ctx,
+            connecting,
+            wants_metrics,
+            auth_animating,
+            transfer_active,
+            menu_open,
+        );
 
         self.poll_pending_connect();
         self.connections.reap_dead();
@@ -1875,8 +1891,24 @@ impl eframe::App for VsTermApp {
         // context menu closed (click → close_menu → this arm → next paint → open).
         match bottom_panel::take_native_dialog_after_paint(&mut self.bottom) {
             Some(kind) => {
+                // rfd blocks the UI thread for the whole picker; attribute it
+                // explicitly so it is not mistaken for download-end jank.
+                let t0 = std::time::Instant::now();
                 let remote = self.connections.active_remote();
                 bottom_panel::run_native_dialog(&mut self.bottom, remote.as_ref(), kind);
+                if std::env::var_os("VSTERM_DIAG").is_some() {
+                    tracing::warn!(
+                        "VSTERM_DIAG: native file dialog blocked UI for {:.0} ms",
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                // `schedule_repaint` already ran *before* this blocking dialog.
+                // Any `request_repaint_after` from that call can expire while
+                // rfd holds the UI thread, and a transfer started here would
+                // never schedule its 33 ms poll until some unrelated wake —
+                // matching "2nd save → seconds with no progress bar → finishes
+                // instantly". Always wake immediately after the dialog returns.
+                ctx.request_repaint();
             }
             None if bottom_panel::has_pending_native_dialog(&self.bottom) => {
                 ctx.request_repaint();
@@ -2032,12 +2064,45 @@ fn seed_demo_if_empty(store: &SessionStore) -> anyhow::Result<()> {
 
 /// Scope guard that times one `update()` call and periodically reports the real
 /// repaint rate + per-frame UI-thread cost. Enabled only when `VSTERM_DIAG` is set.
-struct FrameDiag(std::time::Instant);
+struct FrameDiag {
+    started: std::time::Instant,
+}
 
 impl FrameDiag {
     fn start() -> Self {
-        FrameDiag(std::time::Instant::now())
+        static ENABLED: once_cell::sync::Lazy<bool> =
+            once_cell::sync::Lazy::new(|| std::env::var_os("VSTERM_DIAG").is_some());
+        let started = std::time::Instant::now();
+        if *ENABLED {
+            use std::cell::RefCell;
+            thread_local! {
+                static PREV_START: RefCell<Option<std::time::Instant>> =
+                    const { RefCell::new(None) };
+            }
+            PREV_START.with(|p| {
+                if let Some(prev) = *p.borrow() {
+                    let gap_ms = prev.elapsed().as_secs_f64() * 1000.0;
+                    // While interacting, gaps ≫ update cost mean latency lives
+                    // outside App::update (GPU/scheduling/soft faults).
+                    if gap_ms >= 80.0 {
+                        tracing::warn!("VSTERM_DIAG: FRAME GAP {:.0} ms", gap_ms);
+                    }
+                    GAP_ACC.with(|g| {
+                        let mut max_gap = g.borrow_mut();
+                        if gap_ms > *max_gap {
+                            *max_gap = gap_ms;
+                        }
+                    });
+                }
+                *p.borrow_mut() = Some(started);
+            });
+        }
+        FrameDiag { started }
     }
+}
+
+thread_local! {
+    static GAP_ACC: std::cell::RefCell<f64> = const { std::cell::RefCell::new(0.0) };
 }
 
 impl Drop for FrameDiag {
@@ -2053,7 +2118,12 @@ impl Drop for FrameDiag {
             static ACC: RefCell<(u32, f64, f64, Option<Instant>)> =
                 const { RefCell::new((0, 0.0, 0.0, None)) };
         }
-        let dt_ms = self.0.elapsed().as_secs_f64() * 1000.0;
+        let dt_ms = self.started.elapsed().as_secs_f64() * 1000.0;
+        // Immediate line for stalls: the 2s summary alone cannot tell dialog
+        // blocks apart from download-end freezes.
+        if dt_ms >= 100.0 {
+            tracing::warn!("VSTERM_DIAG: SLOW FRAME {:.0} ms", dt_ms);
+        }
         ACC.with(|c| {
             let mut a = c.borrow_mut();
             a.0 += 1;
@@ -2066,11 +2136,18 @@ impl Drop for FrameDiag {
             if win >= 2.0 {
                 let fps = a.0 as f64 / win;
                 let avg = a.1 / a.0 as f64;
+                let gap_max = GAP_ACC.with(|g| {
+                    let mut v = g.borrow_mut();
+                    let out = *v;
+                    *v = 0.0;
+                    out
+                });
                 tracing::warn!(
-                    "VSTERM_DIAG: {:.1} fps | frame avg {:.2} ms max {:.2} ms ({} frames / {:.1}s)",
+                    "VSTERM_DIAG: {:.1} fps | frame avg {:.2} ms max {:.2} ms | gap max {:.0} ms ({} frames / {:.1}s)",
                     fps,
                     avg,
                     a.2,
+                    gap_max,
                     a.0,
                     win
                 );
@@ -2082,8 +2159,27 @@ impl Drop for FrameDiag {
 
 /// Event-driven painting: wake on input / terminal output; slow timer only for
 /// connecting polls and metrics panels. Fully idle windows do not schedule timers.
-fn schedule_repaint(ctx: &egui::Context, connecting: bool, wants_metrics: bool, fx_active: bool) {
-    use std::time::Duration;
+fn schedule_repaint(
+    ctx: &egui::Context,
+    connecting: bool,
+    wants_metrics: bool,
+    fx_active: bool,
+    transfer_active: bool,
+    menu_open: bool,
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    // Sticky interactivity: keyboard-only input used to get a single
+    // `request_repaint()` then fall through to the metrics 400 ms timer, which
+    // showed up as a steady ~384 ms FRAME GAP and "menus/typing not following
+    // the hand" while Monitor was open. Keep a short high-rate window after any
+    // real input.
+    static LAST_INTERACTIVE_MS: AtomicU64 = AtomicU64::new(0);
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
 
     // Only real pointer *events* count — do not use `pointer.delta()`, which on
     // some Windows setups stays non-zero and forced a continuous ~60 FPS loop
@@ -2112,19 +2208,28 @@ fn schedule_repaint(ctx: &egui::Context, connecting: bool, wants_metrics: bool, 
             )
         })
     });
-    let interactive = pointer_active || keyboard_active;
+    let interactive = pointer_active || keyboard_active || menu_open;
 
     if interactive || fx_active {
+        LAST_INTERACTIVE_MS.store(now_ms, Ordering::Relaxed);
         ctx.request_repaint();
     }
 
+    let recently_interactive = now_ms.saturating_sub(LAST_INTERACTIVE_MS.load(Ordering::Relaxed))
+        < 750;
+
     // Only schedule a timer when something actually needs periodic updates.
-    // A fixed ~530 ms idle timer kept waking ~2 FPS with no visual change.
-    if fx_active || pointer_active {
+    if fx_active || pointer_active || recently_interactive || menu_open {
         ctx.request_repaint_after(Duration::from_millis(16));
+    } else if transfer_active {
+        // Progress / list polls must keep the event loop alive even when the
+        // transfer was started from a blocking native dialog (schedule_repaint
+        // already ran before rfd returned).
+        ctx.request_repaint_after(Duration::from_millis(33));
     } else if connecting {
         ctx.request_repaint_after(Duration::from_millis(200));
     } else if wants_metrics {
+        // Charts only — not used as the interaction wake source anymore.
         ctx.request_repaint_after(Duration::from_millis(400));
     }
 }

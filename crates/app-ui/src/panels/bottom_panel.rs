@@ -94,15 +94,30 @@ enum SelectMode {
 #[derive(Debug, Clone)]
 enum EntryAction {
     Nav(String),
-    Select { name: String, mode: SelectMode },
+    Select {
+        name: String,
+        mode: SelectMode,
+    },
     ClearSelection,
-    Open { name: String, is_dir: bool },
-    Edit { name: String },
-    Delete { name: String, is_dir: bool },
-    Rename { name: String },
+    Open {
+        name: String,
+        is_dir: bool,
+    },
+    Edit {
+        name: String,
+    },
+    Delete {
+        name: String,
+        is_dir: bool,
+    },
+    Rename {
+        name: String,
+    },
     CommitRename,
     CancelRename,
-    Download { names: Vec<String> },
+    Download {
+        names: Vec<String>,
+    },
     NewFolder,
     /// Create a UTF-8 file with the given extension and initial body (may be empty).
     NewFile {
@@ -369,16 +384,18 @@ pub fn show(
             }
         }
         BottomTab::Commands => {
-            let cmds_rect = egui::Rect::from_min_max(
-                egui::pos2(panel_rect.min.x, content_top),
-                panel_rect.max,
-            );
+            let cmds_rect =
+                egui::Rect::from_min_max(egui::pos2(panel_rect.min.x, content_top), panel_rect.max);
             let inner_h = cmds_rect.height().max(0.0);
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(cmds_rect), |ui| {
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(4, 0))
                     .show(ui, |ui| {
-                        ui.label(RichText::new(i18n::t("bottom.commands.hint")).weak().small());
+                        ui.label(
+                            RichText::new(i18n::t("bottom.commands.hint"))
+                                .weak()
+                                .small(),
+                        );
                         if book.commands.is_empty() {
                             ui.label(i18n::t("bottom.commands.empty"));
                         } else {
@@ -467,9 +484,7 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
             Ok(Ok(entries)) => {
                 let path = normalize_remote(&pending.path);
                 state.dir_cache.insert(path.clone(), entries.clone());
-                if pending.apply_browse
-                    && normalize_remote(&state.remote_path) == path
-                {
+                if pending.apply_browse && normalize_remote(&state.remote_path) == path {
                     state.remote_entries = entries;
                     state.remote_error = None;
                     if state.inline_rename.is_none() {
@@ -542,7 +557,7 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
             push_transfer_log(
                 state,
                 TransferLogItem {
-                    name: leaf,
+                    name: leaf.clone(),
                     is_upload,
                     ok: log_ok,
                     detail: log_detail,
@@ -550,6 +565,11 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
             );
             state.transfer = None;
             state.status_line = Some(msg);
+            if std::env::var_os("VSTERM_DIAG").is_some() {
+                tracing::warn!(
+                    "VSTERM_DIAG: transfer finished ok={log_ok} upload={is_upload} label={leaf}"
+                );
+            }
             if snap.error.is_none() {
                 if let Some(how) = open_after {
                     let err = match how {
@@ -620,8 +640,7 @@ fn handle_os_file_drop(
     });
     let has_os_drop = !dropped.is_empty();
     let hovering_os = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
-    let hovering_remote =
-        egui::DragAndDrop::has_payload_of_type::<RemoteDragPayload>(ui.ctx());
+    let hovering_remote = egui::DragAndDrop::has_payload_of_type::<RemoteDragPayload>(ui.ctx());
 
     if remote_mode(remote) != RemotePaneMode::Ready {
         if has_os_drop {
@@ -681,9 +700,7 @@ fn handle_os_file_drop(
             .or_else(|| ui.ctx().pointer_latest_pos())
             .is_some_and(|p| drop_rect.contains(p));
         if over {
-            if let Some(payload) =
-                egui::DragAndDrop::take_payload::<RemoteDragPayload>(ui.ctx())
-            {
+            if let Some(payload) = egui::DragAndDrop::take_payload::<RemoteDragPayload>(ui.ctx()) {
                 prompt_download_selection(state, remote, payload.names.clone());
             }
         }
@@ -702,14 +719,9 @@ fn enqueue_uploads(
     }
     let n = paths.len();
     for path in paths {
-        state
-            .transfer_queue
-            .push_back(QueuedTransfer::Upload(path));
+        state.transfer_queue.push_back(QueuedTransfer::Upload(path));
     }
-    state.status_line = Some(format!(
-        "{} ({n})",
-        i18n::t("bottom.files.upload_queued")
-    ));
+    state.status_line = Some(format!("{} ({n})", i18n::t("bottom.files.upload_queued")));
     pump_transfer_queue(state, remote);
 }
 
@@ -727,10 +739,7 @@ fn enqueue_downloads(
             .transfer_queue
             .push_back(QueuedTransfer::Download { name, dest });
     }
-    state.status_line = Some(format!(
-        "{} ({n})",
-        i18n::t("bottom.files.download_queued")
-    ));
+    state.status_line = Some(format!("{} ({n})", i18n::t("bottom.files.download_queued")));
     pump_transfer_queue(state, remote);
 }
 
@@ -1012,8 +1021,8 @@ fn show_files_content(
                     ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
                 }
                 if sep_resp.dragged() {
-                    state.tree_width = (state.tree_width + sep_resp.drag_delta().x)
-                        .clamp(MIN_TREE_W, max_tree);
+                    state.tree_width =
+                        (state.tree_width + sep_resp.drag_delta().x).clamp(MIN_TREE_W, max_tree);
                 }
 
                 ui.allocate_ui_with_layout(
@@ -1121,9 +1130,7 @@ fn paint_files_status_bar(
                     }
                     let snap = xfer.progress.snapshot();
                     let frac = match snap.total {
-                        Some(t) if t > 0 => {
-                            (snap.transferred as f32 / t as f32).clamp(0.0, 1.0)
-                        }
+                        Some(t) if t > 0 => (snap.transferred as f32 / t as f32).clamp(0.0, 1.0),
                         _ => 0.0,
                     };
                     let bar = paint_transfer_progress_bar(
@@ -1186,9 +1193,7 @@ fn paint_files_status_bar(
 }
 
 fn transfer_list_has_rows(state: &BottomPanelState) -> bool {
-    state.transfer.is_some()
-        || !state.transfer_queue.is_empty()
-        || !state.transfer_log.is_empty()
+    state.transfer.is_some() || !state.transfer_queue.is_empty() || !state.transfer_log.is_empty()
 }
 
 /// Custom progress strip: name left, speed center, size right — and clickable.
@@ -1240,16 +1245,10 @@ fn paint_transfer_progress_bar(
         name_g,
         fg,
     );
-    ui.painter().galley(
-        egui::pos2(speed_x, y - speed_g.size().y * 0.5),
-        speed_g,
-        fg,
-    );
-    ui.painter().galley(
-        egui::pos2(size_x, y - size_g.size().y * 0.5),
-        size_g,
-        fg,
-    );
+    ui.painter()
+        .galley(egui::pos2(speed_x, y - speed_g.size().y * 0.5), speed_g, fg);
+    ui.painter()
+        .galley(egui::pos2(size_x, y - size_g.size().y * 0.5), size_g, fg);
 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -1393,7 +1392,13 @@ enum TransferRowKind {
     Failed,
 }
 
-fn transfer_list_row(ui: &mut Ui, is_upload: bool, name: &str, detail: &str, kind: TransferRowKind) {
+fn transfer_list_row(
+    ui: &mut Ui,
+    is_upload: bool,
+    name: &str,
+    detail: &str,
+    kind: TransferRowKind,
+) {
     let arrow = if is_upload { "↑" } else { "↓" };
     let status = match kind {
         TransferRowKind::Running => i18n::t("bottom.files.transfer.running"),
@@ -1595,9 +1600,7 @@ fn apply_entry_action(
 
 /// After the UI pass: arm a queued dialog once the menu has painted closed, or
 /// return it ready to open (blocking `rfd`). Called from `App::update` end.
-pub fn take_native_dialog_after_paint(
-    state: &mut BottomPanelState,
-) -> Option<NativeDialogKind> {
+pub fn take_native_dialog_after_paint(state: &mut BottomPanelState) -> Option<NativeDialogKind> {
     let Some(pending) = state.pending_native_dialog.take() else {
         return None;
     };
@@ -1623,6 +1626,15 @@ pub fn forget_saved_host(state: &mut BottomPanelState, host_key: &str) {
 
 pub fn has_pending_native_dialog(state: &BottomPanelState) -> bool {
     state.pending_native_dialog.is_some()
+}
+
+/// True when the files panel needs a short poll cadence (active/queued transfer
+/// or in-flight directory list).
+pub fn needs_transfer_poll(state: &BottomPanelState) -> bool {
+    state.transfer.is_some()
+        || state.pending_list.is_some()
+        || !state.transfer_queue.is_empty()
+        || state.remote_loading
 }
 
 pub fn run_native_dialog(
@@ -1661,7 +1673,11 @@ fn apply_selection(state: &mut BottomPanelState, name: &str, mode: SelectMode) {
                 .selection_anchor
                 .clone()
                 .unwrap_or_else(|| name.to_string());
-            let names: Vec<&str> = state.remote_entries.iter().map(|e| e.name.as_str()).collect();
+            let names: Vec<&str> = state
+                .remote_entries
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect();
             let Some(i0) = names.iter().position(|n| *n == anchor.as_str()) else {
                 state.selected.clear();
                 state.selected.insert(name.to_string());
@@ -1720,7 +1736,10 @@ fn create_remote_folder(state: &mut BottomPanelState, remote: Option<&RemoteSess
         state.status_line = Some(i18n::t("bottom.files.err.no_sftp").into());
         return;
     };
-    let name = unique_entry_name(&state.remote_entries, &i18n::t("bottom.files.new_folder_name"));
+    let name = unique_entry_name(
+        &state.remote_entries,
+        &i18n::t("bottom.files.new_folder_name"),
+    );
     let path = join_remote(&state.remote_path, &name);
     match session.mkdir(&path) {
         Ok(()) => {
@@ -2020,11 +2039,7 @@ fn start_download(
         });
 }
 
-fn start_upload(
-    state: &mut BottomPanelState,
-    remote: Option<&RemoteSession>,
-    local_path: PathBuf,
-) {
+fn start_upload(state: &mut BottomPanelState, remote: Option<&RemoteSession>, local_path: PathBuf) {
     let Some(remote) = remote.filter(|r| r.sftp_supported()) else {
         state.status_line = Some(i18n::t("bottom.files.err.no_sftp").into());
         return;
@@ -2146,10 +2161,7 @@ fn show_dir_tree(ui: &mut Ui, state: &BottomPanelState, max_h: f32) -> Vec<Entry
                     )
                 });
                 ui.painter().galley(
-                    egui::pos2(
-                        icon_x + 16.0,
-                        rect.center().y - name_g.size().y * 0.5,
-                    ),
+                    egui::pos2(icon_x + 16.0, rect.center().y - name_g.size().y * 0.5),
                     name_g,
                     ui_icon::COLOR_MUTED,
                 );
@@ -2180,8 +2192,7 @@ fn show_dir_tree(ui: &mut Ui, state: &BottomPanelState, max_h: f32) -> Vec<Entry
                     ui.label(RichText::new("…").small().weak());
                     return;
                 };
-                let mut dirs: Vec<&RemoteDirEntry> =
-                    entries.iter().filter(|e| e.is_dir).collect();
+                let mut dirs: Vec<&RemoteDirEntry> = entries.iter().filter(|e| e.is_dir).collect();
                 dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                 for d in dirs {
                     let child = join_remote(&path_n, &d.name);
@@ -2213,10 +2224,7 @@ fn list_remote(
         SelectMode::Replace
     };
     let selected = state.selected.clone();
-    let editing = state
-        .inline_rename
-        .as_ref()
-        .map(|r| r.old_name.clone());
+    let editing = state.inline_rename.as_ref().map(|r| r.old_name.clone());
 
     egui::ScrollArea::vertical()
         .id_salt(("remote_files", remote_path.to_owned()))
@@ -2265,14 +2273,13 @@ fn list_remote(
                         egui::pos2(rect.left() + 2.0, rect.top()),
                         egui::pos2(rect.left() + 18.0, rect.bottom()),
                     );
-                    sys_file_icon::paint_entry(
+                    sys_file_icon::paint_entry(ui, &entry.name, entry.is_dir, icon_rect, 16.0);
+                    let edit_w = rename_field_width(
                         ui,
-                        &entry.name,
-                        entry.is_dir,
-                        icon_rect,
-                        16.0,
+                        &rename.new_name,
+                        rect.left() + 20.0,
+                        rect.right() - 4.0,
                     );
-                    let edit_w = rename_field_width(ui, &rename.new_name, rect.left() + 20.0, rect.right() - 4.0);
                     let edit_rect = egui::Rect::from_min_size(
                         egui::pos2(rect.left() + 20.0, rect.top() + 1.0),
                         egui::vec2(edit_w, (rect.height() - 2.0).max(16.0)),
@@ -2292,12 +2299,12 @@ fn list_remote(
                     if just_opened {
                         let end = rename_stem_char_len(&rename.new_name, entry.is_dir);
                         let mut state_te = edit.state;
-                        state_te.cursor.set_char_range(Some(
-                            egui::text::CCursorRange::two(
+                        state_te
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::two(
                                 egui::text::CCursor::new(0),
                                 egui::text::CCursor::new(end),
-                            ),
-                        ));
+                            )));
                         state_te.store(ui.ctx(), edit.response.id);
                         ui.ctx().request_repaint();
                     }
@@ -2330,10 +2337,7 @@ fn list_remote(
                     } else {
                         vec![entry.name.clone()]
                     };
-                    egui::DragAndDrop::set_payload(
-                        ui.ctx(),
-                        RemoteDragPayload { names },
-                    );
+                    egui::DragAndDrop::set_payload(ui.ctx(), RemoteDragPayload { names });
                     ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
                 }
                 if resp.clicked() {
@@ -2437,7 +2441,8 @@ fn list_remote(
                 });
                 if let Some(a) = ctx_act {
                     // Keep multi-selection when downloading several items.
-                    let keep_selection = matches!(&a, EntryAction::Download { names } if names.len() > 1);
+                    let keep_selection =
+                        matches!(&a, EntryAction::Download { names } if names.len() > 1);
                     if !keep_selection {
                         actions.push(EntryAction::Select {
                             name: entry.name.clone(),
@@ -2526,13 +2531,7 @@ fn list_remote(
 /// Width of the inline rename field: hug the filename, not the whole row.
 fn rename_field_width(ui: &Ui, name: &str, left: f32, right: f32) -> f32 {
     let text_w = ui
-        .fonts(|f| {
-            f.layout_no_wrap(
-                name.to_owned(),
-                FontId::proportional(13.0),
-                Color32::WHITE,
-            )
-        })
+        .fonts(|f| f.layout_no_wrap(name.to_owned(), FontId::proportional(13.0), Color32::WHITE))
         .size()
         .x;
     let max_w = (right - left).max(40.0);
@@ -2545,9 +2544,7 @@ fn rename_stem_char_len(name: &str, is_dir: bool) -> usize {
         return name.chars().count();
     }
     match name.rsplit_once('.') {
-        Some((stem, ext))
-            if !stem.is_empty() && !ext.is_empty() && !name.starts_with('.') =>
-        {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && !name.starts_with('.') => {
             stem.chars().count()
         }
         _ => name.chars().count(),
@@ -2565,13 +2562,8 @@ fn paint_parent_row(ui: &mut Ui, rect: egui::Rect) {
     let label = i18n::t("bottom.files.parent");
     let x = rect.left() + 4.0 + icon_w + 4.0;
     let y = rect.center().y;
-    let name_galley = ui.fonts(|f| {
-        f.layout_no_wrap(
-            label,
-            FontId::proportional(13.0),
-            ui_icon::COLOR_MUTED,
-        )
-    });
+    let name_galley =
+        ui.fonts(|f| f.layout_no_wrap(label, FontId::proportional(13.0), ui_icon::COLOR_MUTED));
     let name_pos = egui::pos2(x, y - name_galley.size().y * 0.5);
     ui.painter()
         .galley(name_pos, name_galley, ui_icon::COLOR_MUTED);

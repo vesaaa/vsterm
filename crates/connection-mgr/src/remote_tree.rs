@@ -13,7 +13,7 @@ use russh_sftp::client::{Config as SftpConfig, RawSftpSession};
 use russh_sftp::extensions;
 use russh_sftp::protocol::{FileAttributes, FileType, OpenFlags, StatusCode};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
@@ -24,8 +24,7 @@ pub const SFTP_MAX_PACKET_LEN: u32 = 1024 * 1024;
 /// In-flight WRITE requests for uploads.
 pub const SFTP_MAX_CONCURRENT_WRITES: usize = 64;
 /// In-flight READ requests for downloads.
-/// Kept modest: each reply is a ~256 KiB buffer, and russh 0.50 also holds a
-/// CryptoVec copy per in-flight channel message. 16 × 256 KiB ≈ 4 MiB peak.
+/// Kept modest: each reply is a ~256 KiB buffer. 16 × 256 KiB ≈ 4 MiB peak.
 const DOWNLOAD_PIPELINE: usize = 16;
 /// Fallback chunk when server does not advertise read limits (~256 KiB − overhead).
 const DEFAULT_READ_CHUNK: u32 = 256 * 1024 - 9;
@@ -42,13 +41,12 @@ const DOWNLOAD_WRITE_QUEUE: usize = 16;
 const DOWNLOAD_REORDER_CAP: usize = 32;
 /// Buffered-writer capacity for the background disk writer.
 const DOWNLOAD_WRITE_BUF: usize = 512 * 1024;
-/// Flush + fsync the output file every this many bytes. Without this the OS
-/// write-back cache grows unbounded at line rate; on Windows that eventually
-/// throttles `WriteFile` (the mid-transfer stall) and trims the GUI process
-/// working set, so the app's menus lag more with every large download. Pacing
-/// the writer to the disk keeps dirty pages bounded and the UI responsive.
-/// 64 MiB keeps stalls short; 128 MiB made the bar freeze noticeably on HDD/AV.
-const DOWNLOAD_SYNC_INTERVAL: u64 = 64 * 1024 * 1024;
+/// Flush the BufWriter to the OS every this many bytes (does **not** fsync).
+/// Periodic `sync_data` was removed: on Windows it stalls the whole process for
+/// ~1s per burst (VSTERM_DIAG FRAME GAP ≈ 1014 ms during downloads) while the
+/// cache manager drains dirty pages — menus and typing freeze even though
+/// `App::update` itself stays cheap.
+const DOWNLOAD_FLUSH_INTERVAL: u64 = 16 * 1024 * 1024;
 
 fn open_download_file(path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(windows)]
@@ -56,16 +54,43 @@ fn open_download_file(path: &Path) -> std::io::Result<std::fs::File> {
         use std::os::windows::fs::OpenOptionsExt;
         // Hint the cache manager that we write the file once, sequentially —
         // reduces mid-transfer cache flushes that stall progress.
+        const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .custom_flags(0x0800_0000) // FILE_FLAG_SEQUENTIAL_SCAN
+            .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
             .open(path)
     }
     #[cfg(not(windows))]
     {
         std::fs::File::create(path)
+    }
+}
+
+/// Partial path beside the final destination. Writing here then renaming avoids
+/// truncating an existing file that Windows Defender / Indexer may still hold
+/// after a previous download — that lock showed up as “save confirmed, progress
+/// bar appears seconds later, then finishes immediately” on the 2nd+ overwrite.
+fn download_partial_path(final_path: &Path) -> PathBuf {
+    let mut name = final_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "download".into());
+    name.push(".vsterm.partial");
+    final_path.with_file_name(name)
+}
+
+fn promote_download_partial(partial: &Path, final_path: &Path) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(final_path);
+    match std::fs::rename(partial, final_path) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Cross-volume or AV race: fall back to copy+remove.
+            std::fs::copy(partial, final_path)?;
+            let _ = std::fs::remove_file(partial);
+            Ok(())
+        }
     }
 }
 
@@ -103,7 +128,13 @@ where
         let limits = Limits::from(ext);
         if let Some(r) = limits.read_len {
             if r > 0 {
-                max_read = (r as u32).min(max_packet.saturating_sub(9)).max(32 * 1024);
+                // Cap even when the server allows 1 MiB reads: large chunks
+                // inflate reorder/write-queue peak and cross-thread free churn,
+                // which is the post-download UI locality problem.
+                max_read = (r as u32)
+                    .min(max_packet.saturating_sub(9))
+                    .min(DEFAULT_READ_CHUNK)
+                    .max(32 * 1024);
             }
         }
         session.set_limits(limits);
@@ -278,36 +309,41 @@ async fn download_file_pipelined(
     }
 
     // Disk writes run on a dedicated blocking thread. Progress is counted here —
-    // when bytes are committed to the OS, not when they arrive from the network —
-    // so the bar reflects real on-disk progress instead of sprinting ahead on
-    // buffered reads and then freezing. The writer also fsyncs periodically so
-    // the OS write-back cache stays bounded (see DOWNLOAD_SYNC_INTERVAL).
+    // when bytes are committed to the OS write cache, not when they arrive from
+    // the network — so the bar reflects real write progress instead of sprinting
+    // ahead on buffered reads. We flush the BufWriter periodically (no fsync);
+    // a single sync_data runs once at EOF before rename.
     let base = ctx.transferred;
     let total = ctx.total;
     let progress = ctx.progress.clone();
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(DOWNLOAD_WRITE_QUEUE);
-    let write_path = local_path.to_path_buf();
+    // Write to a sibling partial file, then rename into place. Truncating the
+    // final path on 2nd+ overwrite often blocks for seconds under Windows
+    // Defender while the previous download is still being scanned.
+    let partial_path = download_partial_path(local_path);
+    let write_path = partial_path.clone();
     let writer: JoinHandle<std::io::Result<u64>> = tokio::task::spawn_blocking(move || {
         use std::io::Write as _;
         let file = open_download_file(&write_path)?;
         let mut w = std::io::BufWriter::with_capacity(DOWNLOAD_WRITE_BUF, file);
         let mut written: u64 = 0;
-        let mut since_sync: u64 = 0;
+        let mut since_flush: u64 = 0;
         while let Some(buf) = rx.blocking_recv() {
             w.write_all(&buf)?;
             written += buf.len() as u64;
-            since_sync += buf.len() as u64;
+            since_flush += buf.len() as u64;
             if let Some(p) = &progress {
                 p.set(base.saturating_add(written), total);
             }
-            if since_sync >= DOWNLOAD_SYNC_INTERVAL {
+            if since_flush >= DOWNLOAD_FLUSH_INTERVAL {
                 w.flush()?;
-                w.get_ref().sync_data()?;
-                since_sync = 0;
+                since_flush = 0;
             }
         }
         w.flush()?;
-        w.get_ref().sync_data()?;
+        // Do not sync_data here: on Windows it can stall the whole process for
+        // 1–2 s (VSTERM_DIAG SLOW FRAME / FRAME GAP). Durability is handled
+        // after rename on a background thread.
         if let Some(p) = &progress {
             p.set(base.saturating_add(written), total);
         }
@@ -482,9 +518,30 @@ async fn download_file_pipelined(
     let _ = raw.close(handle.as_str()).await;
 
     if let Some(e) = read_err {
+        let _ = std::fs::remove_file(&partial_path);
         return Err(e);
     }
-    let written = write_result.map_err(ConnError::Io)?;
+    let written = match write_result {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = std::fs::remove_file(&partial_path);
+            return Err(ConnError::Io(e));
+        }
+    };
+    if let Err(e) = promote_download_partial(&partial_path, local_path) {
+        let _ = std::fs::remove_file(&partial_path);
+        return Err(ConnError::Io(e));
+    }
+    // Best-effort durability off the download/UI path — never block rename or
+    // finish_ok on FlushFileBuffers.
+    let sync_path = local_path.to_path_buf();
+    let _ = std::thread::Builder::new()
+        .name("vsterm-dl-sync".into())
+        .spawn(move || {
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&sync_path) {
+                let _ = f.sync_data();
+            }
+        });
     // Advance the running total so the next file in a tree download resumes from
     // the correct base (the writer drives the live bar during the transfer).
     ctx.transferred = base.saturating_add(written);

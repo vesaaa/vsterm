@@ -281,7 +281,9 @@ async fn auth_with_password(
         .map_err(|e| ConnError::Connect(format!("{e}")))?
     {
         AuthResult::Success => return Ok(()),
-        AuthResult::Failure { remaining_methods } => {
+        AuthResult::Failure {
+            remaining_methods, ..
+        } => {
             if !remaining_methods
                 .iter()
                 .any(|m| *m == MethodKind::KeyboardInteractive)
@@ -355,10 +357,14 @@ async fn open_shell_io(
         .await
         .map_err(|e| ConnError::Connect(format!("request shell: {e}")))?;
 
-    let (out_tx, out_rx) = mpsc::sync_channel::<Vec<u8>>(512);
+    // Unbounded: a full sync channel blocks the Tokio worker on `send`, which
+    // stalls shell writes and SSH reads on the same runtime as SFTP.
+    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
     let (ctrl_tx, mut ctrl_rx) = tmpsc::unbounded_channel::<ShellCtrl>();
     let alive = Arc::new(AtomicBool::new(true));
     let alive_bridge = Arc::clone(&alive);
+    let latency = Arc::new(ParkingMutex::new(None::<std::time::Instant>));
+    let bridge_latency = Arc::clone(&latency);
 
     tokio::spawn(async move {
         loop {
@@ -369,6 +375,15 @@ async fn open_shell_io(
                         Some(ShellCtrl::Data(buf)) => {
                             if buf.is_empty() {
                                 continue;
+                            }
+                            if std::env::var_os("VSTERM_DIAG").is_some() {
+                                if let Some(sent) = *bridge_latency.lock() {
+                                    tracing::warn!(
+                                        "VSTERM_DIAG: terminal input dispatched to SSH in {:.1} ms ({} bytes)",
+                                        sent.elapsed().as_secs_f64() * 1000.0,
+                                        buf.len()
+                                    );
+                                }
                             }
                             if let Err(err) = channel.data(Cursor::new(buf)).await {
                                 tracing::debug!("russh shell write: {err}");
@@ -386,11 +401,29 @@ async fn open_shell_io(
                 msg = channel.wait() => {
                     match msg {
                         Some(ChannelMsg::Data { ref data }) => {
+                            if let Some(sent) = bridge_latency.lock().take() {
+                                if std::env::var_os("VSTERM_DIAG").is_some() {
+                                    tracing::warn!(
+                                        "VSTERM_DIAG: terminal first SSH output in {:.1} ms ({} bytes)",
+                                        sent.elapsed().as_secs_f64() * 1000.0,
+                                        data.len()
+                                    );
+                                }
+                            }
                             if out_tx.send(data.to_vec()).is_err() {
                                 break;
                             }
                         }
                         Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                            if let Some(sent) = bridge_latency.lock().take() {
+                                if std::env::var_os("VSTERM_DIAG").is_some() {
+                                    tracing::warn!(
+                                        "VSTERM_DIAG: terminal first SSH output in {:.1} ms ({} bytes stderr)",
+                                        sent.elapsed().as_secs_f64() * 1000.0,
+                                        data.len()
+                                    );
+                                }
+                            }
                             let bytes: &[u8] = data.as_ref();
                             if out_tx.send(bytes.to_vec()).is_err() {
                                 break;
@@ -417,6 +450,7 @@ async fn open_shell_io(
     let writer: Box<dyn Write + Send> = Box::new(PipeWriter {
         tx: ctrl_tx.clone(),
         alive: Arc::clone(&alive),
+        latency,
     });
 
     let resize_tx = ctrl_tx;
@@ -477,6 +511,7 @@ impl Read for PipeReader {
 struct PipeWriter {
     tx: tmpsc::UnboundedSender<ShellCtrl>,
     alive: Arc<AtomicBool>,
+    latency: Arc<ParkingMutex<Option<std::time::Instant>>>,
 }
 
 impl Write for PipeWriter {
@@ -484,6 +519,7 @@ impl Write for PipeWriter {
         if !self.alive.load(Ordering::SeqCst) {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "shell closed"));
         }
+        *self.latency.lock() = Some(std::time::Instant::now());
         self.tx
             .send(ShellCtrl::Data(buf.to_vec()))
             .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e))?;
@@ -793,6 +829,9 @@ impl RemoteFs for RusshRemoteExec {
 }
 
 fn finish_transfer(result: &Result<(), ConnError>, progress: Option<&ArcProgress>) {
+    // Always release the UI transfer state first. Heap reclaim must never delay
+    // finish_ok — the barrier-based collector starved the shared russh runtime
+    // (interactive shell + next download open) for multiple seconds.
     match result {
         Ok(()) => {
             if let Some(p) = progress {
@@ -805,6 +844,24 @@ fn finish_transfer(result: &Result<(), ConnError>, progress: Option<&ArcProgress
             }
         }
     }
+    schedule_transfer_heap_reclaim();
+}
+
+/// Best-effort mimalloc reclaim after SFTP churn.
+///
+/// Runs on a dedicated thread only. Never touch the shared russh worker threads:
+/// those also drive the interactive shell, and even fire-and-forget `mi_collect`
+/// there contended with PTY echo right after downloads.
+fn schedule_transfer_heap_reclaim() {
+    let _ = std::thread::Builder::new()
+        .name("vsterm-mi-reclaim".into())
+        .spawn(|| {
+            // `false` = non-forced: return pages without a full heap walk that
+            // stalls other threads holding the allocator.
+            unsafe {
+                libmimalloc_sys::mi_collect(false);
+            }
+        });
 }
 
 fn sftp_session_dead(err: &ConnError) -> bool {
