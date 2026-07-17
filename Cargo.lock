@@ -5894,6 +5894,7 @@ dependencies = [
  "chrono",
  "parking_lot",
  "portable-pty",
+ "sysinfo",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
