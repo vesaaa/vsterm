@@ -34,14 +34,6 @@ pub fn install(ctx: &egui::Context) {
         Arc::new(FontData::from_static(JETBRAINS_MONO_REGULAR)),
     );
 
-    #[cfg(target_os = "linux")]
-    {
-        fonts.font_data.insert(
-            FAMILY_FALLBACK_CJK.to_owned(),
-            Arc::new(FontData::from_static(NOTO_SANS_SC_LIGHT)),
-        );
-    }
-
     let default_proportional = fonts
         .families
         .get(&FontFamily::Proportional)
@@ -58,6 +50,10 @@ pub fn install(ctx: &egui::Context) {
         None => {
             #[cfg(target_os = "linux")]
             {
+                fonts.font_data.insert(
+                    FAMILY_FALLBACK_CJK.to_owned(),
+                    Arc::new(FontData::from_static(NOTO_SANS_SC_LIGHT)),
+                );
                 (
                     "embedded Noto Sans SC Light".into(),
                     Some(FAMILY_FALLBACK_CJK.to_owned()),
@@ -74,12 +70,6 @@ pub fn install(ctx: &egui::Context) {
         // Keep egui defaults behind the UI font so rare symbols (menu ▸ / emoji)
         // still resolve instead of rendering as `?`.
         let mut proportional = vec![ui.clone()];
-        #[cfg(target_os = "linux")]
-        {
-            if ui.as_str() != FAMILY_FALLBACK_CJK {
-                proportional.push(FAMILY_FALLBACK_CJK.to_owned());
-            }
-        }
         for name in &default_proportional {
             if !proportional.iter().any(|n| n == name) {
                 proportional.push(name.clone());
@@ -94,12 +84,6 @@ pub fn install(ctx: &egui::Context) {
     if let Some(ref ui) = ui_family {
         mono.push(ui.clone());
     }
-    #[cfg(target_os = "linux")]
-    {
-        if ui_family.as_deref() != Some(FAMILY_FALLBACK_CJK) {
-            mono.push(FAMILY_FALLBACK_CJK.to_owned());
-        }
-    }
     if ui_family.is_none() {
         // Still cover CJK (where possible) via egui's default proportional stack.
         mono.extend(default_proportional);
@@ -113,8 +97,12 @@ pub fn install(ctx: &egui::Context) {
 
     #[cfg(target_os = "linux")]
     tracing::info!(
-        "fonts: UI={ui_source}; mono=JetBrains Mono; CJK fallback=Noto Sans SC Light ({} KB); icons=Lucide",
-        NOTO_SANS_SC_LIGHT.len() / 1024
+        "fonts: UI={ui_source}; mono=JetBrains Mono; CJK={}; icons=Lucide",
+        if ui_family.as_deref() == Some(FAMILY_FALLBACK_CJK) {
+            format!("embedded Noto Sans SC Light ({} KB)", NOTO_SANS_SC_LIGHT.len() / 1024)
+        } else {
+            "system only".into()
+        }
     );
     #[cfg(not(target_os = "linux"))]
     tracing::info!("fonts: UI={ui_source}; mono=JetBrains Mono; CJK=system only; icons=Lucide");
@@ -297,6 +285,12 @@ fn read_font_file(path: &Path, index: u32) -> Option<FontData> {
     if bytes.len() < 64 {
         return None;
     }
+    tracing::info!(
+        "fonts: loaded system face {} ({} KB, ttc_index={})",
+        path.display(),
+        bytes.len() / 1024,
+        index
+    );
     let mut data = FontData::from_owned(bytes);
     data.index = index;
     Some(data)

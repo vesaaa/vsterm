@@ -15,7 +15,78 @@ use crate::TermError;
 /// Invoked (possibly from a PTY reader thread) after the grid accepts new bytes.
 pub type OutputHook = Arc<dyn Fn() + Send + Sync>;
 
-const SCROLLBACK_LINES: usize = 10_000;
+/// Start small for idle sessions; grow only when the user actually produces history.
+const SCROLLBACK_INITIAL: usize = 5_000;
+const SCROLLBACK_MID: usize = 10_000;
+/// After the first bump to 10k, raise the cap by this step until the hard max.
+const SCROLLBACK_STEP: usize = 10_000;
+/// Hard ceiling (aligned with Alacritty's documented max). Beyond this, oldest
+/// history is discarded (FIFO) — we never grow further.
+const SCROLLBACK_MAX: usize = 100_000;
+/// First growth: once ~3k history lines exist, raise the cap to 10k.
+const SCROLLBACK_GROW_TO_MID_AT: usize = 3_000;
+/// Refuse to raise the cap when the host has less free RAM than this.
+/// Raising the cap itself is cheap; the reserve avoids thrashing as new lines allocate.
+const SCROLLBACK_MIN_FREE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Next scrollback cap for `used` history lines under the current `limit`.
+///
+/// - default 5 000
+/// - ≥ 3 000 lines → 10 000
+/// - thereafter, when ≥ 4/5 full → +10 000 each time, up to 100 000
+fn next_scrollback_limit(used: usize, limit: usize) -> Option<usize> {
+    if limit >= SCROLLBACK_MAX {
+        return None;
+    }
+    if limit < SCROLLBACK_MID && used >= SCROLLBACK_GROW_TO_MID_AT {
+        return Some(SCROLLBACK_MID);
+    }
+    if limit >= SCROLLBACK_MID && used.saturating_mul(5) >= limit.saturating_mul(4) {
+        return Some((limit + SCROLLBACK_STEP).min(SCROLLBACK_MAX));
+    }
+    None
+}
+
+fn memory_allows_scrollback_growth() -> bool {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    sys.available_memory() >= SCROLLBACK_MIN_FREE_BYTES
+}
+
+fn maybe_grow_scrollback(state: &mut TermState) {
+    if state.scrollback_limit >= SCROLLBACK_MAX || state.scrollback_grow_blocked {
+        // At hard max (or previously refused): alacritty drops oldest lines when full.
+        return;
+    }
+    let used = state.term.history_size();
+    let Some(next) = next_scrollback_limit(used, state.scrollback_limit) else {
+        return;
+    };
+    if next <= state.scrollback_limit {
+        return;
+    }
+    if !memory_allows_scrollback_growth() {
+        // Keep the current cap. Once history fills it, alacritty discards the
+        // oldest lines — same outcome as hitting SCROLLBACK_MAX.
+        tracing::warn!(
+            "terminal scrollback growth skipped (need ≥{} MB free RAM); keeping {} lines, oldest history will be discarded when full",
+            SCROLLBACK_MIN_FREE_BYTES / (1024 * 1024),
+            state.scrollback_limit
+        );
+        state.scrollback_grow_blocked = true;
+        return;
+    }
+    let mut config = Config::default();
+    config.scrolling_history = next;
+    state.term.set_options(config);
+    tracing::debug!(
+        "terminal scrollback grew {} → {} (history_lines={})",
+        state.scrollback_limit,
+        next,
+        used
+    );
+    state.scrollback_limit = next;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb {
@@ -136,6 +207,10 @@ struct TermState {
     line_times: Vec<Option<NaiveTime>>,
     /// Cursor abs after the previous advance (for stamping line ranges).
     prev_cursor_abs: usize,
+    /// Current scrollback capacity (grows with output; see `maybe_grow_scrollback`).
+    scrollback_limit: usize,
+    /// Set when a growth step was refused due to low free RAM (no further grow attempts).
+    scrollback_grow_blocked: bool,
 }
 
 impl TerminalHandle {
@@ -147,7 +222,7 @@ impl TerminalHandle {
             rows: rows_usize,
         };
         let mut config = Config::default();
-        config.scrolling_history = SCROLLBACK_LINES;
+        config.scrolling_history = SCROLLBACK_INITIAL;
         let term = Term::new(config, &size, VoidListener);
         Self {
             inner: Arc::new(Mutex::new(TermState {
@@ -162,6 +237,8 @@ impl TerminalHandle {
                 view_offset: 0,
                 line_times: Vec::new(),
                 prev_cursor_abs: 0,
+                scrollback_limit: SCROLLBACK_INITIAL,
+                scrollback_grow_blocked: false,
             })),
             output_hook: Arc::new(Mutex::new(None)),
         }
@@ -294,6 +371,8 @@ impl TerminalHandle {
                     state.line_times.drain(0..dropped);
                 }
             }
+
+            maybe_grow_scrollback(&mut state);
 
             // Keep the open block's end at the current cursor (output growth).
             let abs = cursor_abs(&state.term, history_size);
@@ -732,6 +811,53 @@ fn indexed_to_rgb(idx: u8) -> Rgb {
             let v = 8 + 10 * (idx - 232);
             Rgb::new(v, v, v)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollback_grows_at_three_thousand_then_ten_k_steps() {
+        assert_eq!(next_scrollback_limit(0, SCROLLBACK_INITIAL), None);
+        assert_eq!(next_scrollback_limit(2_999, SCROLLBACK_INITIAL), None);
+        assert_eq!(
+            next_scrollback_limit(3_000, SCROLLBACK_INITIAL),
+            Some(SCROLLBACK_MID)
+        );
+        // From 10k upward: +10k each time the buffer is ≥ 4/5 full.
+        assert_eq!(next_scrollback_limit(7_999, 10_000), None);
+        assert_eq!(next_scrollback_limit(8_000, 10_000), Some(20_000));
+        assert_eq!(next_scrollback_limit(16_000, 20_000), Some(30_000));
+        assert_eq!(next_scrollback_limit(40_000, 50_000), Some(60_000));
+        assert_eq!(next_scrollback_limit(72_000, 90_000), Some(100_000));
+        // Hard max: never propose another growth step.
+        assert_eq!(next_scrollback_limit(100_000, SCROLLBACK_MAX), None);
+        assert_eq!(next_scrollback_limit(usize::MAX, SCROLLBACK_MAX), None);
+    }
+
+    #[test]
+    fn scrollback_four_fifths_of_initial_still_goes_to_mid_first() {
+        // 4/5 of 5000 is 4000, but the 3000 threshold already raised us to mid.
+        assert_eq!(
+            next_scrollback_limit(4_000, SCROLLBACK_INITIAL),
+            Some(SCROLLBACK_MID)
+        );
+    }
+
+    #[test]
+    fn scrollback_steps_ten_k_up_to_one_hundred_k() {
+        assert_eq!(SCROLLBACK_STEP, 10_000);
+        assert_eq!(SCROLLBACK_MAX, 100_000);
+        let mut limit = SCROLLBACK_MID;
+        while limit < SCROLLBACK_MAX {
+            let used = (limit * 4).div_ceil(5);
+            let next = next_scrollback_limit(used, limit).expect("should grow");
+            assert_eq!(next, (limit + SCROLLBACK_STEP).min(SCROLLBACK_MAX));
+            limit = next;
+        }
+        assert_eq!(limit, SCROLLBACK_MAX);
     }
 }
 
