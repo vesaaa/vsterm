@@ -1578,24 +1578,11 @@ impl eframe::App for VsTermApp {
         });
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            let zmodem_busy = matches!(
-                self.connections.active_zmodem_status(),
-                Some(
-                    ZmodemStatus::Receiving { .. }
-                        | ZmodemStatus::Sending { .. }
-                        | ZmodemStatus::AwaitingUpload { .. }
-                        | ZmodemStatus::AwaitingSaveAs { .. }
-                )
-            );
             status_bar::show(
                 ui,
                 &self.status,
                 self.connections.list_meta().len(),
                 crate::render_policy::is_software_renderer(),
-                zmodem_busy,
-                || {
-                    let _ = self.connections.cancel_zmodem();
-                },
             );
         });
 
@@ -2072,8 +2059,7 @@ impl VsTermApp {
                 bytes,
                 total,
             }) => {
-                self.status =
-                    format_zmodem_progress(i18n::t("zmodem.receiving"), &file_name, bytes, total);
+                // Progress lives in the files-panel strip — keep the app status bar quiet.
                 bottom_panel::sync_zmodem_progress(
                     &mut self.bottom,
                     &file_name,
@@ -2088,8 +2074,6 @@ impl VsTermApp {
                 bytes,
                 total,
             }) => {
-                self.status =
-                    format_zmodem_progress(i18n::t("zmodem.sending"), &file_name, bytes, total);
                 bottom_panel::sync_zmodem_progress(
                     &mut self.bottom,
                     &file_name,
@@ -2100,7 +2084,6 @@ impl VsTermApp {
                 self.pending_zmodem_pick = None;
             }
             Some(ZmodemStatus::AwaitingUpload { prompt_id }) => {
-                self.status = i18n::t("zmodem.await_upload");
                 bottom_panel::sync_zmodem_progress(
                     &mut self.bottom,
                     &i18n::t("zmodem.await_upload"),
@@ -2127,15 +2110,6 @@ impl VsTermApp {
                 total,
                 prompt_id,
             }) => {
-                self.status = match total {
-                    Some(t) if t > 0 => format!(
-                        "{}: {} ({})",
-                        i18n::t("zmodem.await_save"),
-                        suggested_name,
-                        fmt_bytes(t)
-                    ),
-                    _ => format!("{}: {suggested_name}", i18n::t("zmodem.await_save")),
-                };
                 bottom_panel::sync_zmodem_progress(
                     &mut self.bottom,
                     &suggested_name,
@@ -2161,7 +2135,6 @@ impl VsTermApp {
                 }
             }
             Some(ZmodemStatus::Done { summary }) => {
-                self.status = summary.clone();
                 let (name, is_upload) = zmodem_transfer_identity(&self.bottom, &summary, true);
                 bottom_panel::finish_zmodem_transfer(
                     &mut self.bottom,
@@ -2174,7 +2147,6 @@ impl VsTermApp {
                 self.pending_zmodem_pick = None;
             }
             Some(ZmodemStatus::Failed { message }) => {
-                self.status = message.clone();
                 let (name, is_upload) = zmodem_transfer_identity(&self.bottom, &message, false);
                 bottom_panel::finish_zmodem_transfer(
                     &mut self.bottom,
@@ -2221,33 +2193,6 @@ fn format_scrollback_drop(dropped: usize, keep: Option<usize>) -> String {
             i18n::t("term.ops.trim_dropped"),
             i18n::t("term.ops.trim_kept")
         ),
-    }
-}
-
-fn format_zmodem_progress(kind: String, name: &str, bytes: u64, total: Option<u64>) -> String {
-    let name = if name.is_empty() { "…" } else { name };
-    match total {
-        Some(t) if t > 0 => {
-            let pct = ((bytes as f64 / t as f64) * 100.0).clamp(0.0, 100.0);
-            format!("{kind}: {name}  {}/{}  ({pct:.0}%)", fmt_bytes(bytes), fmt_bytes(t))
-        }
-        _ => format!("{kind}: {name}  {}", fmt_bytes(bytes)),
-    }
-}
-
-fn fmt_bytes(n: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    let n = n as f64;
-    if n >= GB {
-        format!("{:.2} GB", n / GB)
-    } else if n >= MB {
-        format!("{:.1} MB", n / MB)
-    } else if n >= KB {
-        format!("{:.0} KB", n / KB)
-    } else {
-        format!("{n:.0} B")
     }
 }
 
