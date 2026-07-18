@@ -8,8 +8,9 @@ use crate::auth::{expand_user_path, preflight, resolve_auth, AuthMaterial, Prefl
 use crate::backend::RemoteExec;
 use crate::known_hosts::{self, HostKeyCheck};
 use crate::remote_exec::RemoteSession;
-use crate::remote_fs::{ArcProgress, RemoteDirEntry, RemoteFs};
+use crate::remote_fs::{ArcProgress, RemoteDirEntry, RemoteFs, SUDO_SFTP_NEEDS_PASSWORD};
 use crate::remote_tree;
+use tokio::io::AsyncWriteExt;
 use crate::shell_integration::remote_bootstrap_command;
 use crate::ssh_io::SshIoSession;
 use crate::ConnError;
@@ -164,6 +165,7 @@ async fn connect_and_shell(
         host: config.host.clone(),
         sftp: tokio::sync::Mutex::new(None),
         sftp_cap: AtomicU8::new(SFTP_CAP_UNKNOWN),
+        sftp_elevated: AtomicBool::new(false),
     });
     let remote = RemoteSession::from_exec_fs(
         config.username.clone(),
@@ -607,6 +609,8 @@ struct RusshRemoteExec {
     /// window + buffers; `close_session` / `Drop` try_send Close is best-effort).
     sftp: tokio::sync::Mutex<Option<SharedSftp>>,
     sftp_cap: AtomicU8,
+    /// `true` while `sftp` is a sudo-elevated `sftp-server` channel.
+    sftp_elevated: AtomicBool,
 }
 
 struct SharedSftp {
@@ -678,6 +682,7 @@ impl RusshRemoteExec {
             }
         };
         self.sftp_cap.store(SFTP_CAP_YES, Ordering::Release);
+        self.sftp_elevated.store(false, Ordering::Release);
         *guard = Some(SharedSftp {
             raw: Arc::clone(&raw),
             max_read,
@@ -691,6 +696,7 @@ impl RusshRemoteExec {
         if let Some(s) = guard.take() {
             let _ = s.raw.close_session();
         }
+        self.sftp_elevated.store(false, Ordering::Release);
         // Allow one re-open after a dead channel (not a permanent "no SFTP").
         let _ = self.sftp_cap.compare_exchange(
             SFTP_CAP_YES,
@@ -698,6 +704,46 @@ impl RusshRemoteExec {
             Ordering::AcqRel,
             Ordering::Relaxed,
         );
+    }
+
+    async fn elevate_sftp_inner(&self, password: Option<String>) -> Result<(), ConnError> {
+        if self.sftp_cap.load(Ordering::Acquire) == SFTP_CAP_NO {
+            return Err(ConnError::Backend(
+                crate::remote_fs::sftp_unsupported_msg().into(),
+            ));
+        }
+        let mut guard = self.sftp.lock().await;
+        if let Some(s) = guard.take() {
+            let _ = s.raw.close_session();
+        }
+        self.sftp_elevated.store(false, Ordering::Release);
+
+        let host = self.host.clone();
+        let session = Arc::clone(&self.session);
+        let passwordless = password.is_none();
+        let opened = tokio::time::timeout(
+            SFTP_OPEN_TIMEOUT,
+            open_sudo_raw_sftp(session, &host, password),
+        )
+        .await;
+        let (raw, max_read) = match opened {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                if passwordless && sudo_sftp_likely_needs_password(&e) {
+                    return Err(ConnError::Backend(SUDO_SFTP_NEEDS_PASSWORD.into()));
+                }
+                return Err(e);
+            }
+            Err(_elapsed) => {
+                return Err(ConnError::Connect(format!(
+                    "sudo sftp {host}: timed out"
+                )));
+            }
+        };
+        self.sftp_cap.store(SFTP_CAP_YES, Ordering::Release);
+        self.sftp_elevated.store(true, Ordering::Release);
+        *guard = Some(SharedSftp { raw, max_read });
+        Ok(())
     }
 }
 
@@ -950,6 +996,21 @@ impl RemoteFs for RusshRemoteExec {
             }
         })
     }
+
+    fn elevate_sftp(&self, password: Option<String>) -> Result<(), ConnError> {
+        runtime().block_on(self.elevate_sftp_inner(password))
+    }
+
+    fn demote_sftp(&self) -> Result<(), ConnError> {
+        runtime().block_on(async {
+            self.invalidate_sftp().await;
+            Ok(())
+        })
+    }
+
+    fn sftp_elevated(&self) -> bool {
+        self.sftp_elevated.load(Ordering::Acquire)
+    }
 }
 
 fn finish_transfer(result: &Result<(), ConnError>, progress: Option<&ArcProgress>) {
@@ -1023,6 +1084,108 @@ async fn open_raw_sftp(
     remote_tree::init_raw_sftp(channel.into_stream()).await
 }
 
+/// Common OpenSSH `sftp-server` install paths (distro-dependent).
+const SFTP_SERVER_CANDIDATES: &[&str] = &[
+    "/usr/libexec/openssh/sftp-server",
+    "/usr/lib/openssh/sftp-server",
+    "/usr/libexec/ssh/sftp-server",
+    "/usr/lib/ssh/sftp-server",
+    "/usr/libexec/sftp-server",
+];
+
+fn sudo_sftp_exec_command(passwordless: bool) -> String {
+    let sudo = if passwordless {
+        "sudo -n"
+    } else {
+        // Empty `-p` keeps prompts off stdout so they cannot corrupt SFTP framing.
+        "sudo -S -p ''"
+    };
+    // Must NOT use wrap_sh_c / heredoc here: that consumes stdin, but
+    // `sudo -S` and the SFTP protocol both need the channel stdin/stdout.
+    let mut cmd = String::from("sh -c 'for x in");
+    for path in SFTP_SERVER_CANDIDATES {
+        cmd.push(' ');
+        cmd.push_str(path);
+    }
+    cmd.push_str("; do [ -x \"$x\" ] && exec ");
+    cmd.push_str(sudo);
+    cmd.push_str(" \"$x\"; done; echo VSTERM_NO_SFTP_SERVER >&2; exit 127'");
+    cmd
+}
+
+async fn open_sudo_raw_sftp(
+    session: Arc<Handle<ClientHandler>>,
+    host: &str,
+    password: Option<String>,
+) -> Result<(Arc<russh_sftp::client::RawSftpSession>, u32), ConnError> {
+    let passwordless = password.is_none();
+    let channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| ConnError::Connect(format!("sudo sftp channel {host}: {e}")))?;
+    channel
+        .exec(true, sudo_sftp_exec_command(passwordless))
+        .await
+        .map_err(|e| ConnError::Connect(format!("sudo sftp exec {host}: {e}")))?;
+
+    let mut stream = channel.into_stream();
+    if let Some(pw) = password {
+        // `sudo -S` reads the password from stdin before handing off to sftp-server.
+        let mut creds = pw.into_bytes();
+        creds.push(b'\n');
+        stream
+            .write_all(&creds)
+            .await
+            .map_err(|e| ConnError::Connect(format!("sudo sftp password {host}: {e}")))?;
+        // Zeroize best-effort; String was moved into bytes.
+        for b in &mut creds {
+            *b = 0;
+        }
+        stream
+            .flush()
+            .await
+            .map_err(|e| ConnError::Connect(format!("sudo sftp password flush {host}: {e}")))?;
+    }
+
+    remote_tree::init_raw_sftp(stream)
+        .await
+        .map_err(|e| map_sudo_sftp_init_err(host, passwordless, e))
+}
+
+fn map_sudo_sftp_init_err(host: &str, passwordless: bool, err: ConnError) -> ConnError {
+    let raw = err.to_string();
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("vsterm_no_sftp_server") {
+        return ConnError::Backend(
+            "sudo SFTP: remote sftp-server binary not found".into(),
+        );
+    }
+    if passwordless {
+        return ConnError::Backend(format!(
+            "{SUDO_SFTP_NEEDS_PASSWORD}: sudo sftp {host}: {raw}"
+        ));
+    }
+    if lower.contains("sorry")
+        || lower.contains("password")
+        || lower.contains("authentication")
+        || lower.contains("a password is required")
+    {
+        return ConnError::AuthFailed(format!("sudo sftp {host}: incorrect sudo password"));
+    }
+    if lower.contains("requiretty") || lower.contains("a terminal is required") {
+        return ConnError::Backend(format!(
+            "sudo sftp {host}: sudo requires a TTY — allow `!requiretty` for sftp-server or use NOPASSWD"
+        ));
+    }
+    ConnError::Connect(format!("sudo sftp {host}: {raw}"))
+}
+
+fn sudo_sftp_likely_needs_password(err: &ConnError) -> bool {
+    err.to_string()
+        .to_ascii_lowercase()
+        .contains(SUDO_SFTP_NEEDS_PASSWORD)
+}
+
 fn wrap_sh_c(script: &str) -> String {
     // Host metrics / routes scripts are multi-line Rust string literals. On a
     // Windows checkout with autocrlf those literals can contain `\r`, which
@@ -1033,7 +1196,7 @@ fn wrap_sh_c(script: &str) -> String {
 
 #[cfg(test)]
 mod wrap_sh_tests {
-    use super::{sftp_capability_denied, wrap_sh_c};
+    use super::{sftp_capability_denied, sudo_sftp_exec_command, wrap_sh_c};
     use crate::ConnError;
 
     #[test]
@@ -1056,5 +1219,17 @@ mod wrap_sh_tests {
         assert!(!sftp_capability_denied(&ConnError::Connect(
             "sftp channel router: Connection reset".into()
         )));
+    }
+
+    #[test]
+    fn sudo_sftp_command_keeps_stdin_free() {
+        let cmd = sudo_sftp_exec_command(false);
+        assert!(cmd.starts_with("sh -c '"));
+        assert!(!cmd.contains("VSTERM_EOF"), "must not use heredoc stdin");
+        assert!(cmd.contains("sudo -S -p ''"));
+        assert!(cmd.contains("/usr/lib/openssh/sftp-server"));
+        let n = sudo_sftp_exec_command(true);
+        assert!(n.contains("sudo -n"));
+        assert!(!n.contains("sudo -S"));
     }
 }

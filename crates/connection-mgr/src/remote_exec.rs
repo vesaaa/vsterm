@@ -107,4 +107,17 @@ impl RemoteSession {
     pub fn write_file(&self, remote_path: &str, data: &[u8]) -> Result<(), ConnError> {
         self.fs.write_file(remote_path, data)
     }
+
+    /// Elevate the file-panel SFTP channel with `sudo` (separate from terminal `sudo -i`).
+    pub fn elevate_sftp(&self, password: Option<String>) -> Result<(), ConnError> {
+        self.fs.elevate_sftp(password)
+    }
+
+    pub fn demote_sftp(&self) -> Result<(), ConnError> {
+        self.fs.demote_sftp()
+    }
+
+    pub fn sftp_elevated(&self) -> bool {
+        self.fs.sftp_elevated()
+    }
 }
