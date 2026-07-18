@@ -5,7 +5,7 @@ use crate::i18n::{self, Locale};
 use crate::metrics::{HostSnapshot, MetricsService};
 use crate::remote_host::RemoteHostService;
 use crate::panels::bottom_panel::{self, BottomPanelState};
-use crate::panels::host_toolbar::{self, MainTab};
+use crate::panels::host_toolbar::{self, HostToolbarAction, MainTab};
 use crate::panels::connect_auth::{self, AuthPromptState};
 use crate::panels::session_editor::{self, EditorMode, SessionEditorState};
 use crate::panels::session_tree_panel::{self, TreeSelection};
@@ -1790,7 +1790,31 @@ impl eframe::App for VsTermApp {
                 return;
             }
 
-            host_toolbar::show(ui, &mut self.main_tab);
+            if let Some(action) = host_toolbar::show(ui, &mut self.main_tab) {
+                match action {
+                    HostToolbarAction::TrimScrollback { keep } => {
+                        if let Some(dropped) = self.connections.active_trim_scrollback(keep) {
+                            self.status = if dropped == 0 {
+                                i18n::t("term.ops.trim_noop")
+                            } else {
+                                format!(
+                                    "{} — {}",
+                                    i18n::t("term.ops.trim_done"),
+                                    format_scrollback_drop(dropped, keep)
+                                )
+                            };
+                            // Best-effort return of freed scrollback pages.
+                            let _ = std::thread::Builder::new()
+                                .name("vsterm-mi-reclaim".into())
+                                .spawn(|| unsafe {
+                                    libmimalloc_sys::mi_collect(false);
+                                });
+                        } else {
+                            self.status = i18n::t("term.ops.trim_no_term");
+                        }
+                    }
+                }
+            }
             ui.add_space(2.0);
             ui.separator();
 
@@ -2187,6 +2211,17 @@ fn zmodem_transfer_identity(
         .unwrap_or("ZMODEM")
         .to_string();
     (name, true)
+}
+
+fn format_scrollback_drop(dropped: usize, keep: Option<usize>) -> String {
+    match keep {
+        None | Some(0) => format!("{} {dropped}", i18n::t("term.ops.trim_dropped")),
+        Some(k) => format!(
+            "{} {dropped} · {} {k}",
+            i18n::t("term.ops.trim_dropped"),
+            i18n::t("term.ops.trim_kept")
+        ),
+    }
 }
 
 fn format_zmodem_progress(kind: String, name: &str, bytes: u64, total: Option<u64>) -> String {

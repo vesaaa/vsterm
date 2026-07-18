@@ -407,6 +407,55 @@ impl TerminalHandle {
         Ok(())
     }
 
+    /// Trim scrollback history, keeping at most `keep` oldest-dropped / newest-kept
+    /// lines above the live screen. `None` (or `Some(0)`) clears all scrollback.
+    ///
+    /// Returns how many history lines were dropped. Does not clear the visible
+    /// screen — only the scroll-up buffer (same role as CSI `ESC[3J`).
+    pub fn trim_scrollback(&self, keep: Option<usize>) -> usize {
+        let mut state = self.inner.lock();
+        let hist_before = state.term.history_size();
+        let keep = keep.unwrap_or(0).min(hist_before);
+        if keep >= hist_before {
+            return 0;
+        }
+
+        let mut config = Config::default();
+        config.scrolling_history = keep;
+        state.term.set_options(config);
+
+        let hist_after = state.term.history_size();
+        let dropped = hist_before.saturating_sub(hist_after);
+        if dropped > 0 {
+            state.marks.note_history_trim(dropped);
+            if dropped >= state.line_times.len() {
+                state.line_times.clear();
+            } else {
+                state.line_times.drain(0..dropped);
+            }
+            state.prev_cursor_abs = state.prev_cursor_abs.saturating_sub(dropped);
+        }
+
+        // Restore the growth ceiling so new output can expand history again.
+        // Clearing everything also resets the cap to the idle default.
+        if keep == 0 {
+            state.scrollback_limit = SCROLLBACK_INITIAL;
+            state.scrollback_grow_blocked = false;
+        }
+        let mut config = Config::default();
+        config.scrolling_history = state.scrollback_limit;
+        state.term.set_options(config);
+
+        state.view_offset = 0;
+        state.term.scroll_display(Scroll::Bottom);
+        dropped
+    }
+
+    /// Current scrollback line count (above the live screen).
+    pub fn history_size(&self) -> usize {
+        self.inner.lock().term.history_size()
+    }
+
     pub fn snapshot(&self) -> TerminalSnapshot {
         let state = self.inner.lock();
         let cols = state.cols;
@@ -844,6 +893,31 @@ mod tests {
             next_scrollback_limit(4_000, SCROLLBACK_INITIAL),
             Some(SCROLLBACK_MID)
         );
+    }
+
+    #[test]
+    fn trim_scrollback_keeps_newest_lines() {
+        let term = TerminalHandle::new(80, 24);
+        let mut buf = String::new();
+        for i in 0..4_000 {
+            buf.push_str(&format!("line-{i}\n"));
+            if buf.len() > 32_000 {
+                term.advance_bytes(buf.as_bytes());
+                buf.clear();
+            }
+        }
+        if !buf.is_empty() {
+            term.advance_bytes(buf.as_bytes());
+        }
+        let before = term.history_size();
+        assert!(before > 2_000, "history={before}");
+        let dropped = term.trim_scrollback(Some(2_000));
+        let after = term.history_size();
+        assert!(dropped > 0);
+        assert!(after <= 2_000, "after={after}");
+        let cleared = term.trim_scrollback(None);
+        assert_eq!(term.history_size(), 0);
+        assert!(cleared > 0);
     }
 
     #[test]
