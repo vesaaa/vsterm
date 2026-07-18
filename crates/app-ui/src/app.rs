@@ -576,6 +576,8 @@ impl VsTermApp {
                 self.main_tab = MainTab::Terminal;
                 self.sync_host_binding();
                 self.status = i18n::t("status.connected");
+                // Remember username (and key path) typed at the login prompt.
+                self.persist_connect_identity(&pending.config);
                 if let Some(rect) = self.last_auth_dialog_rect.take() {
                     let accent = crate::fx::accent_from_tag(pending.config.color_tag.as_deref());
                     match self.connect_fx {
@@ -611,7 +613,7 @@ impl VsTermApp {
                             i18n::t("dialog.auth.verify_failed")
                         }
                     };
-                    let username = pending.config.username.clone();
+                    let username = pending.config.username.trim().to_string();
                     let key_path = pending
                         .config
                         .auth
@@ -624,6 +626,8 @@ impl VsTermApp {
                     if let Some(path) = key_path {
                         prompt.key_path = path;
                     }
+                    // Re-apply after restoring fields so focus matches username presence.
+                    prompt.apply_field_focus();
                     self.auth_prompt = Some(prompt);
                     self.status = i18n::t("dialog.auth.retry");
                 } else {
@@ -818,6 +822,48 @@ impl VsTermApp {
             Err(err) => {
                 self.error_dialog = Some(format_conn_error(&ConnError::NotFound(err.to_string())));
                 self.status = i18n::t("status.open_failed");
+            }
+        }
+    }
+
+    /// Write back username / private-key path from a successful login prompt so
+    /// the next connect dialog can prefill them.
+    fn persist_connect_identity(&mut self, connected: &SessionConfig) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let file = format!("{}.yaml", connected.id);
+        let Ok(mut saved) = store.load_session(&file) else {
+            return;
+        };
+        let mut dirty = false;
+        let user = connected.username.trim();
+        if !user.is_empty() && saved.username.trim() != user {
+            saved.username = user.to_string();
+            dirty = true;
+        }
+        match (&connected.auth, &saved.auth) {
+            (
+                session_tree::AuthConfig::Publickey {
+                    private_key_path: new_path,
+                    ..
+                },
+                session_tree::AuthConfig::Publickey {
+                    private_key_path: old_path,
+                    passphrase_ref,
+                },
+            ) if new_path != old_path && !new_path.as_os_str().is_empty() => {
+                saved.auth = session_tree::AuthConfig::Publickey {
+                    private_key_path: new_path.clone(),
+                    passphrase_ref: passphrase_ref.clone(),
+                };
+                dirty = true;
+            }
+            _ => {}
+        }
+        if dirty {
+            if let Err(err) = store.save_session(&saved) {
+                tracing::debug!("persist connect identity {}: {err}", connected.id);
             }
         }
     }

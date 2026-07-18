@@ -83,8 +83,9 @@ impl AuthPromptState {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         let has_vault_password = config.auth.has_vault_password();
-        let username = config.username.clone();
-        let focus_username = username.trim().is_empty();
+        // Prefill from the saved session; trim so whitespace-only counts as empty.
+        let username = config.username.trim().to_string();
+        let focus_username = username.is_empty();
         let (ident_tx, ident_rx) = mpsc::channel();
         let host = config.host.clone();
         let port = config.port;
@@ -104,6 +105,7 @@ impl AuthPromptState {
             attempt,
             warn: None,
             focus_username,
+            // No username → focus user field; otherwise focus password / key path.
             focus_secret: !focus_username,
             auto_tried: false,
             has_vault_password,
@@ -119,10 +121,17 @@ impl AuthPromptState {
 
     pub fn with_error(mut self, msg: impl Into<String>) -> Self {
         self.warn = Some(msg.into());
-        self.focus_secret = true;
+        self.apply_field_focus();
         self.verifying = false;
         self.trigger_shake();
         self
+    }
+
+    /// Focus username when empty; otherwise focus the secret field (password / key).
+    pub fn apply_field_focus(&mut self) {
+        let need_user = self.username.trim().is_empty();
+        self.focus_username = need_user;
+        self.focus_secret = !need_user;
     }
 
     pub fn trigger_shake(&mut self) {
@@ -369,10 +378,6 @@ pub fn show(ctx: &egui::Context, state: &mut AuthPromptState) -> (Option<AuthPro
                         .desired_width(f32::INFINITY)
                         .hint_text(i18n::t("dialog.auth.username_hint")),
                 );
-                if state.focus_username && enabled && !measuring {
-                    user_resp.request_focus();
-                    state.focus_username = false;
-                }
 
                 ui.add_space(6.0);
                 let secret_resp = match state.kind {
@@ -405,9 +410,17 @@ pub fn show(ctx: &egui::Context, state: &mut AuthPromptState) -> (Option<AuthPro
                         )
                     }
                 };
-                if state.focus_secret && enabled && !measuring {
-                    secret_resp.request_focus();
-                    state.focus_secret = false;
+                // Apply at most one focus request so password does not steal focus
+                // when the username field is empty (and vice versa).
+                if enabled && !measuring {
+                    if state.focus_username {
+                        user_resp.request_focus();
+                        state.focus_username = false;
+                        state.focus_secret = false;
+                    } else if state.focus_secret {
+                        secret_resp.request_focus();
+                        state.focus_secret = false;
+                    }
                 }
 
                 ui.add_space(12.0);
