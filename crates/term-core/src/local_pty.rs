@@ -176,6 +176,7 @@ impl LocalPtySession {
         // Dropping writer/master closes ConPTY pipes and unblocks the reader thread.
         *self.writer.lock() = None;
         *self.master.lock() = None;
+        self.terminal.set_output_hook(None);
     }
 }
 

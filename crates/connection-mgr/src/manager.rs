@@ -372,9 +372,22 @@ impl ConnectionManager {
         // Drop SSH/PTY I/O off the UI thread. Synchronous drop joins reader
         // threads and disconnects russh; doing that inline keeps RSS high and
         // can hitch the frame where the tab was closed.
-        if let Some(conn) = removed {
+        if let Some(mut conn) = removed {
+            // Cancel an in-flight ZMODEM before the writer is torn down.
+            if let Some(io) = conn.io.as_ref() {
+                if io.zmodem().is_transferring() {
+                    let wire = io.zmodem().cancel();
+                    let _ = io.write_raw(&wire);
+                }
+            }
+            // Detach terminal wake hook early (also done in SshIoSession drop).
+            conn.terminal.set_output_hook(None);
             std::thread::spawn(move || {
                 drop(conn);
+                // Best-effort return of freed pages after the session heap is gone.
+                unsafe {
+                    libmimalloc_sys::mi_collect(false);
+                }
             });
         }
     }

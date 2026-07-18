@@ -1631,6 +1631,38 @@ pub fn forget_saved_host(state: &mut BottomPanelState, host_key: &str) {
     }
 }
 
+/// Close-tab teardown: cancel SFTP work for this host and drop all cached UI
+/// state that could keep a `RemoteSession` (and its SSH buffers) alive.
+pub fn shutdown_host(state: &mut BottomPanelState, host_key: &str) {
+    // Cancel a live transfer that belongs to this host.
+    if state.bound_key.as_deref() == Some(host_key) {
+        if let Some(xfer) = state.transfer.take() {
+            xfer.progress.request_cancel();
+        }
+        state.transfer_queue.clear();
+        state.pending_list = None;
+        state.remote_loading = false;
+        state.dir_cache.clear();
+        state.remote_entries.clear();
+        state.selected.clear();
+        state.pending_native_dialog = None;
+        state.bound_key = None;
+        state.status_line = Some(i18n::t("bottom.files.transfer_cancelled_host").into());
+    }
+
+    // Stashed view may also hold an in-flight transfer from when the user
+    // switched tabs mid-download — cancel it before drop.
+    if let Some(mut view) = state.saved.remove(host_key) {
+        if let Some(xfer) = view.transfer.take() {
+            xfer.progress.request_cancel();
+        }
+        view.transfer_queue.clear();
+        view.pending_list = None;
+        // Drop the rest of the stash (dir_cache, entries, …).
+        drop(view);
+    }
+}
+
 pub fn has_pending_native_dialog(state: &BottomPanelState) -> bool {
     state.pending_native_dialog.is_some()
 }
