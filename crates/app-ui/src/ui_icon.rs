@@ -23,6 +23,8 @@ pub enum Icon {
     Terminal,
     Pencil,
     Trash,
+    /// Terminal ops (clear scrollback, …).
+    Eraser,
     Plus,
     Languages,
     Sparkles,
@@ -50,6 +52,7 @@ impl Icon {
             Icon::Terminal => "terminal",
             Icon::Pencil => "pencil",
             Icon::Trash => "trash-2",
+            Icon::Eraser => "eraser",
             Icon::Plus => "plus",
             Icon::Languages => "languages",
             Icon::Sparkles => "sparkles",
@@ -69,6 +72,7 @@ impl Icon {
         match self {
             Icon::Paste => Some("clipboard"),
             Icon::Trash => Some("trash"),
+            Icon::Eraser => Some("eraser"),
             Icon::FolderPlus => Some("folder"),
             Icon::FolderUp => Some("arrow-up"),
             Icon::Pencil => Some("pen-line"),

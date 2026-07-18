@@ -441,6 +441,18 @@ impl ConnectionManager {
         conns.get(&id).map(f)
     }
 
+    /// Trim the active tab's terminal scrollback. `None` clears all history.
+    /// Returns dropped line count when a connected terminal exists.
+    pub fn active_trim_scrollback(&self, keep: Option<usize>) -> Option<usize> {
+        let id = self.active_id()?;
+        let conns = self.connections.lock();
+        let conn = conns.get(&id)?;
+        if conn.state != ConnectionState::Connected {
+            return None;
+        }
+        Some(conn.terminal.trim_scrollback(keep))
+    }
+
     pub fn with_connection_mut<R>(
         &self,
         id: ConnectionId,

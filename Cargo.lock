@@ -334,6 +334,7 @@ dependencies = [
  "file_icon_provider",
  "iconflow",
  "image",
+ "libmimalloc-sys",
  "mimalloc",
  "once_cell",
  "parking_lot",
