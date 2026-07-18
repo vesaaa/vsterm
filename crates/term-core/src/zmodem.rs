@@ -1,13 +1,14 @@
 //! ZMODEM (rz/sz) support over the interactive PTY/SSH shell channel.
 //!
 //! Remote `sz` → local receive (download). Remote `rz` → local send (upload).
-//! Binary frames are diverted away from the terminal grid while a transfer runs.
 //!
-//! I/O is caller-driven: protocol methods return bytes to write on the wire so
-//! the reader/UI never nest the ZMODEM mutex with the PTY writer mutex.
+//! **Dialog pause:** after the remote filename is known (`sz`) or ZRINIT is
+//! seen (`rz`), the protocol stalls until the UI confirms a path / file list.
+//! We do not ACK / send file data while a dialog is open — that avoids the
+//! "already finished before OK" race and the post-confirm freeze.
 
 use parking_lot::Mutex;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use zmodem2::{Action, Event, FileInfo, Position, Receiver, Sender};
@@ -15,29 +16,25 @@ use zmodem2::{Action, Event, FileInfo, Position, Receiver, Sender};
 /// Result of feeding remote bytes through the ZMODEM gate.
 #[derive(Debug, Default)]
 pub struct RxResult {
-    /// Bytes that should reach the terminal emulator (may be empty).
     pub to_terminal: Vec<u8>,
-    /// Protocol response bytes to write back on the PTY/SSH channel.
     pub to_wire: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 pub enum ZmodemStatus {
     Idle,
-    /// Remote ran `sz` — waiting for the UI Save As dialog.
+    /// Remote `sz`: filename known, waiting for Save As.
     AwaitingSaveAs {
         suggested_name: String,
         total: Option<u64>,
     },
-    /// Saving the current `sz` file to the path chosen in Save As.
     Receiving {
         file_name: String,
         bytes: u64,
         total: Option<u64>,
     },
-    /// Remote ran `rz` — waiting for the UI to pick local file(s).
+    /// Remote `rz`: waiting for local file picker.
     AwaitingUpload,
-    /// Uploading local file(s) to remote `rz`.
     Sending {
         file_name: String,
         bytes: u64,
@@ -51,20 +48,34 @@ pub enum ZmodemStatus {
     },
 }
 
+impl ZmodemStatus {
+    /// Progress fraction in `0.0..=1.0` when total size is known.
+    pub fn progress_fraction(&self) -> Option<f32> {
+        match self {
+            Self::Receiving {
+                bytes, total: Some(t), ..
+            }
+            | Self::Sending {
+                bytes, total: Some(t), ..
+            } if *t > 0 => Some((*bytes as f32 / *t as f32).clamp(0.0, 1.0)),
+            Self::AwaitingSaveAs {
+                total: Some(t), ..
+            } if *t > 0 => Some(0.0),
+            _ => None,
+        }
+    }
+}
+
 struct RecvState {
     engine: Receiver,
     file: Option<File>,
-    /// Final destination after Save As (None while still on a temp file).
     path: Option<PathBuf>,
-    /// Scratch file used until the user confirms Save As.
-    temp_path: Option<PathBuf>,
     name: String,
     written: u64,
     total: Option<u64>,
     inbox: Vec<u8>,
+    /// True until Save As confirms a destination path.
     awaiting_save: bool,
-    /// True after `FileCompleted` for the current file (no more writes).
-    file_finished: bool,
 }
 
 struct SendState {
@@ -86,7 +97,6 @@ enum Stage {
     Send(SendState),
 }
 
-/// Per-connection ZMODEM divertor shared by the reader thread and UI.
 pub struct ZmodemBridge {
     inner: Mutex<Inner>,
 }
@@ -134,18 +144,17 @@ impl ZmodemBridge {
         }
     }
 
-    /// CAN sequence used to abort a transfer on the wire.
     pub fn cancel_bytes() -> &'static [u8] {
         &[0x18, 0x18, 0x18, 0x18, 0x18]
     }
 
-    /// Cancel any active transfer. Caller must write the returned wire bytes.
     pub fn cancel(&self) -> Vec<u8> {
         let mut g = self.inner.lock();
         if let Stage::Recv(recv) = &mut g.stage {
             drop(recv.file.take());
-            if let Some(temp) = recv.temp_path.take() {
-                let _ = fs::remove_file(temp);
+            // Remove a partial download if we already opened the Save As path.
+            if let Some(path) = recv.path.take() {
+                let _ = fs::remove_file(path);
             }
         }
         g.stage = Stage::Idle {
@@ -157,13 +166,14 @@ impl ZmodemBridge {
         Self::cancel_bytes().to_vec()
     }
 
-    /// Default folder suggested for the Save As dialog (Downloads when available).
     pub fn default_download_dir(&self) -> PathBuf {
         self.inner.lock().downloads.clone()
     }
 
-    /// Confirm or cancel Save As for an in-progress remote `sz` download.
-    /// `None` cancels the transfer. Returns wire bytes the caller must send.
+    /// Confirm Save As for remote `sz`. `None` cancels.
+    ///
+    /// Until this returns Ok with a path, the receiver does **not** ACK the
+    /// file (ZRPOS stays queued) so the remote cannot finish early.
     pub fn provide_download_path(&self, path: Option<PathBuf>) -> Result<Vec<u8>, String> {
         let mut g = self.inner.lock();
         let Stage::Recv(recv) = &mut g.stage else {
@@ -172,11 +182,8 @@ impl ZmodemBridge {
         if !recv.awaiting_save {
             return Err("no pending ZMODEM Save As".into());
         }
+
         if path.is_none() {
-            if let Some(temp) = recv.temp_path.take() {
-                drop(recv.file.take());
-                let _ = fs::remove_file(temp);
-            }
             g.stage = Stage::Idle {
                 pending: Vec::new(),
             };
@@ -185,46 +192,28 @@ impl ZmodemBridge {
             };
             return Ok(Self::cancel_bytes().to_vec());
         }
+
         let dest = path.unwrap();
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("mkdir {parent:?}: {e}"))?;
         }
-        if let Some(f) = recv.file.as_mut() {
-            let _ = f.sync_all();
-        }
-        drop(recv.file.take());
-        if let Some(temp) = recv.temp_path.take() {
-            if temp != dest {
-                if fs::rename(&temp, &dest).is_err() {
-                    fs::copy(&temp, &dest).map_err(|e| format!("save {dest:?}: {e}"))?;
-                    let _ = fs::remove_file(&temp);
-                }
-            }
-        } else {
-            // Header seen but no bytes yet — create an empty file at the destination.
-            File::create(&dest).map_err(|e| format!("create {dest:?}: {e}"))?;
-        }
-        if !recv.file_finished {
-            recv.file = Some(
-                OpenOptions::new()
-                    .append(true)
-                    .open(&dest)
-                    .map_err(|e| format!("reopen {dest:?}: {e}"))?,
-            );
-        }
+        let f = File::create(&dest).map_err(|e| format!("create {dest:?}: {e}"))?;
+        recv.file = Some(f);
         recv.path = Some(dest.clone());
         recv.awaiting_save = false;
         g.status = ZmodemStatus::Receiving {
             file_name: recv.name.clone(),
-            bytes: recv.written,
+            bytes: 0,
             total: recv.total,
         };
-        tracing::info!("ZMODEM saving → {}", dest.display());
-        Ok(Vec::new())
+        tracing::info!("ZMODEM receiving → {}", dest.display());
+
+        let mut out = Vec::new();
+        run_recv(&mut g, &[], &mut out)?;
+        Ok(out)
     }
 
-    /// Provide local files for an in-progress remote `rz` (upload) session.
-    /// Returns wire bytes the caller must send. Empty `paths` cancels.
+    /// Start upload for remote `rz`. Empty `paths` cancels.
     pub fn provide_upload_files(&self, paths: Vec<PathBuf>) -> Result<Vec<u8>, String> {
         let mut g = self.inner.lock();
         let Stage::AwaitSend { zrinit } = &g.stage else {
@@ -263,8 +252,6 @@ impl ZmodemBridge {
         Ok(out)
     }
 
-    /// Feed bytes from the remote. Caller writes `to_wire` and forwards
-    /// `to_terminal` to the emulator.
     pub fn on_rx(&self, data: &[u8]) -> RxResult {
         let mut g = self.inner.lock();
         let mut to_wire = Vec::new();
@@ -273,8 +260,6 @@ impl ZmodemBridge {
                 pending.extend_from_slice(data);
                 match classify_pending(pending) {
                     Detect::NeedMore => {
-                        // Hold only a short ambiguous suffix so normal output
-                        // ending in '*' is not stuck forever.
                         let hold = ambiguous_suffix_len(pending);
                         if pending.len() > hold {
                             let flush_len = pending.len() - hold;
@@ -307,6 +292,7 @@ impl ZmodemBridge {
                         let text = pending[..prefix_len].to_vec();
                         let frame = pending[prefix_len..].to_vec();
                         pending.clear();
+                        // Stall: do not create a Sender until the UI picks files.
                         g.stage = Stage::AwaitSend { zrinit: frame };
                         g.status = ZmodemStatus::AwaitingUpload;
                         text
@@ -323,10 +309,12 @@ impl ZmodemBridge {
                     g.stage = Stage::Idle {
                         pending: Vec::new(),
                     };
+                    to_wire.extend_from_slice(Self::cancel_bytes());
                 }
                 Vec::new()
             }
             Stage::AwaitSend { zrinit } => {
+                // Keep buffering remote bytes; still no Sender until UI confirms.
                 zrinit.extend_from_slice(data);
                 Vec::new()
             }
@@ -361,7 +349,6 @@ fn classify_pending(buf: &[u8]) -> Detect {
         return match (t0, t1) {
             (b'0', b'0') => Detect::RemoteSend(i),
             (b'0', b'1') => Detect::RemoteRecv(i),
-            // Other hex header types: treat as send-side initiation.
             _ => Detect::RemoteSend(i),
         };
     }
@@ -377,7 +364,6 @@ fn classify_pending(buf: &[u8]) -> Detect {
     Detect::None
 }
 
-/// Bytes at the end that might be the start of `**\x18B..` or `*\x18A/B/C`.
 fn ambiguous_suffix_len(buf: &[u8]) -> usize {
     if buf.is_empty() {
         return 0;
@@ -428,13 +414,11 @@ fn start_recv(
             engine,
             file: None,
             path: None,
-            temp_path: None,
             name: String::new(),
             written: 0,
             total: None,
             inbox: frame,
             awaiting_save: false,
-            file_finished: false,
         }),
         status: ZmodemStatus::Receiving {
             file_name: String::new(),
@@ -448,7 +432,6 @@ fn start_recv(
 }
 
 fn run_recv(inner: &mut Inner, data: &[u8], to_wire: &mut Vec<u8>) -> Result<(), String> {
-    let downloads = inner.downloads.clone();
     let Stage::Recv(recv) = &mut inner.stage else {
         return Ok(());
     };
@@ -456,7 +439,21 @@ fn run_recv(inner: &mut Inner, data: &[u8], to_wire: &mut Vec<u8>) -> Result<(),
         recv.inbox.extend_from_slice(data);
     }
 
+    // Paused for Save As: keep wire bytes in inbox / engine, but do not ACK
+    // (WriteWire) or accept file data until a path is chosen.
+    if recv.awaiting_save && recv.file.is_none() {
+        return Ok(());
+    }
+
     loop {
+        // Re-check pause (e.g. multi-file next Save As).
+        let Stage::Recv(recv) = &mut inner.stage else {
+            return Ok(());
+        };
+        if recv.awaiting_save && recv.file.is_none() {
+            return Ok(());
+        }
+
         if !recv.inbox.is_empty() {
             let n = recv
                 .engine
@@ -476,59 +473,41 @@ fn run_recv(inner: &mut Inner, data: &[u8], to_wire: &mut Vec<u8>) -> Result<(),
                 let f = recv
                     .file
                     .as_mut()
-                    .ok_or_else(|| "zmodem data before file start".to_string())?;
+                    .ok_or_else(|| "zmodem data before Save As".to_string())?;
                 f.write_all(&owned)
                     .map_err(|e| format!("write download: {e}"))?;
                 recv.written += owned.len() as u64;
                 recv.engine
                     .file_written(owned.len())
                     .map_err(|e| format!("zmodem file_written: {e:?}"))?;
-                if !recv.awaiting_save {
-                    inner.status = ZmodemStatus::Receiving {
-                        file_name: recv.name.clone(),
-                        bytes: recv.written,
-                        total: recv.total,
-                    };
-                }
+                inner.status = ZmodemStatus::Receiving {
+                    file_name: recv.name.clone(),
+                    bytes: recv.written,
+                    total: recv.total,
+                };
             }
             Action::Event(Event::FileStarted(info)) => {
                 let safe = sanitize_name(info.name);
                 let total = info.size.map(|p| u64::from(p.get()));
-                // A previous file still waiting on Save As — keep it under Downloads.
-                if recv.awaiting_save {
-                    finalize_unsaved_recv(recv, &downloads)?;
-                }
-                let temp = unique_path(
-                    &downloads,
-                    &format!(".vsterm-zmodem-{safe}.part"),
-                );
-                let f = File::create(&temp).map_err(|e| format!("create {temp:?}: {e}"))?;
-                recv.file = Some(f);
-                recv.temp_path = Some(temp);
-                recv.path = None;
                 recv.name = safe.clone();
                 recv.written = 0;
                 recv.total = total;
+                recv.path = None;
+                drop(recv.file.take());
                 recv.awaiting_save = true;
-                recv.file_finished = false;
                 inner.status = ZmodemStatus::AwaitingSaveAs {
                     suggested_name: safe,
                     total,
                 };
+                // Leave ZRPOS queued inside the engine until Save As confirms.
+                return Ok(());
             }
             Action::Event(Event::FileCompleted) => {
-                if let Some(f) = recv.file.as_mut() {
+                if let Some(f) = recv.file.take() {
                     let _ = f.sync_all();
                 }
-                if !recv.awaiting_save {
-                    drop(recv.file.take());
-                }
-                recv.file_finished = true;
             }
             Action::Event(Event::SessionCompleted) => {
-                if recv.awaiting_save {
-                    finalize_unsaved_recv(recv, &downloads)?;
-                }
                 let summary = recv
                     .path
                     .as_ref()
@@ -569,7 +548,10 @@ fn run_send(inner: &mut Inner, data: &[u8], to_wire: &mut Vec<u8>) -> Result<(),
         try_offer_file(send, &mut inner.status)?;
     }
 
-    loop {
+    // Bound work per call so the UI/reader never holds the mutex while
+    // streaming an entire multi‑MB file in one go.
+    const MAX_ACTIONS: usize = 64;
+    for _ in 0..MAX_ACTIONS {
         let Stage::Send(send) = &mut inner.stage else {
             return Ok(());
         };
@@ -641,26 +623,6 @@ fn run_send(inner: &mut Inner, data: &[u8], to_wire: &mut Vec<u8>) -> Result<(),
     Ok(())
 }
 
-fn finalize_unsaved_recv(recv: &mut RecvState, downloads: &Path) -> Result<(), String> {
-    if let Some(f) = recv.file.as_mut() {
-        let _ = f.sync_all();
-    }
-    drop(recv.file.take());
-    let dest = unique_path(downloads, &recv.name);
-    if let Some(temp) = recv.temp_path.take() {
-        if fs::rename(&temp, &dest).is_err() {
-            fs::copy(&temp, &dest).map_err(|e| format!("save {dest:?}: {e}"))?;
-            let _ = fs::remove_file(&temp);
-        }
-    } else {
-        File::create(&dest).map_err(|e| format!("create {dest:?}: {e}"))?;
-    }
-    recv.path = Some(dest);
-    recv.awaiting_save = false;
-    recv.file_finished = true;
-    Ok(())
-}
-
 fn try_offer_file(send: &mut SendState, status: &mut ZmodemStatus) -> Result<(), String> {
     if send.offered || send.index >= send.files.len() {
         return Ok(());
@@ -715,30 +677,6 @@ fn sanitize_name(raw: &[u8]) -> String {
     }
 }
 
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let _ = fs::create_dir_all(dir);
-    let candidate = dir.join(name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let stem = Path::new(name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file");
-    let ext = Path::new(name)
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|e| format!(".{e}"))
-        .unwrap_or_default();
-    for i in 1..10_000 {
-        let p = dir.join(format!("{stem}-{i}{ext}"));
-        if !p.exists() {
-            return p;
-        }
-    }
-    dir.join(format!("{stem}-dup{ext}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,5 +710,15 @@ mod tests {
     fn sanitize_strips_path() {
         assert_eq!(sanitize_name(b"../../etc/passwd"), "passwd");
         assert_eq!(sanitize_name(b"ok_file.txt"), "ok_file.txt");
+    }
+
+    #[test]
+    fn progress_fraction_known_total() {
+        let s = ZmodemStatus::Receiving {
+            file_name: "a".into(),
+            bytes: 50,
+            total: Some(100),
+        };
+        assert!((s.progress_fraction().unwrap() - 0.5).abs() < f32::EPSILON);
     }
 }

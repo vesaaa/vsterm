@@ -405,6 +405,22 @@ impl RemoteHostService {
             store_cache(&mut g, &key);
         }
     }
+
+    /// Drop cached metrics for a closed host tab so snapshots (and any
+    /// lingering `RemoteSession` clones via `target`) do not keep RSS around.
+    pub fn forget_host(&self, key: &str) {
+        let mut g = self.inner.lock();
+        g.cache.remove(key);
+        if g.target
+            .as_ref()
+            .is_some_and(|t| t.session.display_key() == key)
+        {
+            g.target = None;
+            g.snapshot = HostSnapshot::default();
+            g.selected_nic = None;
+            g.last_error = None;
+        }
+    }
 }
 
 impl Drop for RemoteHostService {
@@ -412,6 +428,9 @@ impl Drop for RemoteHostService {
         self.stop();
     }
 }
+
+/// Soft cap so many short-lived tabs cannot grow the metrics cache without bound.
+const MAX_HOST_CACHE: usize = 16;
 
 fn store_cache(g: &mut RemoteState, key: &str) {
     // Skip caching empty placeholders so a brief blank tab does not wipe a good view.
@@ -430,6 +449,22 @@ fn store_cache(g: &mut RemoteState, key: &str) {
             last_tick: g.last_tick,
         },
     );
+    while g.cache.len() > MAX_HOST_CACHE {
+        // Drop an entry that is not the live target (oldest insertion order is
+        // not tracked — remove an arbitrary non-active key).
+        let live = g.target.as_ref().map(|t| t.session.display_key());
+        let victim = g
+            .cache
+            .keys()
+            .find(|k| live.as_ref() != Some(k))
+            .cloned()
+            .or_else(|| g.cache.keys().next().cloned());
+        if let Some(k) = victim {
+            g.cache.remove(&k);
+        } else {
+            break;
+        }
+    }
 }
 
 fn poll_once(state: &Arc<Mutex<RemoteState>>) -> Result<HostSnapshot, String> {
