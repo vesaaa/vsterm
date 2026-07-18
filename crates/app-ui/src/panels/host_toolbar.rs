@@ -15,8 +15,8 @@ pub enum MainTab {
 /// Actions from the right-side terminal ops control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostToolbarAction {
-    /// Keep at most this many scrollback lines (`None` = clear all).
-    TrimScrollback { keep: Option<usize> },
+    /// Drop up to this many oldest scrollback lines (`None` = clear all).
+    TrimScrollback { drop_oldest: Option<usize> },
 }
 
 pub fn show(ui: &mut Ui, tab: &mut MainTab) -> Option<HostToolbarAction> {
@@ -73,17 +73,17 @@ fn term_ops_menu(ui: &mut Ui) -> Option<HostToolbarAction> {
                     .weak(),
             );
             ui.separator();
-            for (label_key, keep) in [
-                ("term.ops.keep_2000", Some(2_000usize)),
-                ("term.ops.keep_5000", Some(5_000)),
-                ("term.ops.keep_10000", Some(10_000)),
+            for (label_key, drop_oldest) in [
+                ("term.ops.drop_2000", Some(2_000usize)),
+                ("term.ops.drop_5000", Some(5_000)),
+                ("term.ops.drop_10000", Some(10_000)),
                 ("term.ops.clear_all", None),
             ] {
                 if ui
                     .add(egui::Button::new(i18n::t(label_key)).wrap_mode(egui::TextWrapMode::Extend))
                     .clicked()
                 {
-                    action = Some(HostToolbarAction::TrimScrollback { keep });
+                    action = Some(HostToolbarAction::TrimScrollback { drop_oldest });
                     ui.memory_mut(|m| m.close_popup());
                 }
             }

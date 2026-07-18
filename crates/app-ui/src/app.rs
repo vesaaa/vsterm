@@ -1779,15 +1779,16 @@ impl eframe::App for VsTermApp {
 
             if let Some(action) = host_toolbar::show(ui, &mut self.main_tab) {
                 match action {
-                    HostToolbarAction::TrimScrollback { keep } => {
-                        if let Some(dropped) = self.connections.active_trim_scrollback(keep) {
+                    HostToolbarAction::TrimScrollback { drop_oldest } => {
+                        if let Some(dropped) = self.connections.active_trim_scrollback(drop_oldest)
+                        {
                             self.status = if dropped == 0 {
                                 i18n::t("term.ops.trim_noop")
                             } else {
                                 format!(
                                     "{} — {}",
                                     i18n::t("term.ops.trim_done"),
-                                    format_scrollback_drop(dropped, keep)
+                                    format_scrollback_drop(dropped)
                                 )
                             };
                             // Best-effort return of freed scrollback pages.
@@ -2185,15 +2186,8 @@ fn zmodem_transfer_identity(
     (name, true)
 }
 
-fn format_scrollback_drop(dropped: usize, keep: Option<usize>) -> String {
-    match keep {
-        None | Some(0) => format!("{} {dropped}", i18n::t("term.ops.trim_dropped")),
-        Some(k) => format!(
-            "{} {dropped} · {} {k}",
-            i18n::t("term.ops.trim_dropped"),
-            i18n::t("term.ops.trim_kept")
-        ),
-    }
+fn format_scrollback_drop(dropped: usize) -> String {
+    format!("{} {dropped}", i18n::t("term.ops.trim_dropped"))
 }
 
 fn bootstrap_store() -> anyhow::Result<(SessionStore, SessionTree)> {

@@ -407,15 +407,24 @@ impl TerminalHandle {
         Ok(())
     }
 
-    /// Trim scrollback history, keeping at most `keep` oldest-dropped / newest-kept
-    /// lines above the live screen. `None` (or `Some(0)`) clears all scrollback.
+    /// Trim scrollback history by dropping oldest lines above the live screen.
+    ///
+    /// - `None` — clear all scrollback.
+    /// - `Some(n)` — drop up to `n` oldest history lines (newest lines stay).
     ///
     /// Returns how many history lines were dropped. Does not clear the visible
     /// screen — only the scroll-up buffer (same role as CSI `ESC[3J`).
-    pub fn trim_scrollback(&self, keep: Option<usize>) -> usize {
+    pub fn trim_scrollback(&self, drop_oldest: Option<usize>) -> usize {
         let mut state = self.inner.lock();
         let hist_before = state.term.history_size();
-        let keep = keep.unwrap_or(0).min(hist_before);
+        if hist_before == 0 {
+            return 0;
+        }
+        let keep = match drop_oldest {
+            None => 0,
+            Some(0) => return 0,
+            Some(n) => hist_before.saturating_sub(n),
+        };
         if keep >= hist_before {
             return 0;
         }
@@ -896,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn trim_scrollback_keeps_newest_lines() {
+    fn trim_scrollback_drops_oldest_lines() {
         let term = TerminalHandle::new(80, 24);
         let mut buf = String::new();
         for i in 0..4_000 {
@@ -913,10 +922,11 @@ mod tests {
         assert!(before > 2_000, "history={before}");
         let dropped = term.trim_scrollback(Some(2_000));
         let after = term.history_size();
-        assert!(dropped > 0);
-        assert!(after <= 2_000, "after={after}");
+        assert_eq!(dropped, 2_000.min(before));
+        assert_eq!(after, before - dropped);
         let cleared = term.trim_scrollback(None);
         assert_eq!(term.history_size(), 0);
+        assert_eq!(cleared, after);
         assert!(cleared > 0);
     }
 
