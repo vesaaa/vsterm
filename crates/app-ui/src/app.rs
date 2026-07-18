@@ -1566,9 +1566,8 @@ impl eframe::App for VsTermApp {
         });
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            let zmodem = self.connections.active_zmodem_status();
             let zmodem_busy = matches!(
-                zmodem,
+                self.connections.active_zmodem_status(),
                 Some(
                     ZmodemStatus::Receiving { .. }
                         | ZmodemStatus::Sending { .. }
@@ -1576,14 +1575,12 @@ impl eframe::App for VsTermApp {
                         | ZmodemStatus::AwaitingSaveAs { .. }
                 )
             );
-            let zmodem_progress = zmodem.as_ref().and_then(|s| s.progress_fraction());
             status_bar::show(
                 ui,
                 &self.status,
                 self.connections.list_meta().len(),
                 crate::render_policy::is_software_renderer(),
                 zmodem_busy,
-                zmodem_progress,
                 || {
                     let _ = self.connections.cancel_zmodem();
                 },
@@ -1861,6 +1858,9 @@ impl eframe::App for VsTermApp {
                                     format!("{}: {err}", i18n::t("status.open_failed"));
                             }
                         }
+                        if bottom_panel::take_zmodem_cancel(&mut self.bottom) {
+                            let _ = self.connections.cancel_zmodem();
+                        }
                     });
 
                     ui.advance_cursor_after_rect(full);
@@ -2038,6 +2038,13 @@ impl VsTermApp {
             }) => {
                 self.status =
                     format_zmodem_progress(i18n::t("zmodem.receiving"), &file_name, bytes, total);
+                bottom_panel::sync_zmodem_progress(
+                    &mut self.bottom,
+                    &file_name,
+                    bytes,
+                    total,
+                    false,
+                );
                 self.pending_zmodem_pick = None;
             }
             Some(ZmodemStatus::Sending {
@@ -2047,10 +2054,24 @@ impl VsTermApp {
             }) => {
                 self.status =
                     format_zmodem_progress(i18n::t("zmodem.sending"), &file_name, bytes, total);
+                bottom_panel::sync_zmodem_progress(
+                    &mut self.bottom,
+                    &file_name,
+                    bytes,
+                    total,
+                    true,
+                );
                 self.pending_zmodem_pick = None;
             }
             Some(ZmodemStatus::AwaitingUpload { prompt_id }) => {
                 self.status = i18n::t("zmodem.await_upload");
+                bottom_panel::sync_zmodem_progress(
+                    &mut self.bottom,
+                    &i18n::t("zmodem.await_upload"),
+                    0,
+                    None,
+                    true,
+                );
                 let already = matches!(
                     &self.pending_zmodem_pick,
                     Some(PendingZmodemPick {
@@ -2079,6 +2100,13 @@ impl VsTermApp {
                     ),
                     _ => format!("{}: {suggested_name}", i18n::t("zmodem.await_save")),
                 };
+                bottom_panel::sync_zmodem_progress(
+                    &mut self.bottom,
+                    &suggested_name,
+                    0,
+                    total,
+                    false,
+                );
                 let already = matches!(
                     &self.pending_zmodem_pick,
                     Some(PendingZmodemPick {
@@ -2097,21 +2125,56 @@ impl VsTermApp {
                 }
             }
             Some(ZmodemStatus::Done { summary }) => {
-                self.status = summary;
+                self.status = summary.clone();
+                let (name, is_upload) = zmodem_transfer_identity(&self.bottom, &summary, true);
+                bottom_panel::finish_zmodem_transfer(
+                    &mut self.bottom,
+                    &name,
+                    is_upload,
+                    true,
+                    summary,
+                );
                 self.connections.clear_zmodem_finished();
                 self.pending_zmodem_pick = None;
             }
             Some(ZmodemStatus::Failed { message }) => {
-                self.status = message;
+                self.status = message.clone();
+                let (name, is_upload) = zmodem_transfer_identity(&self.bottom, &message, false);
+                bottom_panel::finish_zmodem_transfer(
+                    &mut self.bottom,
+                    &name,
+                    is_upload,
+                    false,
+                    message,
+                );
                 self.connections.clear_zmodem_finished();
                 self.pending_zmodem_pick = None;
             }
             Some(ZmodemStatus::Idle) | None => {
                 // Drop any deferred picker — transfer is over, keyboard is free.
                 self.pending_zmodem_pick = None;
+                bottom_panel::clear_zmodem_transfer(&mut self.bottom);
             }
         }
     }
+}
+
+/// Prefer the live progress-bar label; fall back to a short summary leaf.
+fn zmodem_transfer_identity(
+    bottom: &BottomPanelState,
+    summary: &str,
+    ok: bool,
+) -> (String, bool) {
+    if let Some((name, is_upload)) = bottom_panel::zmodem_transfer_label(bottom) {
+        return (name, is_upload);
+    }
+    let _ = ok;
+    let name = summary
+        .rsplit([' ', '/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or("ZMODEM")
+        .to_string();
+    (name, true)
 }
 
 fn format_zmodem_progress(kind: String, name: &str, bytes: u64, total: Option<u64>) -> String {
