@@ -24,6 +24,7 @@ pub use manager::{
 };
 pub use process::{command as gui_command, hide_console};
 pub use remote_exec::RemoteSession;
+pub use remote_fs::SUDO_SFTP_NEEDS_PASSWORD;
 pub use remote_fs::{
     join_remote, normalize_remote, parent_remote, sftp_unsupported_msg, ArcProgress,
     RemoteDirEntry, RemoteFs, TransferProgressState, UnsupportedRemoteFs,

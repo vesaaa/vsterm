@@ -123,7 +123,36 @@ pub trait RemoteFs: Send + Sync {
 
     /// Create/overwrite a remote file with raw bytes (UTF-8 text uses plain bytes).
     fn write_file(&self, remote_path: &str, data: &[u8]) -> Result<(), ConnError>;
+
+    /// Open (or switch to) an elevated SFTP session via `sudo …/sftp-server`.
+    ///
+    /// `password`:
+    /// - `None` — try passwordless `sudo -n` only; returns
+    ///   [`ConnError::Backend`] with [`SUDO_SFTP_NEEDS_PASSWORD`] when a password
+    ///   is required.
+    /// - `Some("")` / `Some(pw)` — feed `sudo -S` (empty string still uses `-S`).
+    ///
+    /// This does **not** follow an interactive `sudo -i` in the terminal PTY;
+    /// it opens a separate privileged SFTP channel on the same SSH login.
+    fn elevate_sftp(&self, _password: Option<String>) -> Result<(), ConnError> {
+        Err(ConnError::Backend(
+            "elevated SFTP is not supported for this session".into(),
+        ))
+    }
+
+    /// Drop the elevated SFTP channel so the next op reopens the normal subsystem.
+    fn demote_sftp(&self) -> Result<(), ConnError> {
+        Ok(())
+    }
+
+    /// `true` while the shared SFTP channel is the sudo-elevated one.
+    fn sftp_elevated(&self) -> bool {
+        false
+    }
 }
+
+/// Marker returned by [`RemoteFs::elevate_sftp`] when `sudo -n` is not enough.
+pub const SUDO_SFTP_NEEDS_PASSWORD: &str = "sudo-sftp-needs-password";
 
 /// Honest stub for exec-only sessions without a filesystem provider.
 pub struct UnsupportedRemoteFs;

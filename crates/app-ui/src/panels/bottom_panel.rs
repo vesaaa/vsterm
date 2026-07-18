@@ -5,6 +5,7 @@ use crate::sys_file_icon;
 use crate::ui_icon::{self, Icon};
 use connection_mgr::{
     join_remote, normalize_remote, parent_remote, ArcProgress, RemoteDirEntry, RemoteSession,
+    SUDO_SFTP_NEEDS_PASSWORD,
 };
 use egui::{Color32, CursorIcon, FontId, RichText, Sense, StrokeKind, Ui};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -176,11 +177,26 @@ pub struct BottomPanelState {
     pending_native_dialog: Option<PendingNativeDialog>,
     /// Files-panel Cancel clicked while a ZMODEM transfer owns the progress bar.
     zmodem_cancel_requested: bool,
+    /// Password dialog for elevating the file-panel SFTP channel via sudo.
+    sudo_prompt: Option<SudoSftpPrompt>,
+    /// In-flight elevate/demote worker.
+    pending_sudo: Option<PendingSudoSftp>,
     /// Per-server file-browser views, keyed by `user@host`. Switching server
     /// tabs stashes the outgoing view here and restores the target's, so the
     /// panel keeps each host's directory/listing instead of resetting to `/`
     /// and re-listing every time (which was both jarring and leaked memory).
     saved: HashMap<String, ServerFiles>,
+}
+
+struct SudoSftpPrompt {
+    password: String,
+    warn: Option<String>,
+    focus: bool,
+}
+
+struct PendingSudoSftp {
+    elevate: bool,
+    rx: mpsc::Receiver<Result<(), String>>,
 }
 
 /// Snapshot of the per-server file-browser state (everything except the shared
@@ -299,6 +315,8 @@ impl Default for BottomPanelState {
             inline_rename: None,
             pending_native_dialog: None,
             zmodem_cancel_requested: false,
+            sudo_prompt: None,
+            pending_sudo: None,
             saved: HashMap::new(),
         }
     }
@@ -380,7 +398,7 @@ pub fn show(
 
             handle_os_file_drop(ui, state, remote, files_rect);
 
-            paint_files_status_bar(ui, state, status_bar_rect, &mut do_cancel);
+            paint_files_status_bar(ui, state, status_bar_rect, &mut do_cancel, remote);
 
             if do_cancel {
                 if let Some(t) = &state.transfer {
@@ -391,6 +409,8 @@ pub fn show(
                     }
                 }
             }
+
+            paint_sudo_sftp_dialog(ui.ctx(), state, remote);
         }
         BottomTab::Commands => {
             let cmds_rect =
@@ -479,6 +499,8 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
             state.saved.insert(old, view);
         }
         state.bound_key = key.clone();
+        state.sudo_prompt = None;
+        state.pending_sudo = None;
         match key {
             Some(k) => {
                 if let Some(view) = state.saved.remove(&k) {
@@ -495,6 +517,8 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
             None => ServerFiles::fresh().restore(state),
         }
     }
+
+    poll_sudo_sftp(ctx, state, remote);
 
     if let Some(pending) = state.pending_list.take() {
         match pending.rx.try_recv() {
@@ -616,6 +640,208 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
         ctx.request_repaint_after(crate::render_policy::limit_interval(
             std::time::Duration::from_millis(50),
         ));
+    }
+}
+
+fn poll_sudo_sftp(
+    ctx: &egui::Context,
+    state: &mut BottomPanelState,
+    remote: Option<&RemoteSession>,
+) {
+    let Some(pending) = state.pending_sudo.take() else {
+        return;
+    };
+    match pending.rx.try_recv() {
+        Ok(Ok(())) => {
+            state.sudo_prompt = None;
+            state.dir_cache.clear();
+            let path = normalize_remote(&state.remote_path);
+            if pending.elevate {
+                state.status_line = Some(i18n::t("bottom.files.sudo.ok").into());
+            } else {
+                state.status_line = Some(i18n::t("bottom.files.sudo.off").into());
+            }
+            if remote_mode(remote) == RemotePaneMode::Ready {
+                request_dir(state, remote, &path, true);
+            }
+        }
+        Ok(Err(err)) => {
+            if pending.elevate && err.contains(SUDO_SFTP_NEEDS_PASSWORD) {
+                state.sudo_prompt = Some(SudoSftpPrompt {
+                    password: String::new(),
+                    warn: None,
+                    focus: true,
+                });
+            } else {
+                let msg = format_sudo_sftp_error(&err);
+                if let Some(prompt) = state.sudo_prompt.as_mut() {
+                    prompt.warn = Some(msg.clone());
+                    prompt.password.clear();
+                    prompt.focus = true;
+                } else {
+                    state.status_line = Some(msg);
+                }
+            }
+        }
+        Err(mpsc::TryRecvError::Empty) => {
+            state.pending_sudo = Some(pending);
+            ctx.request_repaint_after(crate::render_policy::limit_interval(
+                std::time::Duration::from_millis(50),
+            ));
+        }
+        Err(mpsc::TryRecvError::Disconnected) => {
+            state.status_line = Some(i18n::t("bottom.files.sudo.err_gone").into());
+        }
+    }
+}
+
+fn start_elevate_sftp(
+    state: &mut BottomPanelState,
+    remote: Option<&RemoteSession>,
+    password: Option<String>,
+) {
+    let Some(remote) = remote.cloned() else {
+        state.status_line = Some(i18n::t("bottom.files.err.no_sftp").into());
+        return;
+    };
+    if state.pending_sudo.is_some() {
+        return;
+    }
+    if state.transfer.is_some() {
+        state.status_line = Some(i18n::t("bottom.files.sudo.err_busy").into());
+        return;
+    }
+    let (tx, rx) = mpsc::channel();
+    state.pending_sudo = Some(PendingSudoSftp {
+        elevate: true,
+        rx,
+    });
+    state.status_line = Some(i18n::t("bottom.files.sudo.working").into());
+    let _ = thread::Builder::new()
+        .name("vsterm-sudo-sftp".into())
+        .spawn(move || {
+            let res = remote.elevate_sftp(password).map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+}
+
+fn start_demote_sftp(state: &mut BottomPanelState, remote: Option<&RemoteSession>) {
+    let Some(remote) = remote.cloned() else {
+        return;
+    };
+    if state.pending_sudo.is_some() {
+        return;
+    }
+    if state.transfer.is_some() {
+        state.status_line = Some(i18n::t("bottom.files.sudo.err_busy").into());
+        return;
+    }
+    let (tx, rx) = mpsc::channel();
+    state.pending_sudo = Some(PendingSudoSftp {
+        elevate: false,
+        rx,
+    });
+    state.sudo_prompt = None;
+    state.status_line = Some(i18n::t("bottom.files.sudo.working").into());
+    let _ = thread::Builder::new()
+        .name("vsterm-demote-sftp".into())
+        .spawn(move || {
+            let res = remote.demote_sftp().map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+}
+
+fn format_sudo_sftp_error(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("incorrect sudo password") || lower.contains("authfailed") {
+        return format!("{}: {}", i18n::t("bottom.files.transfer_failed"), i18n::t("bottom.files.sudo.err_password"));
+    }
+    if lower.contains("requiretty") || lower.contains("a terminal is required") {
+        return format!("{}: {}", i18n::t("bottom.files.transfer_failed"), i18n::t("bottom.files.sudo.err_tty"));
+    }
+    if lower.contains("sftp-server binary not found") || lower.contains("vsterm_no_sftp_server") {
+        return format!("{}: {}", i18n::t("bottom.files.transfer_failed"), i18n::t("bottom.files.sudo.err_server"));
+    }
+    format!("{}: {raw}", i18n::t("bottom.files.transfer_failed"))
+}
+
+fn paint_sudo_sftp_dialog(
+    ctx: &egui::Context,
+    state: &mut BottomPanelState,
+    remote: Option<&RemoteSession>,
+) {
+    let Some(prompt) = state.sudo_prompt.as_mut() else {
+        return;
+    };
+    let busy = state.pending_sudo.is_some();
+    let mut submit = false;
+    let mut cancel = false;
+    let mut password = std::mem::take(&mut prompt.password);
+    let mut warn = prompt.warn.clone();
+    let mut focus = prompt.focus;
+
+    egui::Window::new(i18n::t("bottom.files.sudo.dialog_title"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(320.0);
+            ui.label(
+                RichText::new(i18n::t("bottom.files.sudo.dialog_hint"))
+                    .weak()
+                    .size(12.0),
+            );
+            ui.add_space(8.0);
+            let field = egui::TextEdit::singleline(&mut password)
+                .password(true)
+                .desired_width(280.0)
+                .hint_text(i18n::t("bottom.files.sudo.dialog_password_hint"));
+            let resp = ui.add_enabled(!busy, field);
+            if focus {
+                resp.request_focus();
+                focus = false;
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                submit = true;
+            }
+            if let Some(w) = &warn {
+                ui.add_space(4.0);
+                ui.label(RichText::new(w).color(Color32::from_rgb(180, 70, 70)).size(12.0));
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!busy, egui::Button::new(i18n::t("bottom.files.sudo.dialog_ok")))
+                    .clicked()
+                {
+                    submit = true;
+                }
+                if ui
+                    .add_enabled(!busy, egui::Button::new(i18n::t("bottom.files.sudo.dialog_cancel")))
+                    .clicked()
+                {
+                    cancel = true;
+                }
+            });
+        });
+
+    if let Some(prompt) = state.sudo_prompt.as_mut() {
+        prompt.password = password;
+        prompt.warn = warn;
+        prompt.focus = focus;
+    }
+
+    if cancel {
+        state.sudo_prompt = None;
+        return;
+    }
+    if submit && !busy {
+        let pw = state
+            .sudo_prompt
+            .as_ref()
+            .map(|p| p.password.clone())
+            .unwrap_or_default();
+        start_elevate_sftp(state, remote, Some(pw));
     }
 }
 
@@ -938,8 +1164,10 @@ fn show_files_content(
             ui.set_min_height(PATH_H);
             ui.set_max_height(PATH_H);
             ui.horizontal(|ui| {
+                let elevated = remote.is_some_and(|r| r.sftp_elevated());
+                let sudo_busy = state.pending_sudo.is_some();
                 let extra = if mode == RemotePaneMode::Ready {
-                    130.0
+                    168.0
                 } else {
                     78.0
                 };
@@ -1009,6 +1237,39 @@ fn show_files_content(
                     }
                     if from_term.has_focus() {
                         from_term.surrender_focus();
+                    }
+
+                    // Terminal `sudo -i` does not change the SFTP channel. This
+                    // button opens a separate sudo sftp-server session instead.
+                    let sudo_label = if elevated {
+                        i18n::t("bottom.files.sudo.on")
+                    } else {
+                        i18n::t("bottom.files.sudo")
+                    };
+                    let sudo_color = if elevated {
+                        Color32::from_rgb(180, 110, 40)
+                    } else {
+                        ui_icon::COLOR_MUTED
+                    };
+                    let sudo = ui
+                        .add_enabled(
+                            !sudo_busy && state.transfer.is_none(),
+                            egui::Button::new(RichText::new(sudo_label).size(12.0).color(sudo_color)),
+                        )
+                        .on_hover_text(if elevated {
+                            i18n::t("bottom.files.sudo.on.tip")
+                        } else {
+                            i18n::t("bottom.files.sudo.tip")
+                        });
+                    if sudo.clicked() {
+                        if elevated {
+                            start_demote_sftp(state, remote);
+                        } else {
+                            start_elevate_sftp(state, remote, None);
+                        }
+                    }
+                    if sudo.has_focus() {
+                        sudo.surrender_focus();
                     }
                 }
             });
@@ -1135,6 +1396,7 @@ fn paint_files_status_bar(
     state: &mut BottomPanelState,
     status_bar_rect: egui::Rect,
     do_cancel: &mut bool,
+    remote: Option<&RemoteSession>,
 ) {
     let stroke = ui.style().visuals.widgets.noninteractive.bg_stroke;
     ui.painter().hline(
@@ -1166,6 +1428,28 @@ fn paint_files_status_bar(
                     i18n::t("bottom.files.stat.count_tip"),
                     i18n::t("bottom.files.stat.size_tip"),
                 ));
+
+            if let Some(r) = remote {
+                if r.sftp_supported() {
+                    let id = if r.sftp_elevated() {
+                        format!(
+                            "{}: root@{} ({})",
+                            i18n::t("bottom.files.sftp_id"),
+                            r.host,
+                            i18n::t("bottom.files.sudo.on")
+                        )
+                    } else {
+                        format!("{}: {}", i18n::t("bottom.files.sftp_id"), r.display_key())
+                    };
+                    let color = if r.sftp_elevated() {
+                        Color32::from_rgb(180, 110, 40)
+                    } else {
+                        text_color.gamma_multiply(0.75)
+                    };
+                    ui.label(RichText::new(id).size(11.0).color(color))
+                        .on_hover_text(i18n::t("bottom.files.sftp_id.tip"));
+                }
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.set_min_width(ui.available_width());
