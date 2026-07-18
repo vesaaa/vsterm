@@ -359,7 +359,6 @@ fn zh(key: &str) -> &'static str {
         "status.tree_reloaded" => "会话树已刷新",
         "status.lang_changed" => "语言已切换",
         "zmodem.await_upload" => "远端 rz：请选择要上传的本地文件",
-        "zmodem.await_save" => "远端 sz：请选择保存位置",
         "zmodem.pick_title" => "选择要上传到远端的文件",
         "zmodem.save_title" => "另存为",
         "term.empty" => "无活动连接 — 从左侧打开会话或本地 Shell",
