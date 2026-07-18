@@ -1148,6 +1148,7 @@ dependencies = [
  "dirs",
  "futures",
  "libmimalloc-sys",
+ "mimalloc",
  "parking_lot",
  "regex",
  "russh",

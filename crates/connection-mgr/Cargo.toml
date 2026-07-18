@@ -22,3 +22,6 @@ regex = { workspace = true }
 futures = { workspace = true }
 dirs = { workspace = true }
 libmimalloc-sys = { workspace = true }
+
+[dev-dependencies]
+mimalloc = { workspace = true }
