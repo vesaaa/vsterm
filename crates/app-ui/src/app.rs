@@ -71,6 +71,8 @@ pub struct VsTermApp {
     bottom: BottomPanelState,
     status: String,
     last_term_size: (u16, u16),
+    /// After a successful connect, grab keyboard focus on the terminal grid once.
+    focus_terminal: bool,
     locale: Locale,
     /// Connect / reconnect motion preference (trail / shatter / off).
     connect_fx: ConnectFxMode,
@@ -172,6 +174,7 @@ impl VsTermApp {
             bottom: BottomPanelState::default(),
             status,
             last_term_size: (80, 24),
+            focus_terminal: false,
             locale,
             connect_fx,
             pending_connect: None,
@@ -264,6 +267,8 @@ impl VsTermApp {
                 self.left_tab = LeftTab::Monitor;
                 self.main_tab = MainTab::Terminal;
                 self.sync_host_binding();
+                self.last_term_size = (0, 0);
+                self.focus_terminal = true;
             }
             Err(err) => {
                 self.error_dialog = Some(format_conn_error(&err));
@@ -474,6 +479,9 @@ impl VsTermApp {
         let config_for_thread = config.clone();
         let config_for_pending = config.clone();
         let replace_for_thread = replace_id;
+        // Open the PTY near the current pane size so the first paint does not
+        // leave a tall black band under a leftover 80×24 grid.
+        let (open_cols, open_rows) = self.preferred_term_size();
         std::thread::Builder::new()
             .name("vsterm-ssh-connect".into())
             .spawn(move || {
@@ -494,8 +502,8 @@ impl VsTermApp {
                         &config,
                         vault.as_ref(),
                         interactive_password,
-                        80,
-                        24,
+                        open_cols,
+                        open_rows,
                     )
                     .await
                 });
@@ -578,6 +586,10 @@ impl VsTermApp {
                 self.status = i18n::t("status.connected");
                 // Remember username (and key path) typed at the login prompt.
                 self.persist_connect_identity(&pending.config);
+                // Force a PTY resize against the real pane on the next paint, and
+                // put keyboard focus in the terminal so typing works immediately.
+                self.last_term_size = (0, 0);
+                self.focus_terminal = true;
                 if let Some(rect) = self.last_auth_dialog_rect.take() {
                     let accent = crate::fx::accent_from_tag(pending.config.color_tag.as_deref());
                     match self.connect_fx {
@@ -866,6 +878,16 @@ impl VsTermApp {
                 tracing::debug!("persist connect identity {}: {err}", connected.id);
             }
         }
+    }
+
+    /// Best-effort PTY size for a new SSH shell (last paint, or last known size).
+    fn preferred_term_size(&self) -> (u16, u16) {
+        if let Some(rect) = self.last_central_rect.filter(|r| r.width() > 40.0 && r.height() > 40.0)
+        {
+            return TerminalView::size_for_rect(rect.size());
+        }
+        let (c, r) = self.last_term_size;
+        (c.max(20), r.max(5))
     }
 
     fn persist_session_editor(&mut self, mut state: SessionEditorState) {
@@ -1883,8 +1905,24 @@ impl eframe::App for VsTermApp {
 
                     ui.allocate_ui_at_rect(term_rect, |ui| {
                         ui.set_clip_rect(term_rect);
-                        let (cols, rows) = TerminalView::show(ui, &self.connections);
-                        if (cols, rows) != self.last_term_size && cols > 0 && rows > 0 {
+                        // Wait out connect FX / auth chrome so focus is not stolen back.
+                        let grab = self.focus_terminal
+                            && self.auth_prompt.is_none()
+                            && !self.fx.is_active();
+                        let (cols, rows) =
+                            TerminalView::show(ui, &self.connections, grab);
+                        if grab {
+                            self.focus_terminal = false;
+                        }
+                        // Sync against the live emulator size, not only the last
+                        // UI request — after connect the PTY may still be 80×24
+                        // while last_term_size already matches the pane.
+                        let actual = self.connections.active_terminal_size();
+                        let need_resize = cols > 0
+                            && rows > 0
+                            && (actual != Some((cols, rows))
+                                || (cols, rows) != self.last_term_size);
+                        if need_resize {
                             if let Err(err) = self.connections.resize_active(cols, rows) {
                                 tracing::debug!("resize: {err}");
                             } else {

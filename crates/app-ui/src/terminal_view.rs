@@ -82,15 +82,25 @@ impl TermSelection {
 pub struct TerminalView;
 
 impl TerminalView {
+    /// Estimate PTY cols/rows for a terminal pane of `size` (includes gutter + scrollbar).
+    pub fn size_for_rect(size: egui::Vec2) -> (u16, u16) {
+        let content_w = (size.x - SCROLL_W - GUTTER_W).max(CELL_W * 20.0);
+        let cols = ((content_w / CELL_W).floor() as u16).max(20);
+        let rows = ((size.y / CELL_H).floor() as u16).max(5);
+        (cols, rows)
+    }
+
     /// Renders the active terminal. Returns desired (cols, rows) based on available space.
-    pub fn show(ui: &mut Ui, mgr: &Arc<ConnectionManager>) -> (u16, u16) {
+    ///
+    /// When `grab_focus` is true, keyboard focus moves to the terminal grid so the
+    /// user can type immediately after connect.
+    pub fn show(ui: &mut Ui, mgr: &Arc<ConnectionManager>, grab_focus: bool) -> (u16, u16) {
         // Stay strictly inside the parent-allocated rect (no bleed into bottom strip).
         let outer_max = ui.max_rect();
         ui.set_clip_rect(outer_max);
         let avail = ui.available_size().min(outer_max.size());
         let content_w = (avail.x - SCROLL_W - GUTTER_W).max(CELL_W * 20.0);
-        let cols = ((content_w / CELL_W).floor() as u16).max(20);
-        let rows = ((avail.y / CELL_H).floor() as u16).max(5);
+        let (cols, rows) = Self::size_for_rect(avail);
 
         let (outer, _) = ui.allocate_exact_size(avail, Sense::hover());
         let outer = outer.intersect(outer_max);
@@ -301,13 +311,13 @@ impl TerminalView {
                 .rect_filled(scroll_rect, 0.0, Color32::from_rgb(20, 20, 22));
         }
 
-        if resp.clicked_by(PointerButton::Primary) {
+        if grab_focus || resp.clicked_by(PointerButton::Primary) {
             resp.request_focus();
         }
 
         // Hovering the grid claims keyboard focus so Space/Enter go to the PTY,
         // not leftover-focused chrome buttons (quick commands, toolbar, …).
-        if !menu_open && resp.hovered() && !resp.has_focus() {
+        if !menu_open && !grab_focus && resp.hovered() && !resp.has_focus() {
             resp.request_focus();
         }
 
