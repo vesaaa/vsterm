@@ -112,8 +112,11 @@ enum ZmodemPickPhase {
 
 #[derive(Clone)]
 enum ZmodemPickKind {
-    Upload,
-    SaveAs { suggested_name: String },
+    Upload { prompt_id: u64 },
+    SaveAs {
+        suggested_name: String,
+        prompt_id: u64,
+    },
 }
 
 struct PendingZmodemPick {
@@ -1299,7 +1302,7 @@ impl eframe::App for VsTermApp {
                 Some(
                     ZmodemStatus::Receiving { .. }
                         | ZmodemStatus::Sending { .. }
-                        | ZmodemStatus::AwaitingUpload
+                        | ZmodemStatus::AwaitingUpload { .. }
                         | ZmodemStatus::AwaitingSaveAs { .. }
                 )
             );
@@ -1578,7 +1581,7 @@ impl eframe::App for VsTermApp {
                 Some(
                     ZmodemStatus::Receiving { .. }
                         | ZmodemStatus::Sending { .. }
-                        | ZmodemStatus::AwaitingUpload
+                        | ZmodemStatus::AwaitingUpload { .. }
                         | ZmodemStatus::AwaitingSaveAs { .. }
                 )
             );
@@ -1960,43 +1963,71 @@ impl eframe::App for VsTermApp {
                 phase: ZmodemPickPhase::Arm,
                 kind,
             }) => {
-                self.pending_zmodem_pick = Some(PendingZmodemPick {
-                    phase: ZmodemPickPhase::Open,
-                    kind,
-                });
-                ctx.request_repaint();
+                // Drop stale arms if the transfer already finished.
+                let still_waiting = match &kind {
+                    ZmodemPickKind::Upload { prompt_id } => matches!(
+                        self.connections.active_zmodem_status(),
+                        Some(ZmodemStatus::AwaitingUpload { prompt_id: id }) if id == *prompt_id
+                    ),
+                    ZmodemPickKind::SaveAs { prompt_id, .. } => matches!(
+                        self.connections.active_zmodem_status(),
+                        Some(ZmodemStatus::AwaitingSaveAs { prompt_id: id, .. }) if id == *prompt_id
+                    ),
+                };
+                if still_waiting {
+                    self.pending_zmodem_pick = Some(PendingZmodemPick {
+                        phase: ZmodemPickPhase::Open,
+                        kind,
+                    });
+                    ctx.request_repaint();
+                }
             }
             Some(PendingZmodemPick {
                 phase: ZmodemPickPhase::Open,
-                kind: ZmodemPickKind::Upload,
+                kind: ZmodemPickKind::Upload { prompt_id },
             }) => {
-                let paths = rfd::FileDialog::new()
-                    .set_title(i18n::t("zmodem.pick_title"))
-                    .pick_files()
-                    .unwrap_or_default();
-                match self.connections.provide_zmodem_upload(paths) {
-                    Ok(()) => {}
-                    Err(err) => {
-                        self.status = format!("ZMODEM: {err}");
+                let still = matches!(
+                    self.connections.active_zmodem_status(),
+                    Some(ZmodemStatus::AwaitingUpload { prompt_id: id }) if id == prompt_id
+                );
+                if still {
+                    let paths = rfd::FileDialog::new()
+                        .set_title(i18n::t("zmodem.pick_title"))
+                        .pick_files()
+                        .unwrap_or_default();
+                    match self.connections.provide_zmodem_upload(paths) {
+                        Ok(()) => {}
+                        Err(err) => {
+                            self.status = format!("ZMODEM: {err}");
+                        }
                     }
                 }
                 ctx.request_repaint();
             }
             Some(PendingZmodemPick {
                 phase: ZmodemPickPhase::Open,
-                kind: ZmodemPickKind::SaveAs { suggested_name },
+                kind: ZmodemPickKind::SaveAs {
+                    suggested_name,
+                    prompt_id,
+                },
             }) => {
-                let mut dlg = rfd::FileDialog::new()
-                    .set_title(i18n::t("zmodem.save_title"))
-                    .set_file_name(&suggested_name);
-                if let Some(dir) = self.connections.active_zmodem_download_dir() {
-                    dlg = dlg.set_directory(dir);
-                }
-                let path = dlg.save_file();
-                match self.connections.provide_zmodem_download(path) {
-                    Ok(()) => {}
-                    Err(err) => {
-                        self.status = format!("ZMODEM: {err}");
+                let still = matches!(
+                    self.connections.active_zmodem_status(),
+                    Some(ZmodemStatus::AwaitingSaveAs { prompt_id: id, .. }) if id == prompt_id
+                );
+                if still {
+                    let mut dlg = rfd::FileDialog::new()
+                        .set_title(i18n::t("zmodem.save_title"))
+                        .set_file_name(&suggested_name);
+                    if let Some(dir) = self.connections.active_zmodem_download_dir() {
+                        dlg = dlg.set_directory(dir);
+                    }
+                    let path = dlg.save_file();
+                    match self.connections.provide_zmodem_download(path) {
+                        Ok(()) => {}
+                        Err(err) => {
+                            self.status = format!("ZMODEM: {err}");
+                        }
                     }
                 }
                 ctx.request_repaint();
@@ -2027,18 +2058,26 @@ impl VsTermApp {
                     format_zmodem_progress(i18n::t("zmodem.sending"), &file_name, bytes, total);
                 self.pending_zmodem_pick = None;
             }
-            Some(ZmodemStatus::AwaitingUpload) => {
+            Some(ZmodemStatus::AwaitingUpload { prompt_id }) => {
                 self.status = i18n::t("zmodem.await_upload");
-                if self.pending_zmodem_pick.is_none() {
+                let already = matches!(
+                    &self.pending_zmodem_pick,
+                    Some(PendingZmodemPick {
+                        kind: ZmodemPickKind::Upload { prompt_id: id },
+                        ..
+                    }) if *id == prompt_id
+                );
+                if !already {
                     self.pending_zmodem_pick = Some(PendingZmodemPick {
                         phase: ZmodemPickPhase::Arm,
-                        kind: ZmodemPickKind::Upload,
+                        kind: ZmodemPickKind::Upload { prompt_id },
                     });
                 }
             }
             Some(ZmodemStatus::AwaitingSaveAs {
                 suggested_name,
                 total,
+                prompt_id,
             }) => {
                 self.status = match total {
                     Some(t) if t > 0 => format!(
@@ -2052,14 +2091,17 @@ impl VsTermApp {
                 let already = matches!(
                     &self.pending_zmodem_pick,
                     Some(PendingZmodemPick {
-                        kind: ZmodemPickKind::SaveAs { suggested_name: n },
+                        kind: ZmodemPickKind::SaveAs { prompt_id: id, .. },
                         ..
-                    }) if n == &suggested_name
+                    }) if *id == prompt_id
                 );
                 if !already {
                     self.pending_zmodem_pick = Some(PendingZmodemPick {
                         phase: ZmodemPickPhase::Arm,
-                        kind: ZmodemPickKind::SaveAs { suggested_name },
+                        kind: ZmodemPickKind::SaveAs {
+                            suggested_name,
+                            prompt_id,
+                        },
                     });
                 }
             }
@@ -2074,15 +2116,8 @@ impl VsTermApp {
                 self.pending_zmodem_pick = None;
             }
             Some(ZmodemStatus::Idle) | None => {
-                if matches!(
-                    self.pending_zmodem_pick,
-                    Some(PendingZmodemPick {
-                        phase: ZmodemPickPhase::Arm,
-                        ..
-                    })
-                ) {
-                    self.pending_zmodem_pick = None;
-                }
+                // Drop any deferred picker — transfer is over, keyboard is free.
+                self.pending_zmodem_pick = None;
             }
         }
     }
