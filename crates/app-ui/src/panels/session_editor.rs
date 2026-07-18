@@ -147,6 +147,8 @@ pub fn show(
         .default_width(420.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
+            // Order: name → host → port → color → group → username → auth →
+            // credentials → shell integration → icon.
             egui::Grid::new("session_editor_grid")
                 .num_columns(2)
                 .spacing([12.0, 8.0])
@@ -176,16 +178,46 @@ pub fn show(
                     );
                     ui.end_row();
 
+                    ui.label(i18n::t("dialog.session.color"));
+                    ui.horizontal(|ui| {
+                        let none_selected = state.color_tag.is_none();
+                        if ui
+                            .selectable_label(none_selected, i18n::t("dialog.session.color_none"))
+                            .clicked()
+                        {
+                            state.color_tag = None;
+                        }
+                        for (hex, _label) in COLOR_PRESETS {
+                            let selected = state.color_tag.as_deref() == Some(*hex);
+                            let color = parse_hex(hex).unwrap_or(Color32::GRAY);
+                            let (rect, resp) = ui
+                                .allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                            ui.painter().rect_filled(rect, 3.0, color);
+                            if selected {
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    3.0,
+                                    egui::Stroke::new(2.0_f32, Color32::from_rgb(40, 40, 50)),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+                            if resp.clicked() {
+                                state.color_tag = Some((*hex).to_string());
+                            }
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label(i18n::t("dialog.session.folder"));
+                    folder_combo(ui, state, tree);
+                    ui.end_row();
+
                     ui.label(i18n::t("dialog.session.username"));
                     ui.add(
                         egui::TextEdit::singleline(&mut state.username)
                             .desired_width(f32::INFINITY)
                             .hint_text(i18n::t("dialog.session.username_hint")),
                     );
-                    ui.end_row();
-
-                    ui.label(i18n::t("dialog.session.folder"));
-                    folder_combo(ui, state, tree);
                     ui.end_row();
 
                     ui.label(i18n::t("dialog.session.auth"));
@@ -202,19 +234,7 @@ pub fn show(
                         );
                     });
                     ui.end_row();
-
-                    ui.label(i18n::t("dialog.session.shell_integration"));
-                    ui.checkbox(
-                        &mut state.shell_integration,
-                        i18n::t("dialog.session.shell_integration_enable"),
-                    );
-                    ui.end_row();
                 });
-                ui.label(
-                    RichText::new(i18n::t("dialog.session.shell_integration_hint"))
-                        .size(11.0)
-                        .color(Color32::from_rgb(100, 105, 115)),
-                );
 
             ui.add_space(6.0);
             match state.auth_type {
@@ -278,32 +298,22 @@ pub fn show(
             }
 
             ui.add_space(8.0);
-            ui.label(i18n::t("dialog.session.color"));
-            ui.horizontal(|ui| {
-                let none_selected = state.color_tag.is_none();
-                if ui.selectable_label(none_selected, i18n::t("dialog.session.color_none")).clicked()
-                {
-                    state.color_tag = None;
-                }
-                for (hex, _label) in COLOR_PRESETS {
-                    let selected = state.color_tag.as_deref() == Some(*hex);
-                    let color = parse_hex(hex).unwrap_or(Color32::GRAY);
-                    let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-                    ui.painter().rect_filled(rect, 3.0, color);
-                    if selected {
-                        ui.painter().rect_stroke(
-                            rect,
-                            3.0,
-                            egui::Stroke::new(2.0_f32, Color32::from_rgb(40, 40, 50)),
-                            egui::StrokeKind::Outside,
-                        );
-                    }
-                    if resp.clicked() {
-                        state.color_tag = Some((*hex).to_string());
-                    }
-                }
-            });
+            egui::Grid::new("session_editor_tail_grid")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label(i18n::t("dialog.session.shell_integration"));
+                    ui.checkbox(
+                        &mut state.shell_integration,
+                        i18n::t("dialog.session.shell_integration_enable"),
+                    );
+                    ui.end_row();
+                });
+            ui.label(
+                RichText::new(i18n::t("dialog.session.shell_integration_hint"))
+                    .size(11.0)
+                    .color(Color32::from_rgb(100, 105, 115)),
+            );
 
             ui.add_space(8.0);
             ui.label(i18n::t("dialog.session.icon"));
