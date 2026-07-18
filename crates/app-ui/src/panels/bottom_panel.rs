@@ -40,6 +40,8 @@ struct ActiveTransfer {
     refresh_remote_on_ok: bool,
     open_after: Option<OpenAfter>,
     is_upload: bool,
+    /// Driven by ZMODEM (rz/sz) rather than an SFTP worker thread.
+    is_zmodem: bool,
     started: Instant,
     last_bytes: u64,
     last_sample: Instant,
@@ -172,6 +174,8 @@ pub struct BottomPanelState {
     /// Set by a menu/button click; drained at the start of the next `tick_files`
     /// so the context menu can close and repaint before the blocking OS dialog.
     pending_native_dialog: Option<PendingNativeDialog>,
+    /// Files-panel Cancel clicked while a ZMODEM transfer owns the progress bar.
+    zmodem_cancel_requested: bool,
     /// Per-server file-browser views, keyed by `user@host`. Switching server
     /// tabs stashes the outgoing view here and restores the target's, so the
     /// panel keeps each host's directory/listing instead of resetting to `/`
@@ -294,6 +298,7 @@ impl Default for BottomPanelState {
             status_line: None,
             inline_rename: None,
             pending_native_dialog: None,
+            zmodem_cancel_requested: false,
             saved: HashMap::new(),
         }
     }
@@ -379,7 +384,11 @@ pub fn show(
 
             if do_cancel {
                 if let Some(t) = &state.transfer {
-                    t.progress.request_cancel();
+                    if t.is_zmodem {
+                        state.zmodem_cancel_requested = true;
+                    } else {
+                        t.progress.request_cancel();
+                    }
                 }
             }
         }
@@ -1676,6 +1685,106 @@ pub fn needs_transfer_poll(state: &BottomPanelState) -> bool {
         || state.remote_loading
 }
 
+/// Drain a Cancel click that targeted a ZMODEM-owned progress bar.
+pub fn take_zmodem_cancel(state: &mut BottomPanelState) -> bool {
+    std::mem::take(&mut state.zmodem_cancel_requested)
+}
+
+/// Mirror ZMODEM send/receive progress into the files-panel transfer strip
+/// (same square bar + transfer list as SFTP). No-ops if an SFTP transfer owns
+/// the slot.
+pub fn sync_zmodem_progress(
+    state: &mut BottomPanelState,
+    name: &str,
+    bytes: u64,
+    total: Option<u64>,
+    is_upload: bool,
+) {
+    let label = if name.is_empty() {
+        "ZMODEM".to_string()
+    } else {
+        name.to_string()
+    };
+    match state.transfer.as_mut() {
+        Some(xfer) if xfer.is_zmodem => {
+            xfer.label = label;
+            xfer.is_upload = is_upload;
+            xfer.progress.set(bytes, total);
+        }
+        Some(_) => {
+            // SFTP is using the bar — leave it alone.
+        }
+        None => {
+            let progress = ArcProgress::new();
+            progress.set(bytes, total);
+            let now = Instant::now();
+            state.transfer = Some(ActiveTransfer {
+                label,
+                progress,
+                refresh_remote_on_ok: false,
+                open_after: None,
+                is_upload,
+                is_zmodem: true,
+                started: now,
+                last_bytes: 0,
+                last_sample: now,
+                speed_bps: 0.0,
+            });
+            state.status_line = None;
+        }
+    }
+}
+
+/// Finish a ZMODEM transfer: clear the square progress bar and append a row to
+/// the shared transfer list (same place as SFTP).
+pub fn finish_zmodem_transfer(
+    state: &mut BottomPanelState,
+    name: &str,
+    is_upload: bool,
+    ok: bool,
+    detail: String,
+) {
+    let leaf = if name.is_empty() {
+        "ZMODEM".to_string()
+    } else {
+        path_leaf(name).to_string()
+    };
+    if state.transfer.as_ref().is_some_and(|t| t.is_zmodem) {
+        state.transfer = None;
+    }
+    push_transfer_log(
+        state,
+        TransferLogItem {
+            name: leaf.clone(),
+            is_upload,
+            ok,
+            detail: detail.clone(),
+        },
+    );
+    state.status_line = Some(if ok {
+        format!("{} — {leaf}", i18n::t("bottom.files.transfer_ok"))
+    } else {
+        format!("{}: {detail}", i18n::t("bottom.files.transfer_failed"))
+    });
+}
+
+/// Label / direction of the live ZMODEM progress slot, if any.
+pub fn zmodem_transfer_label(state: &BottomPanelState) -> Option<(String, bool)> {
+    state
+        .transfer
+        .as_ref()
+        .filter(|t| t.is_zmodem)
+        .map(|t| (t.label.clone(), t.is_upload))
+}
+
+/// Drop an unfinished ZMODEM progress slot (e.g. session went Idle without a
+/// Done/Failed event). Does not touch SFTP transfers.
+pub fn clear_zmodem_transfer(state: &mut BottomPanelState) {
+    if state.transfer.as_ref().is_some_and(|t| t.is_zmodem) {
+        state.transfer = None;
+    }
+}
+
 pub fn run_native_dialog(
     state: &mut BottomPanelState,
     remote: Option<&RemoteSession>,
@@ -2064,6 +2173,7 @@ fn start_download(
         refresh_remote_on_ok: false,
         open_after,
         is_upload: false,
+        is_zmodem: false,
         started: now,
         last_bytes: 0,
         last_sample: now,
@@ -2108,6 +2218,7 @@ fn start_upload(state: &mut BottomPanelState, remote: Option<&RemoteSession>, lo
         refresh_remote_on_ok: true,
         open_after: None,
         is_upload: true,
+        is_zmodem: false,
         started: now,
         last_bytes: 0,
         last_sample: now,

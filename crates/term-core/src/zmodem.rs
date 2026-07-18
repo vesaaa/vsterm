@@ -20,6 +20,10 @@ use zmodem2::{Action, Event, FileInfo, Position, Receiver, Sender};
 /// Ignore new ZMODEM handshakes for this long after a session ends.
 const POST_SESSION_COOLDOWN: Duration = Duration::from_millis(2_000);
 
+/// Move to the next line so the shell prompt cannot `\r`-overwrite a leftover
+/// banner such as `rz waiting to receive.` (which otherwise leaves a `ve.` stump).
+const ADVANCE_LINE: &[u8] = b"\n";
+
 /// Result of feeding remote bytes through the ZMODEM gate.
 #[derive(Debug, Default)]
 pub struct RxResult {
@@ -178,7 +182,7 @@ impl ZmodemBridge {
             ZmodemStatus::Failed {
                 message: "ZMODEM transfer cancelled".into(),
             },
-            Vec::new(),
+            ADVANCE_LINE.to_vec(),
         );
         Self::cancel_bytes().to_vec()
     }
@@ -203,7 +207,7 @@ impl ZmodemBridge {
                 ZmodemStatus::Failed {
                     message: "ZMODEM download cancelled".into(),
                 },
-                Vec::new(),
+                ADVANCE_LINE.to_vec(),
             );
             return Ok(Self::cancel_bytes().to_vec());
         }
@@ -240,7 +244,7 @@ impl ZmodemBridge {
                 ZmodemStatus::Failed {
                     message: "ZMODEM upload cancelled".into(),
                 },
-                Vec::new(),
+                ADVANCE_LINE.to_vec(),
             );
             return Ok(Self::cancel_bytes().to_vec());
         }
@@ -340,7 +344,10 @@ impl ZmodemBridge {
                     let prompt_id = next_prompt_id(&mut g);
                     g.stage = Stage::AwaitSend { zrinit: frame };
                     g.status = ZmodemStatus::AwaitingUpload { prompt_id };
+                    // Keep any non-banner prefix, then advance so a later
+                    // prompt lands on a fresh line instead of `\r`-overwriting.
                     to_terminal = text;
+                    to_terminal.extend_from_slice(ADVANCE_LINE);
                 }
             }
         } else if matches!(g.stage, Stage::Recv(_) | Stage::Send(_)) {
@@ -352,14 +359,18 @@ impl ZmodemBridge {
                 enter_finished(
                     &mut g,
                     ZmodemStatus::Failed { message: msg },
-                    Vec::new(),
+                    ADVANCE_LINE.to_vec(),
                 );
                 to_wire.extend_from_slice(Self::cancel_bytes());
             }
         }
 
+        // Prepend so a post-session newline runs before the next shell prompt
+        // (cancel stores ADVANCE_LINE in flush; prompt arrives on a later on_rx).
         if !g.flush_to_terminal.is_empty() {
-            to_terminal.append(&mut g.flush_to_terminal);
+            let mut flush = std::mem::take(&mut g.flush_to_terminal);
+            flush.append(&mut to_terminal);
+            to_terminal = flush;
         }
         RxResult {
             to_terminal,
@@ -389,6 +400,12 @@ fn enter_finished(inner: &mut Inner, status: ZmodemStatus, leftover_to_terminal:
     if !leftover_to_terminal.is_empty() {
         inner.flush_to_terminal.extend_from_slice(&leftover_to_terminal);
     }
+}
+
+fn with_advance_line(mut leftover: Vec<u8>) -> Vec<u8> {
+    let mut out = ADVANCE_LINE.to_vec();
+    out.append(&mut leftover);
+    out
 }
 
 /// After SessionCompleted/Aborted events, zmodem2 still has ZFIN/OO queued.
@@ -606,13 +623,13 @@ fn run_recv(inner: &mut Inner, data: &[u8], to_wire: &mut Vec<u8>) -> Result<(),
                     .as_ref()
                     .map(|p| format!("ZMODEM saved {}", p.display()))
                     .unwrap_or_else(|| "ZMODEM receive complete".into());
-                let leftover = std::mem::take(&mut recv.inbox);
+                let leftover = with_advance_line(std::mem::take(&mut recv.inbox));
                 enter_finished(inner, ZmodemStatus::Done { summary }, leftover);
                 return Ok(());
             }
             Action::Event(Event::Aborted) => {
                 drain_write_wire_receiver(&mut recv.engine, to_wire);
-                let leftover = std::mem::take(&mut recv.inbox);
+                let leftover = with_advance_line(std::mem::take(&mut recv.inbox));
                 enter_finished(
                     inner,
                     ZmodemStatus::Failed {
@@ -710,7 +727,8 @@ fn run_send(inner: &mut Inner, data: &[u8], to_wire: &mut Vec<u8>) -> Result<(),
             Action::Event(Event::SessionCompleted) => {
                 // Drain OO (and any final ZFIN response bytes) before Idle.
                 drain_write_wire_sender(&mut send.engine, to_wire);
-                let leftover = std::mem::take(&mut send.inbox);
+                // Advance past `rz waiting to receive.` before leftover/prompt.
+                let leftover = with_advance_line(std::mem::take(&mut send.inbox));
                 enter_finished(
                     inner,
                     ZmodemStatus::Done {
@@ -723,7 +741,7 @@ fn run_send(inner: &mut Inner, data: &[u8], to_wire: &mut Vec<u8>) -> Result<(),
             Action::Event(Event::FileStarted(_)) => {}
             Action::Event(Event::Aborted) => {
                 drain_write_wire_sender(&mut send.engine, to_wire);
-                let leftover = std::mem::take(&mut send.inbox);
+                let leftover = with_advance_line(std::mem::take(&mut send.inbox));
                 enter_finished(
                     inner,
                     ZmodemStatus::Failed {
@@ -846,5 +864,12 @@ mod tests {
             total: Some(100),
         };
         assert!((s.progress_fraction().unwrap() - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn with_advance_line_prefixes_newline() {
+        let out = with_advance_line(b"prompt".to_vec());
+        assert!(out.starts_with(ADVANCE_LINE));
+        assert!(out.ends_with(b"prompt"));
     }
 }
