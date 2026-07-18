@@ -1483,7 +1483,14 @@ impl eframe::App for VsTermApp {
                     .clicked()
                     {
                         if let Some(id) = self.connections.active_id() {
+                            let host_key = self.connections.remote_display_key(id);
+                            // Release metrics target before dropping the SSH Arc.
+                            self.remote_host.bind(None, None);
                             self.connections.close(id);
+                            if let Some(key) = host_key {
+                                bottom_panel::forget_saved_host(&mut self.bottom, &key);
+                                self.remote_host.forget_host(&key);
+                            }
                             self.sync_host_binding();
                             self.status = i18n::t("status.closed");
                         }
@@ -1565,8 +1572,9 @@ impl eframe::App for VsTermApp {
         });
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            let zmodem = self.connections.active_zmodem_status();
             let zmodem_busy = matches!(
-                self.connections.active_zmodem_status(),
+                zmodem,
                 Some(
                     ZmodemStatus::Receiving { .. }
                         | ZmodemStatus::Sending { .. }
@@ -1574,12 +1582,14 @@ impl eframe::App for VsTermApp {
                         | ZmodemStatus::AwaitingSaveAs { .. }
                 )
             );
+            let zmodem_progress = zmodem.as_ref().and_then(|s| s.progress_fraction());
             status_bar::show(
                 ui,
                 &self.status,
                 self.connections.list_meta().len(),
                 crate::render_policy::is_software_renderer(),
                 zmodem_busy,
+                zmodem_progress,
                 || {
                     let _ = self.connections.cancel_zmodem();
                 },
@@ -1726,15 +1736,20 @@ impl eframe::App for VsTermApp {
                                             self.main_tab = MainTab::Terminal;
                                         }
                                         Some(connection_list::ConnAction::Close(id)) => {
-                                            let host_key = self
-                                                .connections
-                                                .remote_display_key(id);
+                                            let host_key =
+                                                self.connections.remote_display_key(id);
+                                            // Drop metrics bind first so `RemoteSession`
+                                            // Arcs are not pinned while I/O is torn down.
+                                            if self.connections.active_id() == Some(id) {
+                                                self.remote_host.bind(None, None);
+                                            }
                                             self.connections.close(id);
                                             if let Some(key) = host_key {
                                                 bottom_panel::forget_saved_host(
                                                     &mut self.bottom,
                                                     &key,
                                                 );
+                                                self.remote_host.forget_host(&key);
                                             }
                                             self.sync_host_binding();
                                             self.status = i18n::t("status.closed");

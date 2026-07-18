@@ -17,7 +17,7 @@ use parking_lot::Mutex as ParkingMutex;
 use russh::client::{AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{load_secret_key, PrivateKeyWithHashAlg, PublicKey};
 use russh::MethodKind;
-use russh::{client, ChannelMsg};
+use russh::{client, ChannelMsg, Disconnect};
 use russh_sftp::protocol::FileAttributes;
 
 /// Cipher negotiation order. AES-256-GCM first so we use CPU AES instructions
@@ -609,6 +609,19 @@ impl Drop for RusshRemoteExec {
                 let _ = s.raw.close_session();
             }
         }
+        // Tear down the TCP/SSH session so channel windows and crypto state
+        // are not retained until process exit (Arc alone is not enough if the
+        // russh task outlives the UI drop path).
+        let session = Arc::clone(&self.session);
+        let host = self.host.clone();
+        let _ = runtime().block_on(async move {
+            if let Err(err) = session
+                .disconnect(Disconnect::ByApplication, "", "English")
+                .await
+            {
+                tracing::debug!("russh disconnect {host}: {err}");
+            }
+        });
     }
 }
 

@@ -7,10 +7,24 @@ pub fn show(
     conn_count: usize,
     software_renderer: bool,
     zmodem_busy: bool,
+    zmodem_progress: Option<f32>,
     on_cancel_zmodem: impl FnOnce(),
 ) {
     ui.horizontal(|ui| {
         ui.label(status);
+        if let Some(frac) = zmodem_progress {
+            let bar = egui::ProgressBar::new(frac)
+                .desired_width(120.0)
+                .show_percentage();
+            ui.add(bar);
+        } else if zmodem_busy {
+            // Indeterminate-ish: thin busy bar while waiting on a dialog.
+            ui.add(
+                egui::ProgressBar::new(0.0)
+                    .desired_width(120.0)
+                    .animate(true),
+            );
+        }
         if zmodem_busy {
             if ui
                 .small_button(i18n::t("zmodem.cancel"))

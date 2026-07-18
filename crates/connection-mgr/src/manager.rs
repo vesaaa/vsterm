@@ -368,8 +368,15 @@ impl ConnectionManager {
                 *active = self.order.lock().last().copied();
             }
         }
-        drop(removed);
         self.bump();
+        // Drop SSH/PTY I/O off the UI thread. Synchronous drop joins reader
+        // threads and disconnects russh; doing that inline keeps RSS high and
+        // can hitch the frame where the tab was closed.
+        if let Some(conn) = removed {
+            std::thread::spawn(move || {
+                drop(conn);
+            });
+        }
     }
 
     pub fn close_all(&self) {
