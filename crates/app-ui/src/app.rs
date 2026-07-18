@@ -1486,16 +1486,7 @@ impl eframe::App for VsTermApp {
                     .clicked()
                     {
                         if let Some(id) = self.connections.active_id() {
-                            let host_key = self.connections.remote_display_key(id);
-                            // Release metrics target before dropping the SSH Arc.
-                            self.remote_host.bind(None, None);
-                            self.connections.close(id);
-                            if let Some(key) = host_key {
-                                bottom_panel::forget_saved_host(&mut self.bottom, &key);
-                                self.remote_host.forget_host(&key);
-                            }
-                            self.sync_host_binding();
-                            self.status = i18n::t("status.closed");
+                            self.close_host_tab(id);
                         }
                         ui.close_menu();
                     }
@@ -1739,23 +1730,7 @@ impl eframe::App for VsTermApp {
                                             self.main_tab = MainTab::Terminal;
                                         }
                                         Some(connection_list::ConnAction::Close(id)) => {
-                                            let host_key =
-                                                self.connections.remote_display_key(id);
-                                            // Drop metrics bind first so `RemoteSession`
-                                            // Arcs are not pinned while I/O is torn down.
-                                            if self.connections.active_id() == Some(id) {
-                                                self.remote_host.bind(None, None);
-                                            }
-                                            self.connections.close(id);
-                                            if let Some(key) = host_key {
-                                                bottom_panel::forget_saved_host(
-                                                    &mut self.bottom,
-                                                    &key,
-                                                );
-                                                self.remote_host.forget_host(&key);
-                                            }
-                                            self.sync_host_binding();
-                                            self.status = i18n::t("status.closed");
+                                            self.close_host_tab(id);
                                         }
                                         Some(connection_list::ConnAction::Reconnect { id, light }) => {
                                             self.request_reconnect(id, Some(light));
@@ -2038,6 +2013,22 @@ impl eframe::App for VsTermApp {
 }
 
 impl VsTermApp {
+    /// Close a host tab: cancel SFTP/ZMODEM, unbind metrics, drop SSH/PTY.
+    fn close_host_tab(&mut self, id: connection_mgr::ConnectionId) {
+        let host_key = self.connections.remote_display_key(id);
+        // Always clear metrics bind if it points at this host (keeps RemoteSession
+        // Arcs from pinning the SSH session during teardown).
+        if let Some(key) = host_key.as_deref() {
+            self.remote_host.forget_host(key);
+            bottom_panel::shutdown_host(&mut self.bottom, key);
+        } else if self.connections.active_id() == Some(id) {
+            self.remote_host.bind(None, None);
+        }
+        self.connections.close(id);
+        self.sync_host_binding();
+        self.status = i18n::t("status.closed");
+    }
+
     fn poll_zmodem(&mut self) {
         match self.connections.active_zmodem_status() {
             Some(ZmodemStatus::Receiving {

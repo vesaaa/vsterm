@@ -140,7 +140,14 @@ impl SshIoSession {
 
     fn shutdown_io(&mut self) {
         self.alive.store(false, Ordering::SeqCst);
+        // Dropping the writer closes one end of the shell ctrl channel; also
+        // drop `resize` (it holds the other UnboundedSender clone) so the
+        // russh shell task observes `None` and exits promptly.
         *self.writer.lock() = None;
+        self.resize = None;
+        // Detach egui wake hook so the terminal grid can free without
+        // retaining UI callbacks across the close path.
+        self.terminal.set_output_hook(None);
     }
 }
 
@@ -153,7 +160,9 @@ impl Drop for SshIoSession {
                 let _ = handle.join();
                 let _ = tx.send(());
             });
-            let _ = rx.recv_timeout(Duration::from_millis(150));
+            // Reader uses a 20 ms recv timeout and checks `alive`; give it a
+            // moment, then detach so tab close never blocks the UI long.
+            let _ = rx.recv_timeout(Duration::from_millis(300));
         }
     }
 }
