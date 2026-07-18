@@ -1289,22 +1289,30 @@ fn paint_transfer_list_popup(
 ) {
     const PANEL_W: f32 = 360.0;
     const PANEL_H: f32 = 240.0;
+    const INNER_W: f32 = PANEL_W - 16.0;
     // Bottom-right: panel bottom edge sits on the status bar top, right-aligned.
-    let pos = egui::pos2(status_bar.right() - PANEL_W, status_bar.top() - PANEL_H);
+    let screen = ui.ctx().screen_rect();
+    let mut pos = egui::pos2(status_bar.right() - PANEL_W, status_bar.top() - PANEL_H);
+    // Keep the whole panel on-screen without letting content lay out wider first
+    // (wide rows + constrain used to shove the list off the left edge).
+    pos.x = pos.x.clamp(screen.left() + 4.0, (screen.right() - PANEL_W).max(screen.left() + 4.0));
+    pos.y = pos.y.max(screen.top() + 4.0);
 
     let mut close = false;
     let resp = egui::Area::new(egui::Id::new("files_transfer_list"))
         .order(egui::Order::Foreground)
         .fixed_pos(pos)
-        .constrain_to(ui.ctx().screen_rect())
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style())
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
-                    ui.set_min_size(egui::vec2(PANEL_W - 16.0, PANEL_H - 16.0));
-                    ui.set_max_size(egui::vec2(PANEL_W - 16.0, PANEL_H - 16.0));
+                    ui.set_width(INNER_W);
+                    ui.set_max_width(INNER_W);
+                    ui.set_min_height(PANEL_H - 16.0);
+                    ui.set_max_height(PANEL_H - 16.0);
 
                     ui.horizontal(|ui| {
+                        ui.set_max_width(INNER_W);
                         ui.label(
                             RichText::new(i18n::t("bottom.files.transfer_list"))
                                 .size(13.0)
@@ -1326,7 +1334,8 @@ fn paint_transfer_list_popup(
                         .max_height(list_h)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            ui.set_min_width(PANEL_W - 24.0);
+                            ui.set_width(INNER_W - 8.0);
+                            ui.set_max_width(INNER_W - 8.0);
                             let mut any = false;
 
                             if let Some(xfer) = &state.transfer {
@@ -1436,12 +1445,49 @@ fn transfer_list_row(
         TransferRowKind::Ok => Color32::from_rgb(40, 140, 80),
         TransferRowKind::Failed => Color32::from_rgb(190, 70, 70),
     };
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(arrow).size(12.0).color(ui_icon::COLOR_MUTED));
-        ui.label(RichText::new(name).size(12.0));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(status).size(11.0).color(status_color));
-            ui.label(RichText::new(detail).size(11.0).weak());
+    // Fixed-width row: nested right-to-left without a width cap used to expand
+    // past the popup and paint into the area to the left of the panel.
+    let row_w = ui.available_width().max(1.0);
+    let row_h = 22.0;
+    let (row_rect, _) = ui.allocate_exact_size(egui::vec2(row_w, row_h), Sense::hover());
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(row_rect), |ui| {
+        ui.set_clip_rect(row_rect);
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_max_width(row_w);
+            ui.label(RichText::new(arrow).size(12.0).color(ui_icon::COLOR_MUTED));
+            // Status on the right; name/detail share the middle and truncate.
+            let status_g =
+                ui.fonts(|f| f.layout_no_wrap(status.clone(), FontId::proportional(11.0), status_color));
+            let status_w = status_g.size().x + 8.0;
+            let mid_w = (ui.available_width() - status_w).max(40.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(mid_w, row_h),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_max_width(mid_w);
+                    let name_w = (mid_w * 0.45).max(48.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(name_w, row_h),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_max_width(name_w);
+                            ui.add(
+                                egui::Label::new(RichText::new(name).size(12.0))
+                                    .truncate()
+                                    .selectable(false),
+                            );
+                        },
+                    );
+                    ui.add(
+                        egui::Label::new(RichText::new(detail).size(11.0).weak())
+                            .truncate()
+                            .selectable(false),
+                    );
+                },
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(status).size(11.0).color(status_color));
+            });
         });
     });
 }
@@ -1757,6 +1803,20 @@ pub fn finish_zmodem_transfer(
     } else {
         path_leaf(name).to_string()
     };
+    // Keep log detail short so the transfer-list popup does not grow past its
+    // fixed width (long "ZMODEM saved /…/path" strings used to shove rows left).
+    let log_detail = if ok {
+        "ZMODEM".to_string()
+    } else {
+        let d = detail.trim();
+        if d.chars().count() > 48 {
+            let mut s: String = d.chars().take(48).collect();
+            s.push('…');
+            s
+        } else {
+            d.to_string()
+        }
+    };
     if state.transfer.as_ref().is_some_and(|t| t.is_zmodem) {
         state.transfer = None;
     }
@@ -1766,7 +1826,7 @@ pub fn finish_zmodem_transfer(
             name: leaf.clone(),
             is_upload,
             ok,
-            detail: detail.clone(),
+            detail: log_detail,
         },
     );
     state.status_line = Some(if ok {
