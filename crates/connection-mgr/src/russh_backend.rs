@@ -33,7 +33,7 @@ static CIPHER_PREFERENCE: &[russh::cipher::Name] = &[
 use session_tree::{AuthConfig, SessionConfig};
 use std::io::{self, Cursor, Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -163,6 +163,7 @@ async fn connect_and_shell(
         session: Arc::clone(&session),
         host: config.host.clone(),
         sftp: tokio::sync::Mutex::new(None),
+        sftp_cap: AtomicU8::new(SFTP_CAP_UNKNOWN),
     });
     let remote = RemoteSession::from_exec_fs(
         config.username.clone(),
@@ -588,6 +589,16 @@ impl Write for PipeWriter {
     }
 }
 
+/// SFTP capability probe: unknown → try once; yes → reuse; no → never retry
+/// (Merlin/Dropbear often have no `sftp` subsystem).
+const SFTP_CAP_UNKNOWN: u8 = 0;
+const SFTP_CAP_YES: u8 = 1;
+const SFTP_CAP_NO: u8 = 2;
+
+/// Bound how long we wait for a missing/hanging SFTP subsystem so metrics
+/// `exec` channels are not starved on low-`MaxSessions` routers.
+const SFTP_OPEN_TIMEOUT: Duration = Duration::from_secs(8);
+
 struct RusshRemoteExec {
     session: Arc<Handle<ClientHandler>>,
     host: String,
@@ -595,6 +606,7 @@ struct RusshRemoteExec {
     /// channel per list/download leaked ~10 MiB RSS each time (russh channel
     /// window + buffers; `close_session` / `Drop` try_send Close is best-effort).
     sftp: tokio::sync::Mutex<Option<SharedSftp>>,
+    sftp_cap: AtomicU8,
 }
 
 struct SharedSftp {
@@ -630,11 +642,42 @@ impl RusshRemoteExec {
     async fn shared_sftp(
         &self,
     ) -> Result<(Arc<russh_sftp::client::RawSftpSession>, u32), ConnError> {
+        if self.sftp_cap.load(Ordering::Acquire) == SFTP_CAP_NO {
+            return Err(ConnError::Backend(
+                crate::remote_fs::sftp_unsupported_msg().into(),
+            ));
+        }
         let mut guard = self.sftp.lock().await;
         if let Some(s) = guard.as_ref() {
             return Ok((Arc::clone(&s.raw), s.max_read));
         }
-        let (raw, max_read) = open_raw_sftp(Arc::clone(&self.session), &self.host).await?;
+        let host = self.host.clone();
+        let session = Arc::clone(&self.session);
+        let opened = tokio::time::timeout(SFTP_OPEN_TIMEOUT, open_raw_sftp(session, &host)).await;
+        let (raw, max_read) = match opened {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                if sftp_capability_denied(&e) {
+                    self.sftp_cap.store(SFTP_CAP_NO, Ordering::Release);
+                    tracing::info!(
+                        "SFTP unavailable on {host} — file browser disabled; metrics still use exec"
+                    );
+                }
+                return Err(e);
+            }
+            Err(_elapsed) => {
+                // Timed-out subsystem opens often mean no SFTP or MaxSessions
+                // exhaustion; do not keep retrying every directory list.
+                self.sftp_cap.store(SFTP_CAP_NO, Ordering::Release);
+                tracing::info!(
+                    "SFTP open timed out on {host} — treating as unsupported"
+                );
+                return Err(ConnError::Connect(format!(
+                    "sftp subsystem {host}: timed out"
+                )));
+            }
+        };
+        self.sftp_cap.store(SFTP_CAP_YES, Ordering::Release);
         *guard = Some(SharedSftp {
             raw: Arc::clone(&raw),
             max_read,
@@ -648,6 +691,13 @@ impl RusshRemoteExec {
         if let Some(s) = guard.take() {
             let _ = s.raw.close_session();
         }
+        // Allow one re-open after a dead channel (not a permanent "no SFTP").
+        let _ = self.sftp_cap.compare_exchange(
+            SFTP_CAP_YES,
+            SFTP_CAP_UNKNOWN,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -716,6 +766,10 @@ impl RemoteExec for RusshRemoteExec {
 }
 
 impl RemoteFs for RusshRemoteExec {
+    fn sftp_supported(&self) -> bool {
+        self.sftp_cap.load(Ordering::Acquire) != SFTP_CAP_NO
+    }
+
     fn list_dir(&self, path: &str) -> Result<Vec<RemoteDirEntry>, ConnError> {
         let path = path.to_string();
         runtime().block_on(async move {
@@ -943,6 +997,17 @@ fn sftp_session_dead(err: &ConnError) -> bool {
         || s.contains("not connected")
 }
 
+/// Errors that mean this host will never speak SFTP (vs transient channel loss).
+fn sftp_capability_denied(err: &ConnError) -> bool {
+    let s = err.to_string().to_ascii_lowercase();
+    s.contains("sftp subsystem")
+        || s.contains("unknown subsystem")
+        || s.contains("subsystem request failed")
+        || s.contains("subsystem not supported")
+        || s.contains("administratively prohibited")
+        || s.contains("sftp is unavailable")
+}
+
 async fn open_raw_sftp(
     session: Arc<Handle<ClientHandler>>,
     host: &str,
@@ -968,7 +1033,8 @@ fn wrap_sh_c(script: &str) -> String {
 
 #[cfg(test)]
 mod wrap_sh_tests {
-    use super::wrap_sh_c;
+    use super::{sftp_capability_denied, wrap_sh_c};
+    use crate::ConnError;
 
     #[test]
     fn wrap_strips_crlf_from_remote_scripts() {
@@ -980,5 +1046,15 @@ mod wrap_sh_tests {
         assert!(out.contains("export LC_ALL=C\necho hi\ndo"));
         assert!(out.starts_with("sh -s <<'VSTERM_EOF'\n"));
         assert!(out.ends_with("\nVSTERM_EOF"));
+    }
+
+    #[test]
+    fn sftp_subsystem_errors_are_permanent() {
+        assert!(sftp_capability_denied(&ConnError::Connect(
+            "sftp subsystem router: Unknown subsystem".into()
+        )));
+        assert!(!sftp_capability_denied(&ConnError::Connect(
+            "sftp channel router: Connection reset".into()
+        )));
     }
 }
