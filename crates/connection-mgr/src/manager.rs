@@ -558,6 +558,17 @@ impl ConnectionManager {
         conn.resize(cols, rows)
     }
 
+    /// Grid size of the active terminal emulator, if any.
+    pub fn active_terminal_size(&self) -> Option<(u16, u16)> {
+        let id = self.active_id()?;
+        let conns = self.connections.lock();
+        let conn = conns.get(&id)?;
+        if conn.state != ConnectionState::Connected {
+            return None;
+        }
+        Some(conn.terminal.size())
+    }
+
     /// Drop dead connections (SSH process exited). Keep the tab for reconnect.
     pub fn reap_dead(&self) {
         let dead: Vec<ConnectionId> = {
