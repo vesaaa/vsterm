@@ -383,11 +383,7 @@ impl ConnectionManager {
             // Detach terminal wake hook early (also done in SshIoSession drop).
             conn.terminal.set_output_hook(None);
             std::thread::spawn(move || {
-                drop(conn);
-                // Best-effort return of freed pages after the session heap is gone.
-                unsafe {
-                    libmimalloc_sys::mi_collect(false);
-                }
+                teardown_connection(conn);
             });
         }
     }
@@ -404,7 +400,9 @@ impl ConnectionManager {
         // Drop I/O off the UI/exit thread so window close stays snappy.
         if !drained.is_empty() {
             std::thread::spawn(move || {
-                drop(drained);
+                for conn in drained {
+                    teardown_connection(conn);
+                }
             });
         }
         self.bump();
@@ -695,3 +693,32 @@ pub struct ConnectionMeta {
 
 /// Shared handle for UI.
 pub type SharedConnectionManager = Arc<ConnectionManager>;
+
+/// Drop SSH I/O / remote session off the UI thread, then reclaim mimalloc pages.
+///
+/// Background SFTP/metrics threads may still hold a `RemoteSession` clone for a
+/// short time after tab close. An immediate `mi_collect` then runs *before*
+/// those frees, leaving session-sized blocks in abandoned segments — which
+/// looks like a permanent ~8–10 MiB RSS bump per connect/close cycle. Staged
+/// collects after the drop give those workers time to finish.
+fn teardown_connection(mut conn: ActiveConnection) {
+    // Prefer a deterministic drop order: shell I/O first (joins reader), then
+    // RemoteSession (disconnect + SFTP close), then the rest of the tab.
+    let io = conn.io.take();
+    let remote = conn.remote.take();
+    drop(io);
+    drop(remote);
+    drop(conn);
+
+    for delay_ms in [150_u64, 600, 2_000] {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        unsafe {
+            libmimalloc_sys::mi_collect(false);
+        }
+    }
+    // Final forced purge once late frees should have landed.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    unsafe {
+        libmimalloc_sys::mi_collect(true);
+    }
+}

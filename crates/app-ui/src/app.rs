@@ -1306,13 +1306,25 @@ impl eframe::App for VsTermApp {
                         | ZmodemStatus::AwaitingSaveAs { .. }
                 )
             );
+        // Directory listing must not pause metrics: on Merlin/no-SFTP hosts the
+        // first `list_dir` fails (or times out) and used to keep sampling off
+        // while the file panel was "loading", so Monitor / System Info stayed empty.
+        let metrics_paused = bottom_panel::needs_metrics_pause(&self.bottom)
+            || matches!(
+                self.connections.active_zmodem_status(),
+                Some(
+                    ZmodemStatus::Receiving { .. }
+                        | ZmodemStatus::Sending { .. }
+                        | ZmodemStatus::AwaitingUpload { .. }
+                        | ZmodemStatus::AwaitingSaveAs { .. }
+                )
+            );
         self.poll_zmodem();
         // Remote metrics share the same SSH session/runtime as the interactive
-        // shell and SFTP. Keep collecting only when the UI needs it *and* no
-        // transfer is saturating the session — otherwise typing echo waits
-        // behind pipelined reads / exec channels.
+        // shell and SFTP. Pause only for real byte transfers / ZMODEM — not for
+        // a directory list — so typing echo and host charts stay responsive.
         self.remote_host.set_sampling(
-            wants_live_host_data && has_remote_host && !transfer_active,
+            wants_live_host_data && has_remote_host && !metrics_paused,
         );
         let menu_open = ctx.is_context_menu_open()
             || ctx.memory(|m| m.any_popup_open());

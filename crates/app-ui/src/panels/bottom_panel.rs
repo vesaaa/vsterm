@@ -462,6 +462,14 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
     let mode = remote_mode(remote);
     let key = remote.map(|r| r.display_key());
 
+    // Host just lost SFTP (e.g. Merlin) — stop spinning on list/transfer queues.
+    if mode == RemotePaneMode::SystemUnsupported {
+        state.pending_list = None;
+        state.remote_loading = false;
+        state.transfer_queue.clear();
+        state.remote_error = None;
+    }
+
     if state.bound_key != key {
         // Stash the outgoing server's view so returning to its tab restores the
         // exact directory + listing. In-flight transfers are NOT cancelled —
@@ -1783,6 +1791,13 @@ pub fn clear_zmodem_transfer(state: &mut BottomPanelState) {
     if state.transfer.as_ref().is_some_and(|t| t.is_zmodem) {
         state.transfer = None;
     }
+}
+
+/// True when host metrics should yield the SSH session to a real file transfer.
+/// Directory listing alone must not pause Monitor / System Info (no-SFTP hosts
+/// would otherwise stay empty forever while the browser retries/fails).
+pub fn needs_metrics_pause(state: &BottomPanelState) -> bool {
+    state.transfer.is_some() || !state.transfer_queue.is_empty()
 }
 
 pub fn run_native_dialog(
