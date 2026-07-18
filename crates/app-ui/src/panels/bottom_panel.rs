@@ -563,7 +563,7 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
             let leaf = path_leaf(&label).to_string();
             let (msg, log_ok, log_detail) = match &snap.error {
                 Some(e) => {
-                    let err = format_transfer_error(e);
+                    let err = format_transfer_error(e, is_upload);
                     (err.clone(), false, err)
                 }
                 None => {
@@ -619,32 +619,53 @@ fn tick_files(ctx: &egui::Context, state: &mut BottomPanelState, remote: Option<
     }
 }
 
-fn format_transfer_error(raw: &str) -> String {
+fn format_transfer_error(raw: &str, is_upload: bool) -> String {
     let lower = raw.to_ascii_lowercase();
-    if lower.contains("permission denied") {
-        // Prefer a clear path from SFTP messages like:
-        // "sftp create /opt/foo.rar: Permission denied: Permission denied"
-        let path = raw
-            .split_once("sftp create ")
-            .or_else(|| raw.split_once("sftp mkdir "))
-            .or_else(|| raw.split_once("sftp open "))
-            .map(|(_, rest)| rest.split(':').next().unwrap_or(rest).trim())
-            .filter(|p| !p.is_empty());
-        match path {
-            Some(p) => format!(
-                "{}: {} — {}",
-                i18n::t("bottom.files.transfer_failed"),
-                i18n::t("bottom.files.err.permission"),
-                p
-            ),
-            None => format!(
-                "{}: {}",
-                i18n::t("bottom.files.transfer_failed"),
-                i18n::t("bottom.files.err.permission")
-            ),
-        }
+    let denied = lower.contains("permission denied") || lower.contains("access is denied");
+    if !denied {
+        return format!("{}: {raw}", i18n::t("bottom.files.transfer_failed"));
+    }
+
+    // Prefer a clear path from SFTP messages like:
+    // "sftp open /opt/foo.tar: Permission denied"
+    // "sftp create /opt/foo.rar: Permission denied"
+    let path = raw
+        .split_once("sftp create ")
+        .or_else(|| raw.split_once("sftp mkdir "))
+        .or_else(|| raw.split_once("sftp open "))
+        .or_else(|| raw.split_once("sftp lstat "))
+        .or_else(|| raw.split_once("sftp opendir "))
+        .or_else(|| raw.split_once("create "))
+        .map(|(_, rest)| rest.split(':').next().unwrap_or(rest).trim())
+        .filter(|p| !p.is_empty());
+
+    // Download opens the remote file for READ; upload CREATE/MKDIR needs WRITE.
+    // Older UI always said "remote folder not writable", which misled downloads.
+    let kind = if lower.contains("sftp open ")
+        || lower.contains("sftp lstat ")
+        || lower.contains("sftp opendir ")
+    {
+        i18n::t("bottom.files.err.permission_read")
+    } else if lower.contains("sftp create ")
+        || lower.contains("sftp mkdir ")
+        || (is_upload && path.is_some_and(|p| p.starts_with('/')))
+    {
+        i18n::t("bottom.files.err.permission")
+    } else if !is_upload {
+        // Local save failures (Windows "Access is denied", mkdir/create, …).
+        i18n::t("bottom.files.err.permission_local")
     } else {
-        format!("{}: {raw}", i18n::t("bottom.files.transfer_failed"))
+        i18n::t("bottom.files.err.permission")
+    };
+
+    match path {
+        Some(p) => format!(
+            "{}: {} — {}",
+            i18n::t("bottom.files.transfer_failed"),
+            kind,
+            p
+        ),
+        None => format!("{}: {}", i18n::t("bottom.files.transfer_failed"), kind),
     }
 }
 
@@ -1805,10 +1826,16 @@ pub fn finish_zmodem_transfer(
     };
     // Keep log detail short so the transfer-list popup does not grow past its
     // fixed width (long "ZMODEM saved /…/path" strings used to shove rows left).
+    let status = if ok {
+        format!("{} — {leaf}", i18n::t("bottom.files.transfer_ok"))
+    } else {
+        format_transfer_error(&detail, is_upload)
+    };
     let log_detail = if ok {
         "ZMODEM".to_string()
     } else {
-        let d = detail.trim();
+        // List row: keep the hint, drop the shared "transfer failed" prefix.
+        let d = status.split_once(": ").map(|(_, r)| r).unwrap_or(&status);
         if d.chars().count() > 48 {
             let mut s: String = d.chars().take(48).collect();
             s.push('…');
@@ -1829,11 +1856,7 @@ pub fn finish_zmodem_transfer(
             detail: log_detail,
         },
     );
-    state.status_line = Some(if ok {
-        format!("{} — {leaf}", i18n::t("bottom.files.transfer_ok"))
-    } else {
-        format!("{}: {detail}", i18n::t("bottom.files.transfer_failed"))
-    });
+    state.status_line = Some(status);
 }
 
 /// Label / direction of the live ZMODEM progress slot, if any.
