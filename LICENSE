@@ -1,7 +1,10 @@
-VsTerm — 源代码授权与版权声明
+VsTerm — 源代码授权与版权声明 / Source License & Copyright Notice
 Copyright (c) 2026 vesaa. All Rights Reserved.
 
 ================================================================================
+中文（正文；如与英文冲突，以中文为准）
+================================================================================
+
 ⚠️ 授权声明 (License & Copyright)
 ================================================================================
 
@@ -23,8 +26,9 @@ Copyright (c) 2026 vesaa. All Rights Reserved.
 
 您可以：
 
-  • 查看、阅读、研究本仓库公开的源代码；
-  • 在本地编译、运行，用于个人技术学习、交流与非盈利性质的研究。
+  • 查看、阅读、研究本项目的源代码（若作者向您提供）；
+  • 在本地编译、运行官方或您获授权的构建，用于个人技术学习、交流与非盈利性质的研究；
+  • 下载并使用作者在公开渠道发布的官方安装包，用于个人非商业用途。
 
 上述行为无需向作者付费，但不得违反本文件其他条款。
 
@@ -32,7 +36,7 @@ Copyright (c) 2026 vesaa. All Rights Reserved.
 三、禁止行为（未经作者书面授权）
 --------------------------------------------------------------------------------
 
-严禁对本项目源代码进行以下行为：
+严禁对本项目源代码及官方构建进行以下行为：
 
   • 修改、演绎、fork 后以新名称发布，或对外提供下载、安装包、镜像；
   • 二次打包、 rebranding 后出售、出租、订阅收费，或嵌入收费产品/服务；
@@ -76,10 +80,69 @@ Copyright (c) 2026 vesaa. All Rights Reserved.
   邮箱：vesaazheng@gmail.com
 
 ================================================================================
+English (convenience translation; Chinese text above prevails)
+================================================================================
 
-English Summary (non-binding; Chinese text prevails)
+Source License & Copyright Notice
+Copyright (c) 2026 vesaa. All Rights Reserved.
 
-Source code is © 2026 vesaa, All Rights Reserved. You may view and study the
-code for personal, non-commercial learning. Modification, redistribution,
-integration into other products, or commercial use requires prior written
-permission. Contact: vesaazheng@gmail.com
+This project's source code is published under All Rights Reserved, with
+non-commercial / no-derivatives intent similar in spirit to Creative Commons
+BY-NC-ND 4.0. Except as expressly allowed below, you have no implied rights.
+
+1. Copyright holder
+
+Copyright and related IP in this project (source, docs, design, name, marks)
+belong solely to the author vesaa ("Author"). No third party may claim
+independent or joint IP without the Author's written permission.
+
+2. Personal study and research (free)
+
+You may:
+
+  • View, read, and study the source code if the Author makes it available to you;
+  • Build and run locally for personal, non-profit technical learning and research;
+  • Download and use official builds published by the Author for personal,
+    non-commercial use.
+
+No fee is required for the above, provided you comply with the rest of this notice.
+
+3. Prohibited without prior written permission
+
+You may not:
+
+  • Modify, create derivatives, fork and publish under a new name, or redistribute
+    downloads / installers / mirrors;
+  • Repackage or rebrand for sale, rental, subscription, or paid products/services;
+  • Redistribute or sublicense modified versions;
+  • Integrate this project (in whole or in part) into other open or closed
+    projects for external delivery;
+  • Claim software copyright, patents, trademarks, domains, or other IP on
+    modifications, derivatives, or wrappers based on this project;
+  • Remove or alter this copyright / license notice;
+  • Offer products or services under this project's name without a commercial license.
+
+4. Commercial use
+
+Any of the following requires a prior written commercial license from the Author:
+
+  • Commercial profit, paid products or services;
+  • Internal production deployment beyond personal study;
+  • Delivery to customers or third parties as part of a product or solution.
+
+5. Third-party components
+
+Open-source libraries and embedded fonts (e.g. JetBrains Mono, Noto Sans SC)
+remain under their own licenses. This notice does not limit lawful use of those
+components under their respective terms.
+
+6. Disclaimer
+
+THE SOFTWARE IS PROVIDED "AS IS". THE AUTHOR IS NOT LIABLE FOR ANY DIRECT OR
+INDIRECT DAMAGES ARISING FROM USE OF THE SOFTWARE.
+
+7. Commercial licensing contact
+
+For commercial licensing quotes: vesaazheng@gmail.com
+
+================================================================================

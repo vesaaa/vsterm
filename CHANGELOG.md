@@ -3,8 +3,13 @@
 All notable releases are published as binaries on
 [GitHub Releases](https://github.com/vesaaa/vsterm/releases).
 
-Source development is private; tags that trigger CI live in the private source repository.
-This file summarizes recent public releases.
+Source development is private; tags that trigger CI live in this repository.
+On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
+and `LICENSE` to the public `vesaaa/vsterm` main branch.
+
+## [1.1.2] — 2026-07-24
+
+- Verify private CI publishes Release assets (and docs) to public `vesaaa/vsterm`.
 
 ## [1.1.0] — 2026-07-24
 
