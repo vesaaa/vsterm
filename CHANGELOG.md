@@ -8,6 +8,25 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.1.15] — 2026-08-04
+
+### Fixed
+- Public-key connect dialog no longer starts verifying the moment the first character of an empty username is typed. Auto-verify now requires the username **and** key path to have been prefilled from the saved session; anything typed by hand waits for Verify & Connect. The "Verifying public key…" line only appears when auto-verify will actually run.
+- Private key paths are cleaned before use: surrounding quotes (Explorer "Copy as path") and stray whitespace are stripped, and `~\` expands like `~/` on Windows. Existence is checked with `is_file`, so a directory no longer passes as a key.
+- "Private key file not found" now names the path that was actually checked, instead of leaving the resolved value invisible.
+
+### Added
+- **Browse…** button beside the private key field in both the connect dialog and the session editor, opening a native file picker in the directory already entered.
+- Near-miss key suggestions: when a path does not resolve but the same location holds that name with `.key` / `.pem` / `.ppk` / `.openssh`, or a `.pub` was given instead of the private half, the real file is offered as a one-click button. Nothing is substituted silently, and the scan only runs on edit or failed verification.
+
+### Changed
+- Saved sessions keep `~` unexpanded, so a session file stays portable when the data directory lives on OneDrive / iCloud / SMB.
+
+### 中文
+- **修复**：公钥登录对话框不再在用户名输入第一个字符时就自动验证——仅当用户名与私钥路径均来自已保存会话时才自动发起；私钥路径去除首尾引号与空白，支持 `~\`，存在性检查改用 `is_file`，错误提示带上实际检查的路径。
+- **新增**：私钥路径旁「浏览…」按钮（连接对话框与会话编辑器）；路径解析不到时，提示同位置补全 `.key`/`.pem`/`.ppk`/`.openssh` 后的真实文件（或 `.pub` 对应的私钥），点击填入，不做静默替换。
+- **改进**：会话保存时保留 `~` 不展开，数据目录放在 OneDrive / iCloud / SMB 时仍可跨机器复用。
+
 ## [1.1.14] — 2026-08-04
 
 ### Fixed
