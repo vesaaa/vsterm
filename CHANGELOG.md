@@ -8,6 +8,15 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.1.16] — 2026-08-05
+
+### Fixed
+- Terminal focus no longer steals arrow / Tab / Escape keys for egui widget navigation after the first press, so shell history recall, Tab completion, and repeated cursor movement stay on the PTY instead of jumping to the History toolbar button.
+- Application Cursor Keys (DECCKM) are now encoded from the live emulator mode: bare arrows / Home / End send SS3 (`ESC O A` …) when vi and other fullscreen apps enable `CSI ?1h`, matching xterm terminfo (`kcuu1=\EOA`).
+
+### 中文
+- **修复**：终端持焦时锁定方向键 / Tab / Escape，不再被 egui 焦点导航抢走（避免 ↑ 打开「历史记录」）；按模拟器 DECCKM 状态编码应用光标键，vi 等全屏程序中方向键 / Home / End 可用。
+
 ## [1.1.15] — 2026-08-04
 
 ### Fixed
