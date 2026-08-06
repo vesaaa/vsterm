@@ -8,6 +8,18 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.1.17] — 2026-08-06
+
+### Fixed
+- Command History continues after interactive elevation (`sudo -i`, `su`, …). Parent-shell OSC 133 had latched off client Enter marks, while the nested login shell usually has no integration — history stopped. Elevation now re-enables client Enter, and OSC C coalesces with a just-stamped client block to avoid duplicates.
+
+### Docs
+- Cloud API contract base URL and response shapes aligned with the public `/sync` gateway (`me.limits`, presigned `required_headers`, download revision metadata).
+
+### 中文
+- **修复**：`sudo -i` / `su` 等交互提权后继续记录命令历史（嵌套 shell 常无 OSC 集成，提权后重新启用本机 Enter 打点）。
+- **文档**：同步 Cloud API 合同（`/sync` base、`limits`、预签名 `required_headers`、download meta）。
+
 ## [1.1.16] — 2026-08-05
 
 ### Fixed
