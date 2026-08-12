@@ -8,6 +8,20 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.2.2] — 2026-08-12
+
+### Added
+- Menu **Check for Updates…** under About: queries public GitHub Releases and reports up-to-date / newer version / failure in a fixed-size dialog.
+
+### Fixed
+- Pin production promo signing key `k1` so verified `/v1/promo/channels` drives entitlement list copy (no longer stuck on local legacy fallback without a pin).
+- CTA hover text comes from channel `hint` / details / description; omit tooltip when the server sends none.
+- Legacy entitlement fallback (unsigned channels) shows only purchase + redeem placeholders — GitHub Star is server-channel only.
+
+### 中文
+- **新增**：菜单「检查更新…」，对照公开 GitHub Releases；结果对话框固定尺寸。
+- **修复**：钉入生产验签公钥 `k1`，动态权益列表可用；按钮悬停文案跟接口；legacy 兜底仅保留购买/兑换码。
+
 ## [1.2.1] — 2026-08-12
 
 ### Fixed
