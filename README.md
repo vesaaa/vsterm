@@ -55,7 +55,7 @@ Legend: `✅` built in and surfaced as a first-class workflow, `◐` supported i
 | Capability | VsTerm | WindTerm | Termius | FinalShell | MobaXterm | SecureCRT | Xshell | Tabby |
 |------------|--------|----------|---------|------------|-----------|-----------|--------|-------|
 | Implementation language | Rust | C/C++ | Electron | Java | C++ | C++ | C++ | Electron |
-| Max terminal scrollback lines | 100,000 | unlimited | - | - | 360,000 | 128,000 | ~2.1B | 25,000 |
+| Max terminal scrollback lines | 100k / 500k (Pro) | unlimited | - | - | 360,000 | 128,000 | ~2.1B | 25,000 |
 | Command-block folding / outline in terminal output | ✅ | ✅ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | Integrated SFTP pane / remote file manager | ✅ | ✅ | ✅ | ✅ | ✅ | ◐ | ◐ | ◐ |
 | SFTP transfer progress / queue visibility | ✅ | ◐ | ◐ | ✅ | ◐ | ◐ | ◐ | ◐ |
@@ -75,11 +75,38 @@ Notes:
 
 - The table is intentionally strict: it favors **built-in, documented, end-user-visible workflows** over “possible via shell commands” or “can be scripted externally”.
 - Some commercial tools split file-transfer UX into a companion app or a separate tab, which is why several cells are `◐` instead of `✅`.
-- Scrollback figures use publicly documented defaults / maxima where available (`-` = not clearly documented). VsTerm grows dynamically up to **100,000** lines.
+- Scrollback figures use publicly documented defaults / maxima where available (`-` = not clearly documented). VsTerm grows dynamically: **100,000** lines on Standard, **500,000** on Pro.
+
+### Standard vs Pro
+
+VsTerm runs fully offline for SSH work. **Personal Cloud** (account login, entitlement, and encrypted sync) is optional. **Pro** unlocks after a binding-checked cloud entitlement (e.g. GitHub Star promo or redeem).
+
+| Capability | Standard | Pro |
+|------------|----------|-----|
+| Local SSH sessions, SFTP, ZMODEM, ops panels | ✅ | ✅ |
+| Encrypted local credential vault | ✅ | ✅ |
+| Max terminal scrollback | 100,000 lines | 500,000 lines |
+| Desk pet — dog (free-floating) | ✅ | ✅ |
+| Desk pet — monkey (free-floating) | ✗ | ✅ |
+| Personal Cloud account / devices | ✅ | ✅ |
+| Cloud sync (sessions, commands, layouts, preferences, credentials) | ✗ | ✅ |
+| Future enhancements | Not supported | Continuously supported |
+
+#### Cloud sync &amp; data security
+
+Uploads are **client-side encrypted**. The server stores ciphertext only and cannot read your sessions, commands, layouts, preferences, or vault contents.
+
+| Layer | Algorithm / model |
+|-------|-------------------|
+| Device identity (local key pair) | **Ed25519** — private key stays in the OS keyring; never uploaded |
+| Sync object encryption | **AES-256-GCM**, key derived from your **master password** (Argon2id → VSC2 blob) |
+| Credential vault inside sync | Already encrypted locally; sync wraps the sealed `vault.enc`, not plaintext passwords |
+
+Without your master password (and the derived sync key), cloud blobs are not decryptable — including by VsTerm operators.
 
 ### Desk pets &amp; connect effects — ops with a pulse
 
-- **Desk pets**: monkey (right edge) / dog (bottom edge), draggable; reacts to typing, Enter, and host connect
+- **Desk pets**: dog (Standard) / monkey (Pro); free-drag anywhere in the window; reacts to typing, Enter, and host connect
 - **Connect effects**: trail inhale / shatter rebuild; tab accent sweep after connect
 - Falls back to a lower frame cadence when no hardware GPU is available (e.g. some RDP / WARP setups)
 

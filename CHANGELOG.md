@@ -8,6 +8,33 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.2.1] — 2026-08-12
+
+### Fixed
+- macOS release builds: pin `ip2region` to a resolvable git revision (upstream force-pushed `master` and dropped the old lock SHA) and fetch git deps via CLI to avoid libgit2 SSL failures on runners.
+
+### Docs
+- README Standard vs Pro feature table, including Personal Cloud sync crypto notes (Ed25519 device key pair; AES-256-GCM + master password for sync blobs).
+
+### 中文
+- **修复**：macOS 发版构建钉死可用的 `ip2region` git 提交，并用 CLI 拉取依赖，避免上游 force-push / SSL 导致 Apple 构建失败。
+- **文档**：README 补充标准版 / Pro 对比与云同步加密说明。
+
+## [1.2.0] — 2026-08-12
+
+### Added
+- Personal Cloud: signed account session, entitlement channels, redeem, device list, and encrypted vault sync (push/pull with live per-kind progress).
+- Local Pro gates: scrollback free 100k / Pro 500k; monkey desk pet requires Pro (dog remains free).
+- Desk pets float freely over the whole window (`desk_pet_x`/`desk_pet_y`, `desk_pet_dog_x`/`desk_pet_dog_y`); edge-era configs migrate to near-edge defaults.
+
+### Changed
+- GitHub Star OAuth prefers an account picker (`prompt=select_account`) and clears sticky `login=` hints.
+- Account prefs: Pro identity strip, dynamic promo actions, email-code rate-limit cooldown with countdown.
+
+### 中文
+- **新增**：Personal Cloud（签名会话、权益渠道、兑换、设备列表、加密 vault 同步与分项进度）；本机 Pro 门控（滚动缓冲 / 猴子宠物）；桌宠整窗自由拖放。
+- **改进**：GitHub Star OAuth 账号选择；账号页 Pro 身份条与验证码冷却倒计时。
+
 ## [1.1.17] — 2026-08-06
 
 ### Fixed
