@@ -8,6 +8,26 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.2.4] — 2026-08-27
+
+### Added
+- Import host lists under **File → Import from Others**: **WindTerm** (`.wind` / `user.sessions`), **Xshell** (`Sessions` / `.xsh`), **FinalShell** (data dir or `conn/`), **MobaXterm** (`MobaXterm.ini` / `.mxtsessions`), **Tabby** (`config.yaml`), **OpenSSH** (`~/.ssh/config`), and **SecureCRT** (`Sessions` / `.ini`). Folder names become groups (two levels). SSH/SFTP only; encrypted passwords are not imported. A private-key *file path* keeps public-key auth.
+
+### 中文
+- **新增**：菜单「文件 → 从其他导入」，子项 WindTerm / Xshell / FinalShell / MobaXterm / Tabby / OpenSSH / SecureCRT。只导入 SSH；分组最多两层；密码因对方加密无法导入。私钥文件路径会保留公钥登录。
+
+## [1.2.3] — 2026-08-20
+
+### Changed
+- Commands tab menus, new-folder / add-command dialogs, and command-body editing stay responsive: stable chip hit targets, no per-frame command-body clones, and fixed-size editors that do not re-center while typing.
+
+### Added
+- Right-click empty space in the command list (below folder chips) to add a command to the current folder.
+
+### 中文
+- **改进**：命令页右键、新建文件夹、添加/编辑命令更跟手（固定对话框、避免每帧克隆命令正文）。
+- **新增**：命令区空白处右键可添加命令。
+
 ## [1.2.2] — 2026-08-12
 
 ### Added

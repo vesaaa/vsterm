@@ -114,6 +114,8 @@ Without your master password (and the derived sync key), cloud blobs are not dec
 
 Download a build from [Releases](https://github.com/vesaaa/vsterm/releases), unpack, and run. The first launch creates `~/.vsterm/` (including a demo session tree).
 
+To bring over a host list: **File → Import from Others**, then **WindTerm** (`.wind` / `profiles/`), **Xshell** (`Sessions` / `.xsh`), **FinalShell** (data dir or `conn/`), **MobaXterm** (`MobaXterm.ini` / `.mxtsessions`), **Tabby** (`config.yaml`), **OpenSSH** (`~/.ssh/config`), or **SecureCRT** (`Sessions` / `.ini`). SSH hosts and groups come across (two folder levels). Encrypted passwords are not copied — you enter them on first connect. A private-key *file path* keeps public-key auth; named keys stored inside Xshell / FinalShell are not resolved.
+
 Packages are not Microsoft / Apple notarized yet — the OS may warn once; use the steps below.
 
 ### Windows (SmartScreen)

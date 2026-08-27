@@ -114,6 +114,8 @@ VsTerm 本地 SSH 功能可完全离线使用。**Personal Cloud**（账号登�
 
 从 [Releases](https://github.com/vesaaa/vsterm/releases) 下载对应平台包并解压后运行。首次启动会在用户目录下创建 `~/.vsterm/`（含演示会话树）。
 
+若要从其他终端迁主机列表：菜单 **文件 → 从其他导入**，再选 **WindTerm**（`.wind` / `profiles/`）、**Xshell**（带 `.xsh` 的 `Sessions`）、**FinalShell**（数据目录或 `conn/`）、**MobaXterm**（`MobaXterm.ini` / `.mxtsessions`）、**Tabby**（`config.yaml`）、**OpenSSH**（`~/.ssh/config`）或 **SecureCRT**（带 `.ini` 的 `Sessions`）。只导入 SSH 主机与分组（最多两层文件夹）。密码因对方加密无法导入，首次连接时再输入。私钥**文件路径**会保留公钥登录；Xshell / FinalShell 密钥管理器里的名称无法解析。
+
 当前发布包尚未经过微软 / Apple 商业签名公证，系统可能拦截——按下面步骤放行即可（仅需一次）。
 
 ### Windows（SmartScreen 拦截）
