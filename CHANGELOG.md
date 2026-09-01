@@ -8,6 +8,21 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.2.5] — 2026-09-01
+
+### Added
+- **Credential vault** under **Options → Credential Vault…**: manage reusable SSH passwords and private keys; secrets stay encrypted in `vault.enc`, metadata in `credentials/catalog.yaml`.
+- **Session editor**: double-click **Username** to open a credential picker panel beside the dialog; double-click a credential to fill auth fields. Saving a server profile upserts matching credentials when vault save is enabled.
+- **Credential picker** chip list: username + masked password or truncated key path; colored lock/key icons.
+
+### Changed
+- Add/edit server auth form: password and private-key fields align on one row with labels; dialog size stays fixed when switching auth mode.
+
+### 中文
+- **新增**：**选项 → 凭证库…**，管理可复用 SSH 密码/私钥；密文存 `vault.enc`，元数据在 `credentials/catalog.yaml`。
+- **新增**：添加/编辑服务器时双击**用户名**打开右侧凭证选择面板，双击凭证自动填充；勾选保存时同步写入凭证库。
+- **改进**：认证表单标签与输入框同行对齐，切换密码/私钥时对话框尺寸不变。
+
 ## [1.2.4] — 2026-08-27
 
 ### Added
