@@ -8,20 +8,43 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.2.6] — 2026-09-01
+
+### Added
+- **In-app update checks** now prefer the official CDN manifest at `download.vsterm.com` (Cloudflare R2), with GitHub Releases as fallback; **Download update** opens a platform-matched direct link (zip / dmg / tar.gz).
+- **Release CI** syncs stable builds to R2 (`vsterm/latest.json` + per-version binaries); pre-release tags (`v*-beta*`) publish GitHub pre-releases only — no CDN or public `main` sync.
+
+### Changed
+- Update-check dialog: **Download update** replaces the old “open download page” primary action; release page remains as a secondary link.
+
+### 中文
+- **新增**：检查更新优先走官方 CDN（`download.vsterm.com`），失败回退 GitHub；**下载更新**按本机平台打开直链。
+- **新增**：正式版发版 CI 同步产物到 R2；`-beta` 标签仅发 GitHub 预发布，不更新 CDN。
+- **改进**：更新对话框主按钮改为「下载更新」。
+
 ## [1.2.5] — 2026-09-01
 
 ### Added
+- **Seven built-in UI themes** under **Options → Theme**: Light, Light-Black, Tokyo Night, Catppuccin Mocha, Nord, Kanagawa Wave, and Everforest Dark. Monitor process/storage rows and gauge labels follow the active theme.
+- **Collapsible left rail**: collapse the servers / system-monitor column to a narrow strip via an outline chevron; state persists in `config.yaml` (`left_rail_collapsed`).
 - **Credential vault** under **Options → Credential Vault…**: manage reusable SSH passwords and private keys; secrets stay encrypted in `vault.enc`, metadata in `credentials/catalog.yaml`.
 - **Session editor**: double-click **Username** to open a credential picker panel beside the dialog; double-click a credential to fill auth fields. Saving a server profile upserts matching credentials when vault save is enabled.
-- **Credential picker** chip list: username + masked password or truncated key path; colored lock/key icons.
 
 ### Changed
 - Add/edit server auth form: password and private-key fields align on one row with labels; dialog size stays fixed when switching auth mode.
+- Main window opens centered on the work area (accounts for title-bar chrome).
+
+### Fixed
+- **Windows**: SSH password login no longer freezes the whole UI after submit.
+- **Windows**: local-shell ConPTY sizing — avoid the 2×2 column default and post-output shrink that caused wrap/flash (including 4K high-DPI cell sizing).
 
 ### 中文
+- **新增**：**选项 → 主题** 内置 7 套主题（Light、Light-Black、Tokyo Night、Catppuccin Mocha、Nord、Kanagawa Wave、Everforest Dark）；监控页进程/磁盘行与仪表标签随主题配色。
+- **新增**：左侧**服务器/系统监控列可折叠**（线型三角按钮），状态写入 `config.yaml` 的 `left_rail_collapsed`。
 - **新增**：**选项 → 凭证库…**，管理可复用 SSH 密码/私钥；密文存 `vault.enc`，元数据在 `credentials/catalog.yaml`。
 - **新增**：添加/编辑服务器时双击**用户名**打开右侧凭证选择面板，双击凭证自动填充；勾选保存时同步写入凭证库。
-- **改进**：认证表单标签与输入框同行对齐，切换密码/私钥时对话框尺寸不变。
+- **改进**：认证表单标签与输入框同行对齐，切换密码/私钥时对话框尺寸不变；主窗口在工作区内居中启动。
+- **修复**：Windows 下 SSH 密码登录提交后不再卡死整个界面；本地 Shell ConPTY 尺寸/高 DPI 下避免异常换行与闪烁。
 
 ## [1.2.4] — 2026-08-27
 
