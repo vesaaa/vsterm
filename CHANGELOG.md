@@ -8,6 +8,27 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.2.7] — 2026-09-02
+
+### Added
+- **Terminal config** on the host toolbar: toggle gutter **time stamps** and **line numbers** (default on); choices persist in `config.yaml` and cloud preferences sync.
+- **Server-tree search** via a filter icon on the left rail.
+- **Status bar** shows measured renderer FPS (GPU and software rendering paths).
+
+### Changed
+- **SSH connect**: tighter timeouts and clearer failure feedback in the auth dialog.
+- **Host import** (WindTerm, Xshell, etc.) runs on a background thread so the UI stays responsive.
+
+### Fixed
+- Left sidebar layout: black bar bleed and related tree UX polish.
+
+### 中文
+- **新增**：主机工具栏 **终端配置**，可开关 gutter **时间**与**行号**（默认开启），写入 `config.yaml` 并参与云端偏好同步。
+- **新增**：左侧会话树 **搜索**（工具栏图标）。
+- **新增**：状态栏显示实测渲染 **FPS**（GPU / 软件渲染）。
+- **改进**：SSH 连接超时与认证失败提示；主机列表导入改为后台线程。
+- **修复**：左侧栏黑边与树交互细节。
+
 ## [1.2.6] — 2026-09-01
 
 ### Added
