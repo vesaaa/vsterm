@@ -8,6 +8,18 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.2.8] — 2026-09-03
+
+### Fixed
+- **macOS release packaging** now ad-hoc signs the assembled `.app`, verifies the signature in CI, and stages the bundle with `ditto` so Apple Silicon no longer hits the fatal “damaged” path for unsigned builds.
+- **Remote Bash shell integration** now trims stray leading/trailing semicolons and whitespace before installing the `PROMPT_COMMAND` hook, avoiding the repeated `syntax error near unexpected token ';'` prompt spam seen on hosts with profiles like `history -a;`.
+- **Shell hook installation hardening**: Bash array `PROMPT_COMMAND` is deduped element-wise and prepended so `$?` stays accurate; Zsh fallback hook arrays now dedupe too.
+
+### 中文
+- **修复**：macOS 发版打包现在会对组装后的 `.app` 做 ad-hoc 签名，在 CI 中校验签名，并用 `ditto` 进入 DMG 暂存目录，避免 Apple Silicon 把未公证构建直接判成“已损坏”。
+- **修复**：远端 Bash 的 shell 集成在安装 `PROMPT_COMMAND` hook 前会清理首尾多余分号和空白，避免 `history -a;` 这类配置导致每次提示符前重复报 `syntax error near unexpected token ';'`。
+- **修复**：Shell hook 安装加固：Bash 数组形式的 `PROMPT_COMMAND` 按元素去重并前置，确保 `$?` 保持正确；Zsh fallback 的 hook 数组也会去重。
+
 ## [1.2.7] — 2026-09-02
 
 ### Added
