@@ -8,6 +8,28 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.2.9] — 2026-09-05
+
+### Changed
+- **Account sign-in**: the unsigned-in Account tab now explains that Pro subscription, cloud sync, and device management require sign-in, and that the email only receives a login verification code (no password). SSH connections do not need a cloud account.
+
+### Fixed
+- **macOS language menu**: Korean (`한국어`) no longer renders as tofu. PingFang SC has no Hangul coverage; the UI font stack now falls back to Apple SD Gothic Neo (and Hiragino for Japanese), matching the existing Windows Malgun / Yu Gothic fallbacks. Linux loads Noto Sans CJK KR when present.
+- **OS keyring prompts**: cloud session fields (token, expiry, account id/email, device id, fingerprint, auth-block) are stored in a single `cloud-session` item instead of ~7 separate entries. Existing split items are migrated on first read. Vault “remember unlock” and the device Ed25519 key stay separate; in-process caches skip repeat `get_password` calls (macOS / Windows / Linux). Signing in writes the session blob once.
+- **macOS Network Connections**: GUI-launched apps often have no `/usr/sbin` on `PATH`, so `netstat` was never found. BSD `netstat -an` also uses `tcp4`/`udp6` and `host.port` instead of Linux `tcp` / `host:port`, so every chart stayed at 0. The collector now locates `netstat` the same way path-trace finds `traceroute`, and the parser accepts the BSD rows.
+- **macOS Path Trace**: Auto/IPv4 against a literal such as the default `8.8.4.4` passed GNU-only `-4` to Apple traceroute (`invalid option -- 4`), so the panel showed “未能解析到路径跳点”. The probe now drops address-family flags the local tool rejects, merges traceroute stderr, and still parses classic BSD `host (ip)` / `host [ip]` hop lines.
+- **Path Trace mtr**: report mode no longer passes `-z`. That ASN column replaces the `|---` host marker, so every hop rendered as `*` and extra IPv4 continuation lines became fake hop numbers. The parser also accepts `AS???` / `ASnnnn` rows if `-z` is present.
+- **Private-key picker** no longer filters to `.key` / `.pem` / `.ppk`. OpenSSH keys without a suffix (`id_rsa`, `id_ed25519`, self-built names) are selectable. A **Paste** button next to Browse fills a file path from the clipboard.
+
+### 中文
+- **改进**：未登录账号页补充说明：登录后才可订阅 Pro、使用云端同步并管理设备；邮箱仅用于接收登录验证码，无需设置密码。SSH 连主机不依赖云账号。
+- **修复**：macOS 多语言菜单中韩文不再乱码；在 PingFang SC 后追加 Apple SD Gothic Neo（日文追加 Hiragino）。
+- **修复**：云会话相关钥匙串合并为一条 `cloud-session`，启动时不再连续弹出约 7 次授权。Vault 记住解锁与设备密钥仍分条保存；进程内缓存避免重复读取。登录只写一次会话条目。Windows 凭据管理器 / Linux Secret Service 同样减少读写。
+- **修复**：macOS「网络连接」TCP/UDP 图表一直为 0。从 Finder 启动时 `PATH` 常不含 `/usr/sbin`（`netstat` 在那里）；即便采到输出，解析器也不认 BSD 的 `tcp4` / `192.168.1.1.443`。现已按绝对路径找 `netstat` 并解析该格式。
+- **修复**：macOS「路由追踪」对 IPv4 字面量（默认 `8.8.4.4`）会把 GNU 的 `-4` 传给 BSD `traceroute`，报 `invalid option -- 4`，界面只显示「未能解析到路径跳点」。现会探测工具是否接受该参数，并合并 stderr、解析 BSD 跳点行。
+- **修复**：路径追踪的 mtr 报告不再带 `-z`（ASN 列会吃掉 `|---`，跳点地址全变成 `*`）。解析器同时兼容 `AS???` 行。
+- **修复**：私钥「浏览」不再只显示 `.key` / `.pem` / `.ppk`；无后缀密钥（`id_rsa`、自建文件名）可选。路径旁新增「粘贴」，用于粘贴文件路径。
+
 ## [1.2.8] — 2026-09-03
 
 ### Fixed
