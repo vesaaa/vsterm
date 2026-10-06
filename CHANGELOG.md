@@ -10,6 +10,24 @@ section for that version into the GitHub Release notes.
 
 ## [Unreleased]
 
+## [1.3.6] — 2026-10-06
+
+### Added
+- **Golden Buddha desk pet** (Pro): a seated golden statue, twice the size of the loong (Options → Effects → Desk Pet). It stays still. Idle and typing keep a soft light around the head; Enter (and connecting) widens that light over the whole figure, then lets it settle. The light is transparent and fades out at the edge, so the window shows through. No projectile. Position saved as `desk_pet_buddha_x` / `desk_pet_buddha_y`.
+- **Taishang Laojun desk pet** (Pro): a seated sage (Options → Effects → Desk Pet). Idle and typing light the eight trigrams one by one on the wheel behind him. Enter and connecting light all eight. Purple qi drifts around the figure; the yin-yang turns slowly. The figure itself stays still. Position saved as `desk_pet_laojun_x` / `desk_pet_laojun_y`.
+- **14-day Pro trial**: every install can use the local Pro features — the larger scrollback cap and the Monkey, Golden Buddha, and Laojun pets — for 14 days from first launch. Afterwards they need VsTerm Pro; a Pro pet that is in use switches back to the dog. The desk pet menu and Preferences → Account show the days left. Cloud sync still requires a Pro entitlement.
+
+### Fixed
+- **Laojun CPU use**: the pet kept the whole window repainting at 30 FPS. It now repaints at 10 FPS, and 5 FPS while the window is in the background. With software rendering, idle CPU drops from about 58% of a core to 37% (18% in the background).
+- **Locked Pro pets**: hovering a locked pet in the menu now shows why it is locked. The hint never appeared before.
+
+### 中文
+- **新增**：桌宠「金佛」（Pro）——金色坐像，大小是青金龙的两倍（选项 → 特效 → 桌面宠物）。人像始终不动。闲置和打字只有头部一层渐渐淡出的金光；回车和连上主机时金光扩大到全身，边缘淡出，再慢慢收回。金光是透明的，后面的窗口能透出来。不发射光球。位置记在 `desk_pet_buddha_x` / `desk_pet_buddha_y`。
+- **新增**：桌宠「太上老君」（Pro，选项 → 特效 → 桌面宠物）。闲置和打字时，背后八卦逐个点亮；回车和连上主机时八个全亮。周身紫气缓慢飘动，太极缓慢旋转，人物保持静坐。位置记在 `desk_pet_laojun_x` / `desk_pet_laojun_y`。
+- **新增**：14 天 Pro 免费试用。从首次启动起 14 天内，可以免费使用本地 Pro 功能：更大的回滚行数上限，以及猴子、金佛、太上老君桌宠。到期后需要开通 VsTerm Pro；正在使用的 Pro 桌宠会切回小狗。桌宠菜单和「偏好设置 → 账号」会显示剩余天数。云同步仍需要 Pro 权益。
+- **修复**：太上老君会让整个窗口按 30 FPS 持续重绘，现在改为 10 FPS，窗口在后台时 5 FPS。软件渲染下空闲 CPU 从约 58% 单核降到 37%（后台 18%）。
+- **修复**：鼠标悬停在锁定的 Pro 桌宠上时会显示原因，以前这个提示从不出现。
+
 ## [1.3.5] — 2026-09-29
 
 ### Added

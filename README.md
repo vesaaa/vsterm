@@ -113,7 +113,7 @@ Without your master password (and the derived sync key), cloud blobs are not dec
 
 ### Desk pets &amp; connect effects — ops with a pulse
 
-- **Desk pets**: dog (Standard) / monkey (Pro); free-drag anywhere in the window; reacts to typing, Enter, and host connect
+- **Desk pets**: dog, qi fighter, excavator, jade loong, golden buddha, and Taishang Laojun (Standard) / monkey (Pro); free-drag anywhere in the window; reacts to typing, Enter, and host connect
 - **Connect effects**: trail inhale / shatter rebuild; tab accent sweep after connect
 - Falls back to a lower frame cadence when no hardware GPU is available (e.g. some RDP / WARP setups)
 
