@@ -26,9 +26,12 @@
 
 ## 特色功能
 
-### 1.1.13 版本现在最突出的点
+### v1.3 里最突出的点
 
 - **终端、文件、传输在一个工作流里**：Shell 标签、底部 SFTP 文件区、sudo 提权文件传输、ZMODEM 收发都围绕同一条 SSH 会话组织，不需要来回切工具。
+- **命令行右键，直接插入**：在终端里右键，选 **快速插入**。可以插入 GUID（带或不带连字符）、Unix 秒或毫秒、ISO 8601 时间、当天日期（`YYYY-MM-DD`），或 8 位随机串（数字、字母、混合、十六进制）。内容直接出现在命令行上。
+- **SFTP 里右键就能建常用文件**：在文件列表的空白处右键，选 **新建文件**。`.sh` 会带上 `#!/bin/sh` 或 `#!/bin/bash`；`.json`、`.config`、`.yaml`、`.txt` 是空文件。文件立刻写到主机上，名字处于选中状态，可以就地改。
+- **桌面宠物**：猴子、金佛、太上老君是 Pro（14 天试用）。小狗、气功武者、青金龙、挖掘机免费。见下面的图。
 - **运维面板不是附属品，而是主功能**：路由信息、网络连接、路径追踪、IP 质量、系统信息、实时指标都内置在主界面。
 - **传输过程看得见**：**SFTP** 和 **ZMODEM（`rz` / `sz`）** 都有明确的进度 / 队列反馈，而不是只弹一个阻塞对话框或静默后台执行。
 - **线路与网络定位能力明显强于普通终端**：不仅能连，还能看策略路由图、逐跳地理归属 / ASN、IP 欺诈分 / 大厂身份 / 黑名单结果。
@@ -84,15 +87,15 @@
 
 ### 标准版 vs Pro
 
-VsTerm 本地 SSH 功能可完全离线使用。**Personal Cloud**（账号登录、权益与加密同步）为可选项。**Pro** 需通过绑定校验的云端权益解锁（例如 GitHub Star 活动或兑换码）。
+VsTerm 本地 SSH 功能可完全离线使用。**Personal Cloud**（账号登录、权益与加密同步）为可选项。**Pro** 需通过绑定校验的云端权益解锁（例如 GitHub Star 活动或兑换码）。每台安装另有 **14 天试用**，覆盖本地 Pro 功能：50 万行回滚，以及猴子、金佛、太上老君。云同步不在试用里。
 
 | 能力 | 标准版 | Pro |
 |------|--------|-----|
 | 本地 SSH 会话、SFTP、ZMODEM、运维面板 | ✅ | ✅ |
 | 本机加密凭据 vault | ✅ | ✅ |
 | 终端历史最大行数 | 100,000 行 | 500,000 行 |
-| 桌面宠物 — 小狗（整窗自由拖放） | ✅ | ✅ |
-| 桌面宠物 — 猴子（整窗自由拖放） | ✗ | ✅ |
+| 桌面宠物 — 小狗、气功武者、挖掘机、青金龙 | ✅ | ✅ |
+| 桌面宠物 — 猴子、金佛、太上老君 | 14 天试用 | ✅ |
 | Personal Cloud 账号 / 设备管理 | ✅ | ✅ |
 | 云端同步（会话、命令、布局、偏好、凭据） | ✗ | ✅ |
 | 后续增强功能 | 不支持 | 持续支持 |
@@ -113,7 +116,28 @@ VsTerm 本地 SSH 功能可完全离线使用。**Personal Cloud**（账号登�
 
 ### 宠物与连接特效——运维不再枯燥
 
-- **桌面宠物**：小狗、气功武者、挖掘机、青金龙、金佛、太上老君（标准版）/ 猴子（Pro）；可在整窗任意拖放；对打字、回车、连上主机有姿态反应
+- **桌面宠物**（选项 → 特效 → 桌面宠物），可以在窗口里拖动。
+
+<table>
+<tr>
+<td colspan="3"><strong>Pro</strong> · 14 天试用</td>
+</tr>
+<tr>
+<td align="center"><img src="assets/screenshots/desk_pet_monkey.webp" width="200" alt="猴子"><br>猴子</td>
+<td align="center"><img src="assets/screenshots/desk_pet_buddha.webp" width="200" alt="金佛"><br>金佛</td>
+<td align="center"><img src="assets/screenshots/desk_pet_laojun.webp" width="200" alt="太上老君"><br>太上老君</td>
+</tr>
+<tr>
+<td colspan="3"><strong>免费</strong></td>
+</tr>
+<tr>
+<td align="center"><img src="assets/screenshots/desk_pet_dog.webp" width="200" alt="小狗"><br>小狗</td>
+<td align="center"><img src="assets/screenshots/desk_pet_fighter.webp" width="200" alt="气功武者"><br>气功武者</td>
+<td align="center"><img src="assets/screenshots/desk_pet_dragon.webp" width="200" alt="青金龙"><br>青金龙</td>
+</tr>
+</table>
+
+挖掘机也是免费的。
 - **连接特效**：拖影吸入 / 破碎重组；连上后标签 accent 扫光
 - 无硬件 GPU（如部分 RDP / WARP）时自动降级帧率，保证稳定可用
 

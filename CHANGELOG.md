@@ -10,6 +10,14 @@ section for that version into the GitHub Release notes.
 
 ## [Unreleased]
 
+## [1.3.7] — 2026-10-07
+
+### Fixed
+- **macOS Keychain prompts after an update**: the first launch of a new version asked for the Keychain password several times, once per stored item, even after "Always Allow". The app is now signed with a fixed certificate, so "Always Allow" carries over to later updates. Launch also no longer reads three of those items: the command-history key comes from its local key file, the Pro trial uses a new item, and the cloud device key and sync key load only when needed. Updating to this version can still ask once if "Remember unlock" is on, plus twice more if you are signed in to a cloud account. Later updates should not ask again.
+
+### 中文
+- **修复**：macOS 升级后第一次打开时会连续弹出好几次钥匙串密码框（每个存储的条目弹一次），点了「始终允许」下次升级还会再弹。现在程序改用固定证书签名，「始终允许」在以后的升级中会一直有效。启动时也不再读取其中三个条目：命令历史的密钥改从本地密钥文件读取，Pro 试用改用新条目，云设备密钥和同步密钥改为用到时才读取。升级到本版本时，如果开启了「记住解锁」仍可能弹 1 次，已登录云账号的再多 2 次；之后的升级不会再弹。
+
 ## [1.3.6] — 2026-10-06
 
 ### Added

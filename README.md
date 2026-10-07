@@ -26,9 +26,12 @@
 
 ## Highlights
 
-### What stands out in v1.1.13
+### What stands out in v1.3
 
 - **Terminal + files stay in one flow**: shell tabs, bottom SFTP pane, sudo/elevated SFTP, and ZMODEM transfers are integrated into the same SSH workflow.
+- **Quick Insert, from the terminal itself**: right-click the session and choose **Quick Insert**. It types a GUID (with or without hyphens), Unix seconds or milliseconds, an ISO 8601 timestamp, today's date (`YYYY-MM-DD`), or an 8-character random string (digits, letters, mixed, or hex) onto the command line.
+- **New files from the SFTP pane**: right-click the empty area of the file list and choose **New file**. `.sh` starts with `#!/bin/sh` or `#!/bin/bash`; `.json`, `.config`, `.yaml`, and `.txt` start empty. The file is written to the host immediately, and the name is selected so you can rename it in place.
+- **Desk pets**: Monkey, Golden Buddha, and Taishang Laojun are Pro (14-day trial). Dog, qi fighter, jade loong, and the excavator are free. Pictures below.
 - **Ops panels are first-class, not side utilities**: routes, connections, path trace, IP quality, system info, and live host metrics are built into the app.
 - **Progress is visible**: both **SFTP** and **ZMODEM (`rz` / `sz`)** transfers expose progress / queue state instead of disappearing into a blocking dialog or a blind background task.
 - **Topology and line-quality tooling is richer than a plain terminal**: routing diagrams, per-hop geo/ASN enrichment, fraud / datacenter / blacklist checks, and connection charts are available without leaving the session.
@@ -84,15 +87,15 @@ Notes:
 
 ### Standard vs Pro
 
-VsTerm runs fully offline for SSH work. **Personal Cloud** (account login, entitlement, and encrypted sync) is optional. **Pro** unlocks after a binding-checked cloud entitlement (e.g. GitHub Star promo or redeem).
+VsTerm runs fully offline for SSH work. **Personal Cloud** (account login, entitlement, and encrypted sync) is optional. **Pro** unlocks after a binding-checked cloud entitlement (e.g. GitHub Star promo or redeem). Every install also gets a **14-day trial** of the local Pro features: the 500,000-line scrollback, and the Monkey, Golden Buddha, and Taishang Laojun pets. Cloud sync is not part of the trial.
 
 | Capability | Standard | Pro |
 |------------|----------|-----|
 | Local SSH sessions, SFTP, ZMODEM, ops panels | ✅ | ✅ |
 | Encrypted local credential vault | ✅ | ✅ |
 | Max terminal scrollback | 100,000 lines | 500,000 lines |
-| Desk pet — dog (free-floating) | ✅ | ✅ |
-| Desk pet — monkey (free-floating) | ✗ | ✅ |
+| Desk pet — dog, qi fighter, excavator, jade loong | ✅ | ✅ |
+| Desk pet — monkey, Golden Buddha, Taishang Laojun | 14-day trial | ✅ |
 | Personal Cloud account / devices | ✅ | ✅ |
 | Cloud sync (sessions, commands, layouts, preferences, credentials) | ✗ | ✅ |
 | Future enhancements | Not supported | Continuously supported |
@@ -113,7 +116,28 @@ Without your master password (and the derived sync key), cloud blobs are not dec
 
 ### Desk pets &amp; connect effects — ops with a pulse
 
-- **Desk pets**: dog, qi fighter, excavator, jade loong, golden buddha, and Taishang Laojun (Standard) / monkey (Pro); free-drag anywhere in the window; reacts to typing, Enter, and host connect
+- **Desk pets** (Options → Effects → Desk Pet). Drag anywhere in the window.
+
+<table>
+<tr>
+<td colspan="3"><strong>Pro</strong> · 14-day trial</td>
+</tr>
+<tr>
+<td align="center"><img src="assets/screenshots/desk_pet_monkey.webp" width="200" alt="Monkey"><br>Monkey</td>
+<td align="center"><img src="assets/screenshots/desk_pet_buddha.webp" width="200" alt="Golden Buddha"><br>Golden Buddha</td>
+<td align="center"><img src="assets/screenshots/desk_pet_laojun.webp" width="200" alt="Taishang Laojun"><br>Taishang Laojun</td>
+</tr>
+<tr>
+<td colspan="3"><strong>Free</strong></td>
+</tr>
+<tr>
+<td align="center"><img src="assets/screenshots/desk_pet_dog.webp" width="200" alt="Dog"><br>Dog</td>
+<td align="center"><img src="assets/screenshots/desk_pet_fighter.webp" width="200" alt="Qi fighter"><br>Qi fighter</td>
+<td align="center"><img src="assets/screenshots/desk_pet_dragon.webp" width="200" alt="Jade loong"><br>Jade loong</td>
+</tr>
+</table>
+
+The excavator is free too.
 - **Connect effects**: trail inhale / shatter rebuild; tab accent sweep after connect
 - Falls back to a lower frame cadence when no hardware GPU is available (e.g. some RDP / WARP setups)
 
