@@ -10,6 +10,16 @@ section for that version into the GitHub Release notes.
 
 ## [Unreleased]
 
+## [1.3.8] — 2026-10-07
+
+### Changed
+- **Command suggestions**: opening the popup no longer selects a row, so Enter submits the command you typed. Up and Down still choose a suggestion, and clicking a row still fills it. Hovering a history row shows a trash icon at its end; clicking it removes that command from the local history.
+- **Command history**: short commands that are not worth recalling are no longer stored. That includes `ls`, `cd`, `mkdir`, `rm`, `pwd`, `clear`, and the same commands with arguments or a `sudo` prefix, plus a bare word such as `git` or `top`. A pipeline, `&&` / `;` chain, redirect, or `$()` is still saved, for example `cd /srv && make`. Commands already stored that match this rule are dropped the next time history loads.
+
+### 中文
+- **调整**：命令提示弹出时不再默认选中一行，直接按回车会提交你正在输入的命令。上下键仍然用来选择建议，点击某一行仍然填入。鼠标移到历史命令行尾会出现删除图标，点击后从本机历史里删掉这条命令。
+- **调整**：太短、不值得再提示的命令不再记录，包括 `ls`、`cd`、`mkdir`、`rm`、`pwd`、`clear`，以及它们带参数或前面加 `sudo` 的写法，还有单独一个词的 `git`、`top` 等。管道、`&&`、`;`、重定向和 `$()` 仍会保存，例如 `cd /srv && make`。已经存过、又符合这条规则的命令，会在下次加载历史时清掉。
+
 ## [1.3.7] — 2026-10-07
 
 ### Fixed
