@@ -8,7 +8,21 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
-## [Unreleased]
+## [1.3.9] — 2026-10-13
+
+### Added
+- **Cloud Bun desk pet** (Pro): a chibi girl with cloud-bun hair, 1.5× the loong (Options → Effects → Desk Pet). Idle, every 6–8 seconds, she tosses a small cloud from her hand and catches it. Typing holds a shy pose. Enter and connecting send five clouds once around her while she sways by at most 10° and keeps facing the camera. Between those beats the window sleeps. Software rendering stays on the existing ~15 FPS cap; hardware uses ~30 FPS only during the toss and the orbit, and ~5 FPS while the window is in the background. Position saved as `desk_pet_cloud_x` / `desk_pet_cloud_y`.
+
+### Fixed
+- **Cursor lag when holding arrow keys**: after a fast run of Left / Right, the cursor could keep moving after the key was released, or stop one cell behind the shell until the next output. Two causes. SSH connections left Nagle's algorithm on, so each keystroke packet waited for the previous one's ACK and keys piled up on slower links. The socket now sets `TCP_NODELAY`, like OpenSSH. The terminal view's frame cache could also pair an old screen with output that arrived mid-frame, so it kept drawing the old cursor position.
+
+### Changed
+- **Less CPU per frame**: the terminal reuses each character's laid-out glyph across frames instead of laying out every visible cell again. A full 200×50 screen now takes about 0.8 ms per frame instead of 2 ms. The command-suggestion popup ranks history once per typed query instead of every frame (up to 0.6 ms per frame with 10,000 commands). Each frame now copies only new command blocks into history, and the History button copies them only while its list is open. With the idle screen lock on, the vault file is re-read every 2 seconds instead of every frame. A session file that cannot be read or written is no longer retried every frame while its OS icon is saved.
+
+### 中文
+- **新增**：桌宠「云团」（Pro）——云团双丸子头的 Q 版女孩，大小是青金龙的 1.5 倍，不是金佛、太上老君那种两倍（选项 → 特效 → 桌面宠物）。闲置时每隔 6 到 8 秒，从手里抛起一朵小云再接住。打字换成害羞的捂脸，按住约半秒，连续按键不会把重绘钉在高帧率。回车和连上主机时，五朵云绕她转一整圈，身体最多歪 10 度，脸始终朝向屏幕。两段动作之间窗口睡觉。软件渲染沿用现有的大约 15 帧上限；硬件渲染只在抛云和绕圈时大约 30 帧，窗口在后台时大约 5 帧。位置记在 `desk_pet_cloud_x` / `desk_pet_cloud_y`。
+- **修复**：连续快速按左右方向键时，松开按键后光标还会继续移动，或者停在比实际位置落后一格的地方，直到下一次有输出才跟上。原因有两个：SSH 连接没有关闭 Nagle 算法，每个按键包都要等上一个包的确认才发出，网络稍慢时按键会堆积，现在像 OpenSSH 一样开启了 `TCP_NODELAY`；终端画面的缓存可能把旧画面和这一帧中途到达的输出记在一起，于是一直画着旧的光标位置。
+- **调整**：降低每帧的 CPU 占用。终端每个字符的字形排版结果会跨帧复用，不再每帧把屏幕上所有字符重新排版一遍，整屏 200×50 从每帧约 2 毫秒降到约 0.8 毫秒。命令提示弹窗只在输入内容变化时重新排序历史，不再每帧都排（1 万条历史时每帧最多约 0.6 毫秒）。每帧只把新增的命令块记入历史，工具栏的「历史」按钮也只在列表打开时才读取。开启空闲锁屏后，保险库文件改为每 2 秒读一次，不再每帧读取。保存主机系统图标时，会话文件读写失败也不会再每帧重试。
 
 ## [1.3.8] — 2026-10-07
 
