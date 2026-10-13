@@ -8,6 +8,26 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.4.0] — 2026-10-13
+
+### Added
+- **Two-way cloud sync** (Options → Preferences → Cloud Sync → Sync). A change made on one device is copied to the other. When both devices changed the same kind, they are merged instead of one overwriting the other: sessions, the server tree, quick commands and credential entries are merged item by item, and deletions carry over. If the same value was changed differently on both, this device's value is kept and the cloud version is saved in a local backup. The first sync on a device that has never synced only adds, it never deletes. Upload and Download still replace one side with the other.
+- **Compare with cloud**: shows, per kind, whether this device, the cloud, or both changed since the last sync, without transferring anything.
+- **Local backups and restore**: before a sync, upload, download or restore replaces local files, they are saved under `sync-backups/` in the data directory (last 30 kept). An upload over cloud data this device had not seen also saves that cloud version first. Cloud Sync lists the backups, and each can be restored, including the cloud version that was replaced. A restore backs up what it replaces, so it can be undone. Backups work offline and while signed out.
+
+### Changed
+- **Faster sync**: requests reuse one connection instead of a new TLS handshake each time (a sync made over a dozen). A kind that changed on neither side is skipped, so a sync with nothing new is a single request. The account and device list are no longer re-fetched on every sync.
+- **Saved logins and proxies now sync**: the credentials kind also carries `credentials/catalog.yaml` and `proxies/catalog.yaml`. They hold `vault://` references only, never secrets. Older versions ignore these files.
+- **Network timeouts**: cloud requests give up after 15 s to connect and 60 s without data, instead of waiting forever.
+
+### 中文
+- **新增**：云端双向同步（选项 → 偏好设置 → 云端同步 →「同步」）。只在一台设备上改过的内容会同步到另一台；两台都改过同一类内容时会合并，而不是互相覆盖。会话、服务器列表、快捷命令和凭据条目逐项合并，删除也会同步过去。同一个值两边改得不一样时保留本机的值，云端那份存进本机备份。从没同步过的设备第一次同步只会补充内容，不会删除任何东西。「上传到云端」「从云端下载」仍然是用一边整体覆盖另一边。
+- **新增**：「与云端比较」：不传输任何数据，按类型显示自上次同步以来是本机改了、云端改了，还是两边都改了。
+- **新增**：本机备份与恢复。同步、上传、下载或恢复替换本机文件之前，会把这些文件存到数据目录下的 `sync-backups/`，保留最近 30 次。上传覆盖了本机没见过的云端数据时，也会先把那份云端数据存下来。云端同步页列出所有备份，每个都可以恢复，包括当时被替换掉的云端版本。恢复前会先备份当前文件，所以恢复也能撤销。备份在离线或未登录时也能用。
+- **调整**：同步更快。所有请求复用同一个连接，不再每个请求都重新握手（一次同步原来要握手十几次）。两边都没变的类型直接跳过，没有新内容时一次同步只需要一个请求。也不再每次同步都重新拉取账号和设备列表。
+- **调整**：已保存的登录凭据和代理现在也会同步：凭据类型同时带上 `credentials/catalog.yaml` 和 `proxies/catalog.yaml`。这两个文件只有 `vault://` 引用，不含密码。旧版本会忽略它们。
+- **调整**：云端请求加了超时：连接超过 15 秒、或 60 秒没有数据就放弃，不再无限等待。
+
 ## [1.3.9] — 2026-10-13
 
 ### Added
