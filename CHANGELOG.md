@@ -8,6 +8,26 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.4.3] — 2026-10-14
+
+### Added
+- **Route Info overview for routers and servers.** Route Info now opens on an Overview with three views (Overview, Route tables, Policy graph). It recognises OpenWrt (including ImmortalWrt / iStoreOS), Asuswrt-Merlin / stock Asuswrt and plain Linux, and draws a topology diagram: Internet → WAN / VPN / proxy TUN uplinks → this host → LAN segments with how many clients are online.
+  - **Proxies & VPN**: sing-box, Clash / mihomo / OpenClash, Xray, V2Ray, Hysteria, TUIC, Shadowsocks, Trojan, NaiveProxy, OpenVPN, Tailscale, ZeroTier, frp and AdGuard Home / SmartDNS / MosDNS, with their listening ports and TUN device. WireGuard peers show endpoint, allowed IPs, last handshake and traffic.
+  - **DHCP clients** (dnsmasq leases on OpenWrt, Merlin and most Linux) with online state and lease time left, **interfaces** with their role and bridge ports, and custom **policy rules**.
+  - **Route tables** are grouped by table (main, custom tables, local) and fold; a filter box searches destination, gateway, interface and table.
+
+### Changed
+- **Redesigned System Info, Connections, Route Trace, IP Quality and Software Sources** with the same cards, tables, inputs and buttons as the rest of the app, in light and dark themes. System Info has summary tiles and disk usage bars; Connections' charts are clickable filter cards over a smooth table that handles thousands of rows; Route Trace shows the path with latency bars and loss; IP Quality has a risk gauge and side-by-side cards; Software Sources uses switches and setting rows.
+- **Lighter route probe**: still one SSH command per refresh, with every section capped so a busy router stays idle, and auto-refresh every 30 s instead of 8 s. WireGuard is read without ever fetching private keys.
+
+### 中文
+- **新增**：路由信息「概览」。路由信息分为「概览」「路由表」「策略图」三个视图。自动识别 OpenWrt（含 ImmortalWrt / iStoreOS）、华硕梅林 / 原厂固件和普通 Linux，并画出网络拓扑：互联网 → WAN / VPN / 代理 TUN → 本机 → 各局域网，局域网显示在线客户端数。
+  - **代理与 VPN**：识别 sing-box、Clash / mihomo / OpenClash、Xray、V2Ray、Hysteria、TUIC、Shadowsocks、Trojan、NaiveProxy、OpenVPN、Tailscale、ZeroTier、frp，以及 AdGuard Home / SmartDNS / MosDNS，显示监听端口和 TUN 网卡；WireGuard 显示对端、允许的 IP、上次握手和流量。
+  - **DHCP 客户端**（OpenWrt、梅林和多数 Linux 的 dnsmasq 租约）显示是否在线和租约剩余时间；**网络接口**显示角色和桥接成员；以及自定义**路由规则**。
+  - **路由表**按 main、自定义表、local 分组，可折叠，并可按目标、网关、接口或表名筛选。
+- **调整**：重新设计「系统信息」「网络连接」「路由追踪」「IP 质量检测」「软件源」，与软件其他部分使用同样的卡片、表格、输入框和按钮，浅色深色主题都适配。系统信息加了概要卡片和磁盘使用率条；网络连接的统计图可点击筛选，连接表几千条也流畅；路由追踪以路径形式显示延迟条和丢包；IP 质量有风险仪表和并排卡片；软件源改用开关和设置行。
+- **调整**：路由探测更轻量：每次刷新仍只执行一条 SSH 命令，每段输出都限制了行数，繁忙的路由器也不受影响；自动刷新从每 8 秒改为每 30 秒。WireGuard 信息不会读取私钥。
+
 ## [1.4.2] — 2026-10-14
 
 ### Changed
