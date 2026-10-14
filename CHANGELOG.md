@@ -8,6 +8,22 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.4.2] — 2026-10-14
+
+### Changed
+- **Redesigned Add / Edit Server dialog.** Fields are grouped into Connection, Authentication, Group & appearance and Advanced cards. Host and port share a row, the proxy is picked from a field that shows "Direct" when none is set, and password vs. private key is a two-way switch. A "From vault" button fills the login from saved credentials (double-clicking the username still works). Saving the secret is a switch, with a notice when no master password is set. Tag colours are round swatches, OS icons a tile grid, and Save / Cancel stay pinned at the bottom. The leftover proxy hint line under the form is gone.
+- **Server tree**: the Servers / Monitor switch, the Server / Folder / Local shell buttons and the search and collapse buttons use the new style. Rows have a rounded hover and selection highlight. Folders show how many servers they hold; server rows show the host and the colour tag on the right.
+- **Monitor panel**: CPU, memory and swap use rounded bars that turn amber above 75 % and red above 90 %. Processes, network and storage each sit in a titled card. Numbers are right-aligned, busy processes are highlighted, the traffic chart is filled, and every disk gets a small usage bar.
+- **Main window**: Terminal / System Info / Routes / Connections and Files / Commands are underlined tabs with icons. Toolbar and menu-bar buttons are flat with a soft hover, and the remote path field matches the other inputs.
+- **Dark themes**: primary buttons on light accent colours (e.g. Tokyo Night) use dark text so the label stays readable.
+
+### 中文
+- **调整**：重新设计「添加 / 编辑服务器」对话框。内容分成「连接」「认证」「分组与外观」「高级」四张卡片；主机和端口放在同一行；代理改为选择框，未设置时显示「直连」；密码 / 私钥改为分段切换。新增「从凭据库选择」按钮（双击用户名仍然可用）。「保存到凭据库」改为开关，没有设置主密码时会给出提示。标签颜色改为圆形色块，图标改为方块网格，「保存 / 取消」固定在底部。表单下方残留的代理提示语已删除。
+- **调整**：服务器列表。「服务器 / 系统监控」切换、「服务器 / 文件夹 / 本地 Shell」按钮以及搜索、收起按钮换成新样式；行悬停和选中有圆角高亮；文件夹显示服务器数量，服务器行右侧显示主机地址和标签颜色。
+- **调整**：系统监控。CPU、内存、交换区改为圆角进度条，超过 75% 变黄、超过 90% 变红；进程、网络、存储分别放进带标题的卡片；数字右对齐，占用高的进程会标色；流量图带填充，每块磁盘有使用率小条。
+- **调整**：主窗口。「终端 / 系统信息 / 路由信息 / 网络连接」和「文件 / 命令」改为带图标的下划线标签；工具栏和菜单栏按钮改为扁平样式，悬停有柔和底色；远端路径输入框与其他输入框风格一致。
+- **调整**：深色主题下，浅色强调色（如 Tokyo Night）上的主按钮改用深色文字，保证可读。
+
 ## [1.4.1] — 2026-10-14
 
 ### Changed
