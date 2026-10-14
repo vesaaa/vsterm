@@ -8,6 +8,20 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.4.1] — 2026-10-14
+
+### Changed
+- **Redesigned Preferences pages** (General, Master Password, Account, Cloud Sync). Every page now uses the same cards with an icon header, the same button sizes, and setting rows with the text on the left and the control on the right. On/off options are switches. Status shows as small coloured labels. Light and dark themes both follow the active theme colours.
+  - **Cloud Sync**: Sync and Compare sit side by side. The two overwrite actions moved into a Replace menu, each with a line explaining what it does. Per-kind status and local backups show as tidy lists, and only kinds that differ show when the cloud copy changed.
+  - **Account**: the plan, email and cloud storage use are on one card, and the expiry date no longer appears twice. Devices are a list that shows when each was last active.
+  - **Master Password**: the new password and its confirmation sit side by side.
+
+### 中文
+- **调整**：重新设计偏好设置的「常规」「主密码」「账号」「云端同步」四个页面。所有页面统一使用带图标标题的卡片和同样尺寸的按钮；设置项左边是说明、右边是控件；开关类选项改成开关按钮；状态用小的彩色标签显示。浅色和深色主题都跟随当前主题配色。
+  - **云端同步**：「同步」「与云端比较」并排放在一起；两个覆盖操作收进「覆盖」菜单，每项附一句说明。各类型的状态和本机备份改为整齐的列表，只有有差异的类型才显示云端更新时间。
+  - **账号**：套餐、邮箱和云端存储用量放在同一张卡片里，到期时间不再重复显示。设备改为列表，显示每台设备最近活跃的时间。
+  - **主密码**：新密码和确认密码并排显示。
+
 ## [1.4.0] — 2026-10-13
 
 ### Added
