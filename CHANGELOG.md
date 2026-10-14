@@ -8,6 +8,24 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.4.4] — 2026-10-14
+
+### Added
+- **Proxy and VPN links in the Route Info topology.** Under the network diagram, each proxy (sing-box, Clash / mihomo, Xray, V2Ray, Hysteria, TUIC, Shadowsocks, Trojan, NaiveProxy) and VPN (WireGuard, OpenVPN) now gets its own lane: LAN devices or local apps → how traffic is captured → the proxy → the remote servers it connects to → WAN → Internet.
+  - **Capture**: TUN device, TPROXY (iptables mangle or nftables), REDIRECT (nat) and DNS hijack to the proxy's DNS port, matched against the ports the proxy listens on.
+  - **Remote servers**: worked out from the proxy's own public connections, sorted by connection count; the busiest one is marked as the node and drawn as a dashed tunnel, the rest fold into "other direct targets". LAN, fake-IP and CGNAT addresses are ignored. WireGuard peers show as online when the last handshake is under 3 minutes old.
+  - Costs one more capped `ss` (or `netstat`) call inside the existing single probe.
+
+### Changed
+- Refreshed README screenshots.
+
+### 中文
+- **新增**：路由信息网络拓扑中的代理 / VPN 链路。拓扑图下方为每个代理程序（sing-box、Clash / mihomo、Xray、V2Ray、Hysteria、TUIC、Shadowsocks、Trojan、NaiveProxy）和 VPN（WireGuard、OpenVPN）单独画一条链路：局域网设备或本机程序 → 流量接管方式 → 代理程序 → 远程服务器 → WAN → 互联网。
+  - **接管方式**：识别 TUN 网卡、TPROXY（iptables mangle 或 nftables）、REDIRECT（nat）以及劫持到代理 DNS 端口的 DNS，并与代理监听的端口核对。
+  - **远程服务器**：根据代理自身连向公网的连接统计，按连接数排序；连接最多的标为「节点」，用虚线画出隧道，其余合并为「其他直连目标」。忽略内网、fake-IP 和 CGNAT 地址。WireGuard 对端 3 分钟内有握手即显示在线。
+  - 只在原有的单次探测里多一条限制了行数的 `ss`（或 `netstat`）查询。
+- **调整**：更新 README 截图。
+
 ## [1.4.3] — 2026-10-14
 
 ### Added

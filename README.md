@@ -34,7 +34,7 @@
 - **Desk pets**: Monkey, Golden Buddha, Taishang Laojun, and Cloud Bun are Pro (14-day trial). Dog, qi fighter, jade loong, and the excavator are free. Pictures below.
 - **Ops panels are first-class, not side utilities**: routes, connections, path trace, IP quality, system info, and live host metrics are built into the app.
 - **Progress is visible**: both **SFTP** and **ZMODEM (`rz` / `sz`)** transfers expose progress / queue state instead of disappearing into a blocking dialog or a blind background task.
-- **Topology and line-quality tooling is richer than a plain terminal**: routing diagrams, per-hop geo/ASN enrichment, fraud / datacenter / blacklist checks, and connection charts are available without leaving the session.
+- **Topology and line-quality tooling is richer than a plain terminal**: router-aware topology (OpenWrt, Asuswrt-Merlin, Linux) with proxy / VPN links, DHCP clients and policy routes, per-hop geo/ASN enrichment, fraud / datacenter / blacklist checks, and connection charts are available without leaving the session.
 - **Native desktop app**: no Electron; Rust + `wgpu`, with software-render fallback for VM / RDP-style environments.
 
 ### Screenshots
@@ -43,9 +43,9 @@
 
 <img src="assets/screenshots/overview_terminal.webp" alt="VsTerm terminal overview with session tree, terminal, and bottom pane" />
 
-#### Route diagram / policy topology
+#### Route Info: network topology with proxy / VPN links
 
-<img src="assets/screenshots/routes_diagram.webp" alt="VsTerm routes diagram with policy topology" />
+<img src="assets/screenshots/routes_diagram.webp" alt="VsTerm Route Info topology of an OpenWrt router with sing-box and WireGuard links" />
 
 #### IP quality check
 
@@ -53,7 +53,7 @@
 
 #### Path trace with geo / ASN enrichment
 
-<img src="assets/screenshots/path_trace_geo.webp" alt="VsTerm path trace showing RTT, loss, org, ASN, location, and coordinates" />
+<img src="assets/screenshots/path_trace_geo.webp" alt="VsTerm route trace with latency bars, loss, ASN, location and coordinates" />
 
 ### Feature comparison across mainstream SSH terminal tools
 

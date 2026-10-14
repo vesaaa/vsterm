@@ -34,7 +34,7 @@
 - **桌面宠物**：猴子、金佛、太上老君、云团是 Pro（14 天试用）。小狗、气功武者、青金龙、挖掘机免费。见下面的图。
 - **运维面板不是附属品，而是主功能**：路由信息、网络连接、路径追踪、IP 质量、系统信息、实时指标都内置在主界面。
 - **传输过程看得见**：**SFTP** 和 **ZMODEM（`rz` / `sz`）** 都有明确的进度 / 队列反馈，而不是只弹一个阻塞对话框或静默后台执行。
-- **线路与网络定位能力明显强于普通终端**：不仅能连，还能看策略路由图、逐跳地理归属 / ASN、IP 欺诈分 / 大厂身份 / 黑名单结果。
+- **线路与网络定位能力明显强于普通终端**：不仅能连，还能看 OpenWrt / 梅林 / Linux 的网络拓扑（含代理 / VPN 链路、DHCP 客户端）和策略路由图、逐跳地理归属 / ASN、IP 欺诈分 / 大厂身份 / 黑名单结果。
 - **原生桌面应用**：不是 Electron；Rust + `wgpu`，在无硬件 GPU 的 VM / RDP 环境下也能自动降级保证可用。
 
 ### 截图预览
@@ -43,9 +43,9 @@
 
 <img src="assets/screenshots/overview_terminal.webp" alt="VsTerm 终端总览，包含会话树、终端区与底部面板" />
 
-#### 路由图 / 策略拓扑
+#### 路由信息：网络拓扑与代理 / VPN 链路
 
-<img src="assets/screenshots/routes_diagram.webp" alt="VsTerm 路由图与策略拓扑" />
+<img src="assets/screenshots/routes_diagram.webp" alt="VsTerm 路由信息：OpenWrt 路由器拓扑，含 sing-box 与 WireGuard 链路" />
 
 #### IP 质量检测
 
