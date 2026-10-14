@@ -8,6 +8,20 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.4.5] — 2026-10-14
+
+### Changed
+- **Route Info topology reads left to right**, the same way as the proxy / VPN lanes: LAN segments → this host → WAN / VPN / proxy TUN uplinks → Internet. The legend follows the same order.
+- **Redesigned SSH tunnels panel** (plug button, top right) to match System Info and Route Info: each tunnel is a card with its type, listen → destination address, status chip and start / stop / copy-SOCKS buttons; errors show under the row, the footer shows how many tunnels are up, and rows keep a stable order.
+
+### Removed
+- **Policy graph** view in Route Info. Its content is covered by the Overview topology and the policy-rules card, so Route Info now has Overview and Route tables only.
+
+### 中文
+- **调整**：路由信息的网络拓扑改为从左到右，与代理 / VPN 链路方向一致：局域网 → 本机 → WAN / VPN / 代理 TUN → 互联网，图例顺序同步调整。
+- **调整**：重新设计右上角「SSH 隧道」面板，与系统信息、路由信息风格一致：每条隧道一张卡片，显示类型、监听 → 目标地址、状态标签，以及启动 / 停止 / 复制 SOCKS 地址按钮；出错信息显示在卡片下方，底部显示运行数量，列表顺序固定。
+- **移除**：路由信息中的「策略图」视图。其内容已由「概览」拓扑和路由规则卡片覆盖，路由信息现在只保留「概览」和「路由表」。
+
 ## [1.4.4] — 2026-10-14
 
 ### Added
