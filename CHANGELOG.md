@@ -8,6 +8,14 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.4.6] — 2026-10-16
+
+### Changed
+- **Refreshed app icon.** Same V and three colours, tidied up: a subtle gradient plate with a faint rim so the icon keeps its outline on dark taskbars and docks, a heavier V, and the three blocks turned into one tri-colour cursor bar. 16–32 px sizes (taskbar, tabs, favicons) now use their own simplified artwork — a thicker V and a single cursor bar — instead of a scaled-down copy, and the macOS icon sits on the standard Apple icon grid.
+
+### 中文
+- **调整**：更新应用图标。保留 V 字和三种配色，细节重新打磨：底板改为轻微渐变并加一圈淡色描边，在深色任务栏 / 程序坞上也能看清轮廓；V 字加粗，三个色块合成一条三色光标条。16–32 px（任务栏、标签页、网站图标）改用专门的简化稿（更粗的 V + 单条光标），不再由大图直接缩小；macOS 图标按 Apple 标准图标网格放置。
+
 ## [1.4.5] — 2026-10-14
 
 ### Changed
