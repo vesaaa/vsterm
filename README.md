@@ -33,6 +33,7 @@
 - **New files from the SFTP pane**: right-click the empty area of the file list and choose **New file**. `.sh` starts with `#!/bin/sh` or `#!/bin/bash`; `.json`, `.config`, `.yaml`, and `.txt` start empty. The file is written to the host immediately, and the name is selected so you can rename it in place.
 - **Desk pets**: Monkey, Golden Buddha, Taishang Laojun, and Cloud Bun are Pro (14-day trial). Dog, qi fighter, jade loong, and the excavator are free. Pictures below.
 - **Ops panels are first-class, not side utilities**: routes, connections, path trace, IP quality, system info, and live host metrics are built into the app.
+- **Docker / Podman without leaving the session**: a Containers tab lists containers and images on the SSH host or this computer, with start / stop, logs, exec, update checks, safe upgrades with rollback, port forwarding to this computer, and disk cleanup.
 - **Progress is visible**: both **SFTP** and **ZMODEM (`rz` / `sz`)** transfers expose progress / queue state instead of disappearing into a blocking dialog or a blind background task.
 - **Topology and line-quality tooling is richer than a plain terminal**: router-aware topology (OpenWrt, Asuswrt-Merlin, Linux) with proxy / VPN links, DHCP clients and policy routes, per-hop geo/ASN enrichment, fraud / datacenter / blacklist checks, and connection charts are available without leaving the session.
 - **Native desktop app**: no Electron; Rust + `wgpu`, with software-render fallback for VM / RDP-style environments.

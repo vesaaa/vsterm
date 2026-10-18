@@ -8,6 +8,26 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.4.7] — 2026-10-18
+
+### Added
+- **Containers tab** for Docker and Podman, on the SSH host (over the session's own connection, falling back to `sudo -n` when the login user cannot reach the daemon) or on this computer. It shows up only when an engine is installed.
+  - Containers grouped by compose project, with start / stop / restart / resume / remove, a log viewer, a shell inside the container and follow-logs in the terminal, and optional CPU / memory. Images list which containers use them; unused ones can be removed.
+  - **Update check**: compares each image with its registry and flags containers still running an older image after the tag moved.
+  - **Safe upgrade** with automatic rollback. Plain containers are recreated from their current settings (environment, ports, volumes, networks, labels, restart policy, limits…), keeping all volume data; compose services go through `compose pull` / `up`. The old container is kept until the new one stays up and healthy, and restored otherwise. The target version can be picked from the newest 10 tags of the same variant, or typed in. Containers whose options cannot be reproduced safely (`--rm`, `--volumes-from`, links…) are refused rather than guessed.
+  - **Ports**: forward a container port to this computer through the SSH connection, with nothing opened on the server — published ports or, for unpublished ones, the container's own address. Forwards also show in the SSH tunnels panel and close with the connection. Local containers open in the browser.
+  - **Disk**: usage by images, containers, volumes and build cache, with confirmed cleanups (stopped containers, dangling or unused images, build cache, anonymous volumes, or a safe all-in-one cleanup).
+  - Local engines: Docker Desktop, OrbStack, Rancher Desktop, Podman and Homebrew installs are found on macOS; on Windows the engine is called directly (update check and upgrades are not available there yet). A stopped engine is reported as such instead of as a permission problem.
+
+### 中文
+- **新增**：「容器」标签页，管理 Docker / Podman。支持 SSH 主机（复用当前会话连接，登录用户无权限时自动尝试 `sudo -n`）和本机，只有装了容器引擎时才显示。
+  - 容器按 compose 项目分组，可启动 / 停止 / 重启 / 恢复 / 删除，查看日志，一键进入容器终端或在终端里跟踪日志，可选显示 CPU / 内存；镜像列表显示被哪些容器使用，未使用的可删除。
+  - **检查更新**：对比镜像仓库，标出可更新的镜像，以及标签已更新但容器还在用旧镜像的情况。
+  - **安全升级**，失败自动回滚：普通容器按原有配置（环境变量、端口、卷、网络、标签、重启策略、资源限制等）重建，卷数据全部保留；compose 服务走 `compose pull` / `up`。新容器稳定运行且健康后才删除旧容器，否则自动恢复。可以从同类标签中最新的 10 个版本里选择目标版本，或手动输入。无法安全复刻的容器（`--rm`、`--volumes-from`、links 等）会直接说明原因，不做猜测。
+  - **端口**：通过 SSH 连接把容器端口转发到本机，服务器上不用开放任何端口；已发布端口和未发布端口（经容器地址）都支持。转发同时显示在 SSH 隧道面板里，断开连接自动关闭。本机容器可直接在浏览器打开。
+  - **磁盘**：镜像、容器、数据卷、构建缓存的占用和可回收空间，并提供需确认的清理操作（已停止容器、悬空 / 未使用镜像、构建缓存、匿名卷，或一键安全清理）。
+  - 本机引擎：macOS 会自动找到 Docker Desktop、OrbStack、Rancher Desktop、Podman 和 Homebrew 安装的命令；Windows 直接调用引擎（暂不支持检查更新和升级）。引擎没启动时会明确提示，而不是显示成没有权限。
+
 ## [1.4.6] — 2026-10-16
 
 ### Changed
