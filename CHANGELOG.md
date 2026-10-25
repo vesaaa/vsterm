@@ -8,6 +8,20 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.4.10] — 2026-10-25
+
+### Changed
+- The Pro trial notice under **Preferences → Account** now lists the Pro tools added recently: network storage and iSCSI mounts, Java heap dumps and Arthas, and one-click security fixes.
+
+### Fixed
+- **Disk management** no longer reports a read-only bind mount (such as `docker-init` inside a container) as a filesystem the kernel turned read-only.
+- In a narrow window (around 1280 px), the "Updated N s ago" note on the Containers, Processes, Disk and Security toolbars no longer overlaps the controls next to it, and the filter box shrinks instead of covering the Stats / Java toggles.
+
+### 中文
+- **改进**：「偏好设置 → 账号」里的 Pro 试用提示补上了新增的 Pro 工具：网络存储与 iSCSI 挂载、Java 堆转储与 Arthas、一键安全加固。
+- **修复**：磁盘管理不再把只读的 bind 挂载（例如容器里的 `docker-init`）误报为「被内核改为只读」。
+- **修复**：窗口较窄（约 1280 像素）时，容器、进程、磁盘和安全检查工具栏上的「N 秒前更新」不再和旁边的控件重叠；筛选框会自动变窄，不再盖住「资源占用」「Java」开关。
+
 ## [1.4.9] — 2026-10-25
 
 ### Added
