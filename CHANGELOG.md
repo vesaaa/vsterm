@@ -8,6 +8,36 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.4.9] — 2026-10-25
+
+### Added
+- **Toolbox → Security audit** (Linux hosts): a read-only check of the server that ranks what it finds as critical / warning / note / OK, each with the command that fixes it (copy it, or have it typed into the terminal).
+  - **Intrusion signs** (shown first): processes named like crypto miners or disguised as kernel threads, programs running from /tmp or /dev/shm, an `/etc/ld.so.preload`, cron jobs and services that download and run scripts, connections to mining-pool ports. These are heuristics: "nothing found" cannot prove a host is clean.
+  - **SSH**: root login with a password, password logins, empty passwords, outdated algorithms, weak or recently added keys; failed logins in 24 hours and 7 days with the top IPs, recent successful logins, and whether fail2ban (or similar) is running.
+  - **Accounts and sudo**: extra UID 0 accounts, accounts without a password (password hashes never leave the server), passwordless sudo rules, docker group members.
+  - **Exposed ports**: Redis, MongoDB, Elasticsearch, the Docker API, MySQL and other services reachable from other hosts, with a table of every exposed port.
+  - **Firewall**: whether ufw / firewalld / iptables / nftables is really in effect, and Docker-published ports bypassing ufw.
+  - **Updates**: pending security updates (from the local package cache, no download), a newer kernel waiting for a reboot, automatic updates, end-of-life OS versions.
+  - **File permissions** (`/etc/shadow`, sudoers, cron, `.ssh`, SUID programs in odd places) and **containers** (privileged, Docker socket mounted, host PID or network).
+- **One-click security fixes** (Pro, included in the 14-day trial):
+  - **Harden SSH** (password logins off, root keys only, X11 off…) and **Enable ufw** (the SSH port always allowed). Both are checked on the server and roll back on their own after 2 minutes unless you click **Keep**, even if VsTerm lost the connection; open a new connection to check before keeping.
+  - Turning password logins off is refused when your current connection logged in with a password, or the user has no SSH key.
+  - **Fix** on simple findings (file permissions, locking accounts without a password), after a confirmation.
+
+### 中文
+- **新增**：工具箱「安全检查」（Linux 主机），只读检查服务器，把发现的问题分为严重 / 警告 / 提示 / 正常，每项附带修复命令（可复制，或一键填入终端）。
+  - **入侵迹象**（排在最前）：疑似挖矿或伪装成内核线程的进程、从 /tmp 或 /dev/shm 运行的程序、`/etc/ld.so.preload`、会下载并执行脚本的定时任务和服务、连接矿池端口的进程。这些是启发式检查，没发现问题也不能保证主机没有被入侵。
+  - **SSH**：允许 root 用密码登录、允许密码登录、允许空密码、过时的加密算法、弱密钥或最近新增的公钥；近 24 小时和 7 天的登录失败次数及来源 IP 排行、最近成功的登录，以及是否启用了 fail2ban 等工具。
+  - **账户与 sudo**：多余的 UID 0 账户、没有密码的账户（密码哈希不会离开服务器）、免密 sudo 规则、docker 组成员。
+  - **对外端口**：Redis、MongoDB、Elasticsearch、Docker API、MySQL 等可被其他主机访问的服务，并列出所有对外端口。
+  - **防火墙**：ufw / firewalld / iptables / nftables 是否真的生效，以及 Docker 映射的端口会绕过 ufw。
+  - **系统更新**：待装的安全更新（只读本地缓存，不联网下载）、需要重启的新内核、自动更新、已停止维护的系统版本。
+  - **文件权限**（`/etc/shadow`、sudoers、定时任务、`.ssh`、异常位置的 SUID 程序）和**容器**（特权容器、挂载 Docker socket、共享宿主机进程或网络）。
+- **新增**：一键安全修复（Pro，含在 14 天试用中）：
+  - **一键加固 SSH**（关闭密码登录、root 只允许密钥、关闭 X11 转发等）和**启用 ufw**（SSH 端口固定放行）。改完会在服务器上校验，并在 2 分钟后自动恢复原配置，除非你点「保留更改」；即使 VsTerm 断开了也会恢复。保留前请先新开一个连接确认能登录。
+  - 如果当前连接是用密码登录的，或该用户没有 SSH 公钥，不允许关闭密码登录。
+  - 简单问题（文件权限、锁定没有密码的账户）可以点「修复」，确认后执行。
+
 ## [1.4.8] — 2026-10-25
 
 ### Added

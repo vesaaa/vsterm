@@ -37,6 +37,7 @@
 - **Every process on the server**: a Processes tab (Linux hosts) lists processes as a sortable list or a parent/child tree, and shows for each one its executable, full command line, working directory, what started it (systemd service, container, SSH login, cron…), its ports and connections, disk I/O and, on request, its environment, with end / force-kill and systemd restart / stop / logs.
 - **Java diagnostics, containers included**: for a JVM on the host or in a Docker / Podman container, see heap and GC live, find the thread burning CPU and its stack, spot deadlocks, take a class histogram or a heap dump to download, or start Arthas in one click — even on servers without internet.
 - **Disk analysis and management**: find what fills a disk (directories, large files, deleted files still held open) and clean it up safely; see disks, partitions, LVM and SMART health, initialise new disks, grow after a cloud resize, test disk speed, manage swap, check fstab, and mount NFS / SMB / object storage or connect iSCSI.
+- **Security audit**: a read-only check for intrusion signs, risky SSH settings and brute-force attempts, accounts, exposed databases, the firewall, pending security updates and file permissions, each with its fix command; one-click fixes (Pro) roll back on their own unless kept.
 - **Progress is visible**: both **SFTP** and **ZMODEM (`rz` / `sz`)** transfers expose progress / queue state instead of disappearing into a blocking dialog or a blind background task.
 - **Topology and line-quality tooling is richer than a plain terminal**: router-aware topology (OpenWrt, Asuswrt-Merlin, Linux) with proxy / VPN links, DHCP clients and policy routes, per-hop geo/ASN enrichment, fraud / datacenter / blacklist checks, and connection charts are available without leaving the session.
 - **Native desktop app**: no Electron; Rust + `wgpu`, with software-render fallback for VM / RDP-style environments.
@@ -101,6 +102,8 @@ VsTerm runs fully offline for SSH work. **Personal Cloud** (account login, entit
 | Processes, Disk analysis and cleanup, disk devices / SMART / fstab check, speed test, swap, initialise and grow disks, Java process overview and thread CPU | ✅ | ✅ |
 | Add NFS / SMB / object storage mounts, connect iSCSI targets, add a disk to an LVM volume group | 14-day trial | ✅ |
 | Java class histogram, heap dump, one-click Arthas | 14-day trial | ✅ |
+| Security audit, with fix commands to copy or run in the terminal | ✅ | ✅ |
+| One-click security fixes (harden SSH, enable ufw, fix permissions) | 14-day trial | ✅ |
 | View, remount, unmount, remove and disconnect existing network storage | ✅ | ✅ |
 | Desk pet — dog, qi fighter, excavator, jade loong | ✅ | ✅ |
 | Desk pet — monkey, Golden Buddha, Taishang Laojun, Cloud Bun | 14-day trial | ✅ |
