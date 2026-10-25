@@ -8,6 +8,100 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.4.8] — 2026-10-25
+
+### Added
+- **Processes tab** for Linux hosts (over SSH, or the local shell on Linux). It refreshes only while open.
+  - List or parent/child tree, sortable columns, search by name, command, PID, user or port, and toggles for "listening only" and kernel threads. CPU %, memory, state (zombie / IO-wait highlighted), uptime and listening ports per process; the processes carrying your own connection are marked. Cut-off text shows in full on hover.
+  - Details for the selected process: executable (flagged when the binary was replaced since it started), working directory, full command line, threads, open files against the limit, disk I/O rate and totals, and start time.
+  - **Started by**: systemd service (with unit file, ExecStart and state), container, SSH login, tmux / screen, pm2 / supervisord, cron or login session; plus its ancestors and children.
+  - Its listening ports, connections and the remote IPs with the most connections.
+  - **Environment variables** only on request, with values that look like passwords, tokens or keys masked until revealed.
+  - **End process** / **Force kill**, and for systemd services **View logs**, **Restart** and **Stop**, all confirmed first. It warns when a process carries your current connection or a service may restart it.
+  - Links: click a process in the side Monitor or a PID in Connections to open it here; open a container process in the Containers tab, or its working directory in the Files panel.
+  - Processes running in a container are tagged with the container's name, and search matches it. A new button on each running container in the Containers tab opens its main process here (or the JVM under a shell wrapper).
+- **Java diagnostics** for JVMs on the host or in Docker / Podman containers: a Java section in the process details, and **Toolbox → Java diagnostics** to list only JVMs. Every tool runs as the JVM's own user, inside its container when it has one.
+  - Version, main class, JVM flags, max heap and collector; heap, old generation, Metaspace and young / full GC refreshed every 5 s, with a 5-minute heap chart and a warning when full GCs keep coming.
+  - **Thread analysis**: which threads used the CPU in the last second, matched to their stacks, plus counts by state, deadlocks, every thread with a filter, and the raw dump to copy. Images with only a JRE still show CPU by thread name.
+  - **Class histogram** of the classes using the most memory (no full GC; confirmed first, since walking the heap pauses the JVM).
+  - **Heap dump** after a free-space check and a confirmation (full GC and a pause): compressed on the server, then downloaded through the Files panel and deleted when done, for analysis in Eclipse MAT or VisualVM.
+  - **Arthas** in one click: VsTerm checks the JVM can load it, gets Arthas 4.3.5 (downloaded by the server, or uploaded from this computer when the server has no internet; checksum verified), and starts it in the terminal as the JVM's user. The Java section shows while Arthas is still attached and can stop it.
+- **Toolbox → Disk analysis** (Linux hosts): first aid when a disk fills up.
+  - Filesystems with usage and inodes; the fullest is selected.
+  - **Directories**: drill down by size or file count; a scan covers three levels at once and deeper ones are scanned on click. The largest files of each directory are listed with it.
+  - **Large files** (20 MB and up) on a filesystem, with open-in-Files and download.
+  - **Deleted but open**: deleted files still holding space because a process keeps them open, with the process (jump to Processes) and a confirmed **Truncate** that frees the space without restarting it.
+  - **Cleanup**: the systemd journal (keeps 200 MB), rotated logs under `/var/log`, crash dumps and APT / DNF / YUM / Zypper caches, each showing what it frees and confirmed first; images and build cache link to the Containers tab.
+  - Scans run at idle priority with a time limit and can be cancelled. Without root, sizes may be incomplete (it says so).
+- **Toolbox → Disk management** (Linux hosts):
+  - **Devices**: disks, partitions, LVM and filesystems as a tree, with unallocated space, blank disks and system disks marked. SMART health per drive (temperature, power-on time, bad sectors, SSD wear; sleeping drives are not woken, virtual disks are recognised). Kernel I/O errors of the last day and filesystems the kernel made read-only are flagged.
+  - **Speed test**: sequential and 4K random read / write with IOPS and latency (fio; dd when fio is missing). Confirmed first, cancellable, and the test file is always removed.
+  - **Swap**: create or remove a swapfile (size suggested from memory; fstab backed up and verified, every step undone on failure) and set swappiness.
+  - **fstab check**: entries that would stop a boot, `/dev/sdX` names (with the UUID line to copy), network shares without `nofail`, filesystems mounted but missing from fstab, plus `findmnt --verify`.
+  - **Initialise a blank disk**: one GPT partition, ext4 or xfs, mounted and added to fstab by UUID with `nofail`. The device name is typed to confirm, the disk is checked again on the server first, and any failed step is undone.
+  - **Grow after a cloud resize**: re-read the disk size, then grow the partition, LVM PV / LV and filesystem (ext2/3/4, xfs, btrfs) online; the partition table is backed up first.
+  - **Add a blank disk to an LVM volume group**, optionally growing one LV (and its filesystem) into it; undone on failure.
+  - **Network storage**: mount NFS (presets for Alibaba Cloud NAS, Tencent Cloud CFS and AWS EFS), SMB, and S3-compatible object storage through s3fs (Alibaba Cloud OSS, Tencent Cloud COS, Cloudflare R2, AWS S3, MinIO and others). Mounted first, then added to fstab with `_netdev,nofail`; mount or remove them from the list. Passwords and keys go to root-only files and never appear on a command line.
+  - **iSCSI**: this host's initiator name, discover the targets on a portal, connect with optional CHAP (and at boot), disconnect (refused while a disk is in use). A connected LUN can then be initialised (with `_netdev`) or added to a volume group.
+  - Without smartctl, fio or another tool, it shows the install command to run in the terminal.
+- **sudo in VsTerm** for Disk analysis and Disk management: enter the sudo password once per connection and every disk task runs as root. The password stays in memory only and reaches sudo on stdin; the Files panel uses the same password. When you switch to root in the terminal (`sudo -i`), the disk tools say why that does not carry over and offer the button.
+- **Pro** (included in the 14-day trial): adding NFS / SMB / object storage mounts, connecting iSCSI targets, adding a disk to an LVM volume group, and the Java class histogram, heap dump and one-click Arthas. Viewing, unmounting, removing, disconnecting and everything else in Processes, Disk analysis and Disk management stay free.
+
+### Changed
+- Container log viewer: removed **Follow in terminal**; it added little and could hang VsTerm.
+- Disk tools: "Run in terminal" fallbacks are a small terminal icon beside their notice, so they are no longer confused with real actions.
+
+### Fixed
+- **Edit in external editor** (Files panel): when saving back fails (for example without write permission), VsTerm now tries 3 times and then stops, instead of retrying forever. Saving again in the editor, or elevating the file panel, tries again.
+- Lines pasted in a Windows editor no longer show up as `^M` in `vi`: files that use Unix line endings keep them when saved back.
+- A black strip no longer appears between the session list and the main area when the server panel is collapsed.
+- **Cancel** on an SFTP download now stops it at once. On slow links it used to wait for every read already requested (about 20 s at 200 KB/s), and it now also cancels the files queued after it. A cancelled transfer says "Download cancelled" instead of "Transfer failed".
+- The side Monitor's CPU for SSH hosts now shows current usage, not the average since boot (and since start for each process).
+
+### 中文
+- **新增**：「进程」标签页，支持 Linux 主机（SSH 连接，或本机 Linux 的本地 Shell），只在打开时刷新。
+  - 列表或父子树两种视图，可按列排序，可按名称、命令、PID、用户、端口搜索，可切换"仅监听端口"和"内核线程"。显示每个进程的 CPU%、内存、状态（僵尸 / IO 等待高亮）、运行时长和监听端口，并标出承载当前连接的进程。显示不全的内容悬停可看全文。
+  - 选中进程的详情：程序文件（启动后被替换时会标出）、工作目录、完整命令行、线程数、打开文件数与上限、磁盘读写速率与累计、启动时间。
+  - **启动来源**：systemd 服务（含服务文件、ExecStart 和状态）、容器、SSH 登录、tmux / screen、pm2 / supervisord、cron 或登录会话；以及父进程链和子进程。
+  - 该进程的监听端口、连接列表，以及连接最多的远端 IP。
+  - **环境变量**按需读取，疑似密码、token、密钥的值默认打码，可单独显示。
+  - **结束进程** / **强制结束**；systemd 服务可**查看日志**、**重启**、**停止**，操作前都会确认。若进程承载当前连接，或服务可能被自动拉起，会提前提醒。
+  - 页面联动：在侧边监控或网络连接页点进程 / PID 可直接跳到这里；容器进程可跳到容器页，工作目录可在文件面板打开。
+  - 容器里的进程会标出容器名，搜索也能按容器名查找。容器页每个运行中的容器多了一个按钮，可直接跳到它的主进程（如果是 shell 包装，则直接定位到里面的 JVM）。
+- **新增**：Java 诊断，支持宿主机和 Docker / Podman 容器里的 JVM。进程详情里新增「Java」分区，工具箱里新增「Java 诊断」（只列出 Java 进程）。所有操作都以 JVM 自己的用户执行，在容器里的会自动进入容器。
+  - 版本、主类、JVM 参数、最大堆和 GC 类型；每 5 秒刷新堆、老年代、Metaspace 和 Young / Full GC，附最近 5 分钟的堆曲线，Full GC 持续增加时会提醒。
+  - **线程分析**：找出最近 1 秒占用 CPU 的线程并对应到调用栈，按状态统计，标出死锁，可筛选全部线程、复制原始线程栈。只有 JRE 的镜像也能按线程名查看 CPU。
+  - **类直方图**：占用内存最多的类（不触发 Full GC；因为要遍历堆、JVM 会短暂停顿，执行前会确认）。
+  - **堆转储**：先检查磁盘空间并确认（会 Full GC 并暂停 JVM），在服务器上压缩后通过文件面板下载，用完可删除，供 Eclipse MAT 或 VisualVM 分析。
+  - **Arthas 一键启动**：先检查 JVM 能否加载 Arthas，再准备 Arthas 4.3.5（服务器能上网就直接下载，不能上网则从本机上传，均校验哈希），然后以 JVM 的用户在终端里启动。Arthas 仍挂在 JVM 里时，Java 分区会显示并可一键停止。
+- **新增**：工具箱「磁盘分析」（Linux 主机），磁盘满了时的急救工具。
+  - 文件系统列表，显示使用率和 inode，默认选中最满的。
+  - **目录**：按容量或文件数逐层下钻；一次扫描覆盖三层，更深的目录点开时再扫描；同时列出该目录里最大的文件。
+  - **大文件**：列出文件系统上 20 MB 以上的文件，可在文件面板打开或下载。
+  - **已删除仍占用**：已删除但仍被进程打开、空间没释放的文件，显示占用进程（可跳到进程页），确认后可**截断**，不用重启进程就能腾出空间。
+  - **可清理**：systemd 日志（保留 200 MB）、/var/log 下已轮转的旧日志、崩溃转储、APT / DNF / YUM / Zypper 软件包缓存，每项显示可释放的空间并先确认；容器镜像和构建缓存跳到容器页处理。
+  - 扫描以低优先级运行、有时间上限、可取消。没有 root 权限时，结果可能不完整（会提示）。
+- **新增**：工具箱「磁盘管理」（Linux 主机）。
+  - **设备**：磁盘、分区、LVM、文件系统树形展示，标出未分配空间、未使用的新盘和系统盘。每块盘的 SMART 健康（温度、通电时间、坏扇区、SSD 寿命；不会唤醒休眠的硬盘，能识别虚拟磁盘）。标出近一天的内核 I/O 错误和被内核改为只读的文件系统。
+  - **测速**：顺序和 4K 随机读写，显示吞吐、IOPS 和延迟（使用 fio；没有 fio 时用 dd）。先确认、可取消，测试文件一定会删除。
+  - **Swap**：创建或删除 swapfile（按内存推荐大小；先备份并校验 fstab，任一步失败都会撤销），设置 swappiness。
+  - **fstab 检查**：会导致开机卡住的条目、使用 `/dev/sdX` 设备名（给出可复制的 UUID 写法）、没有 `nofail` 的网络盘、已挂载但未写入 fstab 的文件系统，并附 `findmnt --verify` 结果。
+  - **初始化新盘**：建一个 GPT 分区，格式化为 ext4 或 xfs，按 UUID 挂载并写入 fstab（带 `nofail`）。需要输入设备名确认，执行前在服务器上再检查一次，任何一步失败都会撤销。
+  - **云盘扩容后扩展**：重新读取磁盘容量，在线扩展分区、LVM 物理卷 / 逻辑卷和文件系统（ext2/3/4、xfs、btrfs），改分区表前先备份。
+  - **新盘加入 LVM 卷组**，可选把新空间扩给某个逻辑卷（连同文件系统）；失败时撤销。
+  - **网络存储**：挂载 NFS（预设阿里云 NAS、腾讯云 CFS、AWS EFS 的推荐参数）、SMB，以及通过 s3fs 挂载 S3 兼容对象存储（阿里云 OSS、腾讯云 COS、Cloudflare R2、AWS S3、MinIO 等）。先试挂载，成功后才写入 fstab（带 `_netdev,nofail`），列表里可挂载或移除。密码和密钥保存在仅 root 可读的文件里，不会出现在命令行上。
+  - **iSCSI**：显示本机发起端名称，发现门户上的目标，连接（可选 CHAP、开机自动连接），断开（磁盘仍在使用时拒绝）。连上的磁盘可以直接初始化（自动带 `_netdev`）或加入卷组。
+  - 缺少 smartctl、fio 等工具时，给出安装命令，可填入终端执行。
+- **新增**：磁盘分析和磁盘管理支持在 VsTerm 里 sudo 提权：每个连接输入一次 sudo 密码，之后所有磁盘操作都以 root 执行。密码只保存在内存里，通过标准输入交给 sudo；文件面板共用同一个密码。在终端里切到 root（`sudo -i`）时，磁盘工具会说明为什么不能沿用，并提供提权按钮。
+- **Pro**（含在 14 天试用中）：添加 NFS / SMB / 对象存储挂载、连接 iSCSI 目标、新盘加入 LVM 卷组，以及 Java 类直方图、堆转储和一键 Arthas。查看、卸载、移除、断开，以及进程、磁盘分析、磁盘管理里的其他功能始终免费。
+- **调整**：容器日志窗口去掉「在终端中跟随」，作用不大，还可能卡住 VsTerm。
+- **调整**：磁盘工具里的「在终端执行」改为提示旁边的小终端图标，不再和真正的操作按钮混淆。
+- **修复**：文件面板「用编辑器打开」保存回写失败（例如没有写权限）时，不再无限重试，最多尝试 3 次后停止；在编辑器里再保存一次，或在文件面板提权后，会重新回写。
+- **修复**：在 Windows 编辑器里粘贴的多行文本，保存回 Linux 后在 `vi` 里不再出现 `^M`：原本是 Unix 换行的文件会保持 Unix 换行。
+- **修复**：收起服务器面板后，会话列表和主区域之间不再出现黑色竖条。
+- **修复**：SFTP 下载点「取消」后立即停止。以前在慢速网络下要等已发出的读请求全部传完（200 KB/s 时约 20 秒）；现在也会一并取消排队中的文件，状态栏显示「已取消下载」而不是「传输失败」。
+- **修复**：SSH 主机侧边监控的 CPU 改为显示当前使用率，而不是开机以来（以及进程启动以来）的平均值。
+
 ## [1.4.7] — 2026-10-18
 
 ### Added
@@ -567,7 +661,7 @@ section for that version into the GitHub Release notes.
 ## [1.1.13] — 2026-07-28
 
 ### Changed
-- Net connections: remote location uses the same cascade as path trace (ipinfo → ibxq → ip2region), filled asynchronously so the table stays responsive; auto-refresh every 5s.
+- Net connections: remote location uses the same cascade as path trace (ipinfo → api.vsterm.com → ip2region), filled asynchronously so the table stays responsive; auto-refresh every 5s.
 - Net connections charts: hover shows a point and Y value (no vertical crosshair); X-axis shows up to three `mm:ss` sample times.
 - SSH: enable TCP keepalive (idle ~60s, probe every 10s) alongside the existing 30s application-layer keepalive.
 - Geo/location lookups skip CGNAT `100.64.0.0/10` (e.g. Tailscale) in addition to RFC1918 private ranges.
@@ -618,7 +712,7 @@ section for that version into the GitHub Release notes.
 ## [1.1.8] — 2026-07-27
 
 ### Added
-- Toolbox **IP Quality Check**: queries `api.ibxq.com` fraud data (risk score bar, operator/line, location, IP type, cloud vendor identity, blacklists, bots, proxies).
+- Toolbox **IP Quality Check**: queries `api.vsterm.com` fraud data (risk score bar, operator/line, location, IP type, cloud vendor identity, blacklists, bots, proxies).
 - Local public IPv4/IPv6 chips next to Check (via `curl` / `ipv4.ip.sb` · `ipv6.ip.sb`); click to fill the target field.
 - Path Trace is toolbox-only (no longer a top tab); Toolbox also keeps Traceroute.
 

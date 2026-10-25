@@ -34,6 +34,9 @@
 - **Desk pets**: Monkey, Golden Buddha, Taishang Laojun, and Cloud Bun are Pro (14-day trial). Dog, qi fighter, jade loong, and the excavator are free. Pictures below.
 - **Ops panels are first-class, not side utilities**: routes, connections, path trace, IP quality, system info, and live host metrics are built into the app.
 - **Docker / Podman without leaving the session**: a Containers tab lists containers and images on the SSH host or this computer, with start / stop, logs, exec, update checks, safe upgrades with rollback, port forwarding to this computer, and disk cleanup.
+- **Every process on the server**: a Processes tab (Linux hosts) lists processes as a sortable list or a parent/child tree, and shows for each one its executable, full command line, working directory, what started it (systemd service, container, SSH login, cron…), its ports and connections, disk I/O and, on request, its environment, with end / force-kill and systemd restart / stop / logs.
+- **Java diagnostics, containers included**: for a JVM on the host or in a Docker / Podman container, see heap and GC live, find the thread burning CPU and its stack, spot deadlocks, take a class histogram or a heap dump to download, or start Arthas in one click — even on servers without internet.
+- **Disk analysis and management**: find what fills a disk (directories, large files, deleted files still held open) and clean it up safely; see disks, partitions, LVM and SMART health, initialise new disks, grow after a cloud resize, test disk speed, manage swap, check fstab, and mount NFS / SMB / object storage or connect iSCSI.
 - **Progress is visible**: both **SFTP** and **ZMODEM (`rz` / `sz`)** transfers expose progress / queue state instead of disappearing into a blocking dialog or a blind background task.
 - **Topology and line-quality tooling is richer than a plain terminal**: router-aware topology (OpenWrt, Asuswrt-Merlin, Linux) with proxy / VPN links, DHCP clients and policy routes, per-hop geo/ASN enrichment, fraud / datacenter / blacklist checks, and connection charts are available without leaving the session.
 - **Native desktop app**: no Electron; Rust + `wgpu`, with software-render fallback for VM / RDP-style environments.
@@ -88,13 +91,17 @@ Notes:
 
 ### Standard vs Pro
 
-VsTerm runs fully offline for SSH work. **Personal Cloud** (account login, entitlement, and encrypted sync) is optional. **Pro** unlocks after a binding-checked cloud entitlement (e.g. GitHub Star promo or redeem). Every install also gets a **14-day trial** of the local Pro features: the 500,000-line scrollback, and the Monkey, Golden Buddha, Taishang Laojun, and Cloud Bun pets. Cloud sync is not part of the trial.
+VsTerm runs fully offline for SSH work. **Personal Cloud** (account login, entitlement, and encrypted sync) is optional. **Pro** unlocks after a binding-checked cloud entitlement (e.g. GitHub Star promo or redeem). Every install also gets a **14-day trial** of the local Pro features: the 500,000-line scrollback, the Pro setup tools below, and the Monkey, Golden Buddha, Taishang Laojun, and Cloud Bun pets. Cloud sync is not part of the trial.
 
 | Capability | Standard | Pro |
 |------------|----------|-----|
 | Local SSH sessions, SFTP, ZMODEM, ops panels | ✅ | ✅ |
 | Encrypted local credential vault | ✅ | ✅ |
 | Max terminal scrollback | 100,000 lines | 500,000 lines |
+| Processes, Disk analysis and cleanup, disk devices / SMART / fstab check, speed test, swap, initialise and grow disks, Java process overview and thread CPU | ✅ | ✅ |
+| Add NFS / SMB / object storage mounts, connect iSCSI targets, add a disk to an LVM volume group | 14-day trial | ✅ |
+| Java class histogram, heap dump, one-click Arthas | 14-day trial | ✅ |
+| View, remount, unmount, remove and disconnect existing network storage | ✅ | ✅ |
 | Desk pet — dog, qi fighter, excavator, jade loong | ✅ | ✅ |
 | Desk pet — monkey, Golden Buddha, Taishang Laojun, Cloud Bun | 14-day trial | ✅ |
 | Personal Cloud account / devices | ✅ | ✅ |
