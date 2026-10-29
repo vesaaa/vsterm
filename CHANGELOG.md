@@ -8,6 +8,34 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.5.0] — 2026-10-29
+
+### Added
+- **Update dialog with release notes**: when a new version is out, the dialog shows its version, release date and what's new (in your UI language), with **Download update**, **Open release page** and **Later**.
+- **Background update check**, at most once a day, while you are idle (never during a login or file transfer). It stays silent unless there is a newer version; then the status bar shows "Update x.y.z". Switch it off with **Check for updates at startup** in the dialog.
+- **Pro pets join the login**: when you log in with a Pro pet out, it throws its emblem at the login dialog (Laojun's taiji, the monkey's banana, the Buddha's 卍, a cloud from the Cloud Bun), with a short effect where it hits. With the Shatter effect, the glass cracks from that spot. The throw never delays the login.
+
+### Changed
+- **Shatter** connect effect: the real login dialog, with its fields, text and theme colours, now breaks into glass pieces that crack from the impact point and fly apart. Double-clicking a dropped session's status light plays it backwards.
+- **Trail** connect effect: the login dialog shrinks into the session's status light (and grows back out of it on reconnect). The sparkle ring around a new login dialog is gone.
+- The password login dialog keeps one size (450 × 280) in every state, and a changed host key is confirmed inside it instead of in a separate dialog.
+- New icons for the Files pane's path sync buttons, so they no longer look like "go up a folder": a terminal over an up arrow (files → terminal) and a down arrow over a folder (terminal → files).
+- The excavator pet is redrawn as one yellow machine; Enter now slaps the bucket down without squashing it.
+
+### Fixed
+- **False "host key changed" warnings** for servers that did not change: a host with several keys in `known_hosts` (Ed25519, ECDSA, RSA) is now checked against the key of the same type, and VsTerm prefers key types it already knows. When a key really changed, the dialog shows the new fingerprint and the command to check it on the server; **Trust and connect** replaces only that host's entry and reconnects with the login you entered, no `ssh-keygen -R` needed.
+
+### 中文
+- **新增**：更新对话框会显示新版本号、发布日期和更新内容（跟随界面语言），提供「下载更新」「打开发布页」「稍后」。
+- **新增**：后台每天最多检查一次更新，只在空闲时进行（登录或传输文件时不检查）。没有新版本时不打扰；有新版本时，状态栏会显示「有新版本 x.y.z」。可在对话框里关闭「启动时自动检查更新」。
+- **新增**：Pro 宠物参与登录：带着 Pro 宠物登录时，它会把自己的法宝扔向登录框（太上老君的太极、猴子的香蕉、金佛的卍、云团的一朵云），击中处有短暂特效；连接特效为「破碎」时，玻璃会从击中点裂开。扔东西不会拖慢登录。
+- **改进**：「破碎」连接特效改为把真实的登录框（含输入框、文字和主题颜色）碎成玻璃片，从击中点裂开后飞散；双击已断开会话的状态灯会倒放这一过程。
+- **改进**：「拖影」连接特效改为登录框缩小进会话的状态灯（重连时从状态灯放大出来），并去掉了登录框出现时的火花圈。
+- **改进**：密码登录框在各种状态下大小固定为 450 × 280，主机密钥变更也直接在登录框里确认，不再弹出单独的对话框。
+- **改进**：文件区的两个路径同步按钮换了新图标，不再像「返回上一级」：终端在上、上箭头在下表示文件区 → 终端；下箭头在上、文件夹在下表示终端 → 文件区。
+- **改进**：暴躁挖掘机重新绘制为同一台黄色挖掘机，回车时铲斗拍下去，不再被压扁。
+- **修复**：服务器没变却提示「主机密钥已变更」的误报：`known_hosts` 里同一主机有多种密钥（Ed25519、ECDSA、RSA）时，现在按相同类型比对，并优先使用已记录的密钥类型。密钥真的变了时，对话框显示新指纹和在服务器上核对的命令；点「信任并连接」只替换该主机的记录并用已输入的登录信息重新连接，无需再执行 `ssh-keygen -R`。
+
 ## [1.4.10] — 2026-10-25
 
 ### Changed
