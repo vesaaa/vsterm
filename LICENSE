@@ -1,4 +1,4 @@
-VsTerm — 源代码授权与版权声明 / Source License & Copyright Notice
+VsTerm — 软件使用许可与版权声明 / Software License & Copyright Notice
 Copyright (c) 2026 vesaa. All Rights Reserved.
 
 ================================================================================
@@ -8,8 +8,8 @@ Copyright (c) 2026 vesaa. All Rights Reserved.
 ⚠️ 授权声明 (License & Copyright)
 ================================================================================
 
-本项目的源代码在「保留所有权利（All Rights Reserved）」前提下发布，
-并参考 Creative Commons BY-NC-ND 4.0 的非商业、禁止演绎精神进行约束。
+VsTerm 的官方版本（免费版与 Pro）可免费用于个人和商业用途。本许可限制的是
+反编译、破解、篡改和二次分发；VsTerm 的源代码保留所有权利，不对外授权。
 除下文明确允许的情形外，您不享有任何默示权利。
 
 --------------------------------------------------------------------------------
@@ -21,61 +21,78 @@ Copyright (c) 2026 vesaa. All Rights Reserved.
 任何第三方不得主张对上述内容的独立或共有知识产权。
 
 --------------------------------------------------------------------------------
-二、个人学习与研究（免费）
+二、官方版本的使用（免费版与 Pro）
 --------------------------------------------------------------------------------
 
-您可以：
+「官方版本」指作者通过官方渠道（官网、官方下载站、官方 GitHub Releases 等）
+发布的 VsTerm 安装包及程序文件。
 
-  • 查看、阅读、研究本项目的源代码（若作者向您提供）；
-  • 在本地编译、运行官方或您获授权的构建，用于个人技术学习、交流与非盈利性质的研究；
-  • 下载并使用作者在公开渠道发布的官方安装包，用于个人非商业用途。
+1. 免费使用：任何个人或组织均可免费下载、安装和使用官方版本，用途不限，
+   包括商业用途和企业内部生产环境，安装设备数量不限。
 
-上述行为无需向作者付费，但不得违反本文件其他条款。
+2. Pro：通过官方渠道订阅、购买或试用获得的 Pro 授权，同样可以用于商业用途。
+   Pro 授权以账号为单位，面向个人使用设计，可在本人的多台设备上使用。
+   本许可不禁止多人共用同一个 Pro 账号；共用账号时，账号安全由账号持有人
+   自行负责。
+
+3. 组织内部分发：允许在组织内部（如内部软件仓库、内网下载、批量部署）
+   分发未经修改的官方安装包。对外公开提供下载或镜像，须事先取得作者书面同意。
 
 --------------------------------------------------------------------------------
 三、禁止行为（未经作者书面授权）
 --------------------------------------------------------------------------------
 
-严禁对本项目源代码及官方构建进行以下行为：
+严禁对 VsTerm 进行以下行为：
 
-  • 修改、演绎、fork 后以新名称发布，或对外提供下载、安装包、镜像；
-  • 二次打包、 rebranding 后出售、出租、订阅收费，或嵌入收费产品/服务；
-  • 修改后发布、二次分发或再许可；
-  • 将本项目（全部或部分）集成到其他闭源或开源项目中对外交付；
+  • 反编译、反汇编、逆向工程，或以其他方式试图获取源代码
+    （适用法律明确允许且不得以约定排除的情形除外）；
+  • 破解、绕过、禁用或篡改授权校验、试用期、Pro 功能限制，或者制作、
+    传播用于上述目的的工具、补丁、注册机；
+  • 修改官方安装包或程序文件后分发；二次打包、rebranding 后发布、出售、
+    出租、订阅收费，或作为收费服务的一部分提供；
   • 就基于本项目的修改版、衍生版、包装版申请或主张软件著作权、专利、
     商标、域名或其他知识产权；
   • 移除或篡改本版权声明与授权声明；
-  • 以本项目名义提供对外服务或产品，而未取得商业授权。
+  • 以 VsTerm 的名义或冒充官方提供产品或服务
+    （正常介绍、推荐和使用 VsTerm 不受此限）。
 
 --------------------------------------------------------------------------------
-四、商业用途
+四、源代码
 --------------------------------------------------------------------------------
 
-任何将本项目用于以下目的的行为，均须事先取得作者书面商业授权并签署
-商业版 License：
-
-  • 商业盈利、收费产品或服务；
-  • 企业内部生产环境部署（超出个人学习研究范围）；
-  • 作为商业产品、解决方案或交付物的一部分提供给客户或第三方。
+VsTerm 的源代码保留所有权利，不对外授权。作者向特定人员提供源代码，
+仅供其阅读、研究或参与协作开发，不构成任何分发许可。未经作者书面授权，
+不得公开、分发、fork 后发布源代码，或将其全部或部分集成到其他项目中
+对外交付。
 
 --------------------------------------------------------------------------------
-五、第三方组件
+五、安全研究
+--------------------------------------------------------------------------------
+
+为发现、验证并向作者报告安全漏洞而进行的必要分析，不受第三条第一项的限制，
+但须同时满足：
+
+  • 通过下文邮箱私下报告，在修复发布前不公开漏洞细节；
+  • 不利用漏洞损害任何用户，不借此破解或绕过授权限制，不传播破解版本。
+
+--------------------------------------------------------------------------------
+六、第三方组件
 --------------------------------------------------------------------------------
 
 本项目依赖的开源库及内嵌字体（如 JetBrains Mono、Noto Sans SC 等）
 分别受其各自许可证约束；本文件不限制第三方组件在其许可范围内的合法使用。
 
 --------------------------------------------------------------------------------
-六、免责声明
+七、免责声明
 --------------------------------------------------------------------------------
 
 本软件按「现状」提供，作者不对使用本软件造成的任何直接或间接损失承担责任。
 
 --------------------------------------------------------------------------------
-七、商业授权联系
+八、联系方式
 --------------------------------------------------------------------------------
 
-如需商业授权，请通过以下方式联系作者获取报价与商业版 License：
+Pro 购买、企业批量授权、定制合作及安全漏洞报告，请联系：
 
   邮箱：vesaazheng@gmail.com
 
@@ -83,12 +100,14 @@ Copyright (c) 2026 vesaa. All Rights Reserved.
 English (convenience translation; Chinese text above prevails)
 ================================================================================
 
-Source License & Copyright Notice
+Software License & Copyright Notice
 Copyright (c) 2026 vesaa. All Rights Reserved.
 
-This project's source code is published under All Rights Reserved, with
-non-commercial / no-derivatives intent similar in spirit to Creative Commons
-BY-NC-ND 4.0. Except as expressly allowed below, you have no implied rights.
+Official builds of VsTerm (Free and Pro) may be used free of charge for
+personal and commercial purposes. This notice restricts decompiling,
+cracking, tampering and redistribution; the VsTerm source code is All Rights
+Reserved and not licensed to anyone. Except as expressly allowed below, you
+have no implied rights.
 
 1. Copyright holder
 
@@ -96,53 +115,77 @@ Copyright and related IP in this project (source, docs, design, name, marks)
 belong solely to the author vesaa ("Author"). No third party may claim
 independent or joint IP without the Author's written permission.
 
-2. Personal study and research (free)
+2. Using official builds (Free and Pro)
 
-You may:
+"Official builds" are the VsTerm installers and program files the Author
+publishes through official channels (website, official download site,
+official GitHub Releases, etc.).
 
-  • View, read, and study the source code if the Author makes it available to you;
-  • Build and run locally for personal, non-profit technical learning and research;
-  • Download and use official builds published by the Author for personal,
-    non-commercial use.
+  1) Free use: any individual or organisation may download, install and use
+     official builds free of charge, for any purpose, including commercial use
+     and internal production environments, on any number of devices.
 
-No fee is required for the above, provided you comply with the rest of this notice.
+  2) Pro: a Pro license obtained through official channels (subscription,
+     purchase or trial) may also be used commercially. Pro is licensed per
+     account and designed for one person, who may use it on several of their
+     own devices. Sharing a Pro account among several people is not
+     prohibited; the account holder is responsible for the security of a
+     shared account.
+
+  3) Distribution inside an organisation: unmodified official installers may
+     be distributed within an organisation (internal software repositories,
+     intranet downloads, bulk deployment). Offering downloads or mirrors to
+     the public requires the Author's prior written permission.
 
 3. Prohibited without prior written permission
 
 You may not:
 
-  • Modify, create derivatives, fork and publish under a new name, or redistribute
-    downloads / installers / mirrors;
-  • Repackage or rebrand for sale, rental, subscription, or paid products/services;
-  • Redistribute or sublicense modified versions;
-  • Integrate this project (in whole or in part) into other open or closed
-    projects for external delivery;
+  • Decompile, disassemble or reverse engineer VsTerm, or otherwise attempt to
+    obtain its source code (except to the extent applicable law expressly
+    permits this and does not allow it to be excluded by agreement);
+  • Crack, bypass, disable or tamper with license checks, trial periods or Pro
+    restrictions, or make or distribute tools, patches or key generators for
+    that purpose;
+  • Distribute modified installers or program files; repackage or rebrand for
+    publication, sale, rental, subscription, or as part of a paid service;
   • Claim software copyright, patents, trademarks, domains, or other IP on
     modifications, derivatives, or wrappers based on this project;
   • Remove or alter this copyright / license notice;
-  • Offer products or services under this project's name without a commercial license.
+  • Offer products or services in VsTerm's name or pose as official
+    (describing, recommending and using VsTerm is fine).
 
-4. Commercial use
+4. Source code
 
-Any of the following requires a prior written commercial license from the Author:
+The VsTerm source code is All Rights Reserved and not licensed to anyone.
+Source the Author shares with specific people is for them to read, study or
+contribute to development only, and grants no right to distribute it. Without
+the Author's written permission you may not publish, distribute, or fork and
+release the source, or integrate it in whole or in part into other projects
+for external delivery.
 
-  • Commercial profit, paid products or services;
-  • Internal production deployment beyond personal study;
-  • Delivery to customers or third parties as part of a product or solution.
+5. Security research
 
-5. Third-party components
+Analysis needed to find, verify and report a security vulnerability to the
+Author is not restricted by the first item of section 3, provided that:
+
+  • you report it privately to the address below and do not disclose details
+    before a fix is released; and
+  • you do not use it to harm any user, to crack or bypass license
+    restrictions, or to distribute cracked builds.
+
+6. Third-party components
 
 Open-source libraries and embedded fonts (e.g. JetBrains Mono, Noto Sans SC)
 remain under their own licenses. This notice does not limit lawful use of those
 components under their respective terms.
 
-6. Disclaimer
+7. Disclaimer
 
 THE SOFTWARE IS PROVIDED "AS IS". THE AUTHOR IS NOT LIABLE FOR ANY DIRECT OR
 INDIRECT DAMAGES ARISING FROM USE OF THE SOFTWARE.
 
-7. Commercial licensing contact
+8. Contact
 
-For commercial licensing quotes: vesaazheng@gmail.com
-
-================================================================================
+Pro purchases, volume licensing for organisations, custom work and security
+reports: vesaazheng@gmail.com

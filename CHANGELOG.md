@@ -8,6 +8,32 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.5.1] — 2026-11-02
+
+### Added
+- Three new connect effects under **Options → Effects → Connect**, each played backwards when you reconnect a dropped session:
+  - **CRT switch-off**: the login dialog squashes into a bright line and a dot, like an old CRT TV turning off.
+  - **Pixel dissolve**: the dialog breaks into small squares that drift away like ash, in a wave starting from where a Pro pet's throw hit (or from the buttons).
+  - **Black hole**: the dialog winds into a spiral and is swallowed by a small black hole.
+
+### Changed
+- **License**: official builds, Free and Pro, may now be used for personal and commercial purposes, including at work and in production, on any number of devices. Pro is per account and may be used on several of your own devices. What stays prohibited is decompiling, cracking license / trial / Pro checks, and distributing modified or rebranded builds. Unmodified installers may be shared inside an organisation. See `LICENSE`.
+- The password login dialog is smaller (420 × 260) and still keeps one size in every state; only a changed host key is confirmed in the larger 450 × 280 dialog. The "authenticating" hint is one line, and after a few seconds the "still connecting" note takes its place instead of adding a line. Both are now translated into Japanese, German and French.
+- A Pro pet's throw flies faster from far away (for example on a 4K screen). When the login succeeds before it arrives, it rushes in and hits the dialog instead of fading in mid-air.
+
+### Fixed
+- The reconnect animation could briefly show the dots of a password typed into an earlier login dialog.
+
+### 中文
+- **新增**：「选项 → 特效 → 连接」新增三种连接特效，重连已断开的会话时都会倒放：
+  - **老电视关机**：登录框像老式显像管电视关机一样，压成一条亮线、收成一个亮点后熄灭。
+  - **像素消散**：登录框碎成小方块，从 Pro 宠物法宝的击中点（或按钮处）开始一波一波地飘散，像灰烬一样。
+  - **黑洞漩涡**：登录框被拧成螺旋，吸进一个小黑洞里。
+- **改进**：**授权调整**：官方版本（免费版与 Pro）现在可以免费用于个人和商业用途，包括工作中使用和企业生产环境，设备数量不限；Pro 按账号授权，可在本人多台设备上使用。仍然禁止的是反编译、破解授权 / 试用 / Pro 限制，以及修改或换牌后分发；允许在组织内部分发未修改的官方安装包。详见 `LICENSE`。
+- **改进**：密码登录框缩小为 420 × 260，各种状态下仍保持同一尺寸；只有主机密钥变更时才使用较大的 450 × 280。「正在认证」的提示缩为一行，等待几秒后「仍在连接中」的提示会替换它，而不是再加一行；这两句也补上了日、德、法语翻译。
+- **改进**：Pro 宠物离登录框较远时（例如 4K 屏幕）飞得更快；登录先成功时，法宝会加速冲到登录框上击中，而不是在半空淡出。
+- **修复**：重连动画可能短暂显示上一次登录框里输入密码的圆点。
+
 ## [1.5.0] — 2026-10-29
 
 ### Added

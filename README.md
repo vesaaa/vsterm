@@ -193,18 +193,21 @@ Embedded fonts are SIL OFL 1.1; see `assets/fonts/`.
 
 ## License &amp; copyright
 
-Source is **All Rights Reserved**, guided by **CC BY-NC-ND 4.0**-style non-commercial / no-derivatives intent. Full terms: [`LICENSE`](LICENSE).
+Official builds of VsTerm — Free and Pro — may be used **free of charge for personal and commercial purposes**, including at work and in production. The license restricts decompiling, cracking, tampering and redistribution; the source code is **All Rights Reserved**. Full terms: [`LICENSE`](LICENSE).
 
 **Copyright holder:** vesaa
 
 | Use | Allowed? |
 |-----|----------|
-| Personal study / local build | Yes |
-| Modify / fork / redistribute builds | No (without written permission) |
-| Rebrand / claim IP on derivatives | No |
-| Embed in other projects (incl. closed source) | No |
-| Commercial / production / paid delivery | No — buy a commercial license first |
+| Personal or commercial use of official builds (Free / Pro), incl. company production | Yes |
+| Pro on several of your own devices; sharing a Pro account | Yes |
+| Distributing unmodified official installers inside your organisation | Yes |
+| Public download mirrors | Only with written permission |
+| Decompiling, reverse engineering, cracking license / trial / Pro checks | No |
+| Modifying, repackaging or rebranding builds; selling them | No |
+| Publishing, forking or embedding the source code | No |
+| Good-faith security research, reported privately | Yes |
 
-**Commercial licensing:** [vesaazheng@gmail.com](mailto:vesaazheng@gmail.com)
+**Pro, volume licensing and security reports:** [vesaazheng@gmail.com](mailto:vesaazheng@gmail.com)
 
 > Third-party libraries and embedded fonts remain under their own licenses.
