@@ -8,6 +8,14 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.5.2] — 2026-11-02
+
+### Fixed
+- VsTerm no longer quits when its window is maximized or dragged very large on a high-resolution external display (for example a 4K monitor at a scaled "looks like 2560 × 1440" resolution on macOS, or an ultrawide 5120-pixel screen).
+
+### 中文
+- **修复**：在高分辨率外接显示器上最大化或把窗口拖得很大时，VsTerm 不再闪退（例如 macOS 上把 4K 显示器设为「看起来像 2560 × 1440」的缩放分辨率，或 5120 像素宽的超宽屏）。
+
 ## [1.5.1] — 2026-11-02
 
 ### Added
