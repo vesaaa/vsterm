@@ -30,8 +30,9 @@
 
 - **Terminal + files stay in one flow**: shell tabs, bottom SFTP pane, sudo/elevated SFTP, and ZMODEM transfers are integrated into the same SSH workflow.
 - **Quick Insert, from the terminal itself**: right-click the session and choose **Quick Insert**. It types a GUID (with or without hyphens), Unix seconds or milliseconds, an ISO 8601 timestamp, today's date (`YYYY-MM-DD`), or an 8-character random string (digits, letters, mixed, or hex) onto the command line.
+- **Jump hosts, certificates and find**: reach a server through a saved jump host (like `ssh -J`), log in with OpenSSH certificates, and search the screen and the whole scrollback with ⌘F / Ctrl+Shift+F.
 - **New files from the SFTP pane**: right-click the empty area of the file list and choose **New file**. `.sh` starts with `#!/bin/sh` or `#!/bin/bash`; `.json`, `.config`, `.yaml`, and `.txt` start empty. The file is written to the host immediately, and the name is selected so you can rename it in place.
-- **Desk pets**: Monkey, Golden Buddha, Taishang Laojun, and Cloud Bun are Pro (14-day trial). Dog, qi fighter, jade loong, and the excavator are free. Pictures below.
+- **Desk pets**: Monkey, Golden Buddha, Taishang Laojun, Cloud Bun, and Ops Zombie are Pro (14-day trial). Dog, qi fighter, jade loong, and the excavator are free. Pictures below.
 - **Ops panels are first-class, not side utilities**: routes, connections, path trace, IP quality, system info, and live host metrics are built into the app.
 - **Docker / Podman without leaving the session**: a Containers tab lists containers and images on the SSH host or this computer, with start / stop, logs, exec, update checks, safe upgrades with rollback, port forwarding to this computer, and disk cleanup.
 - **Every process on the server**: a Processes tab (Linux hosts) lists processes as a sortable list or a parent/child tree, and shows for each one its executable, full command line, working directory, what started it (systemd service, container, SSH login, cron…), its ports and connections, disk I/O and, on request, its environment, with end / force-kill and systemd restart / stop / logs.
@@ -92,7 +93,7 @@ Notes:
 
 ### Standard vs Pro
 
-VsTerm runs fully offline for SSH work. **Personal Cloud** (account login, entitlement, and encrypted sync) is optional. **Pro** unlocks after a binding-checked cloud entitlement (e.g. GitHub Star promo or redeem). Every install also gets a **14-day trial** of the local Pro features: the 500,000-line scrollback, the Pro setup tools below, and the Monkey, Golden Buddha, Taishang Laojun, and Cloud Bun pets. Cloud sync is not part of the trial.
+VsTerm runs fully offline for SSH work. **Personal Cloud** (account login, entitlement, and encrypted sync) is optional. **Pro** unlocks after a binding-checked cloud entitlement (e.g. GitHub Star promo or redeem). Every install also gets a **14-day trial** of the local Pro features: the 500,000-line scrollback, the Pro setup tools below, and the Monkey, Golden Buddha, Taishang Laojun, Cloud Bun, and Ops Zombie pets. Cloud sync is not part of the trial.
 
 | Capability | Standard | Pro |
 |------------|----------|-----|
@@ -106,7 +107,7 @@ VsTerm runs fully offline for SSH work. **Personal Cloud** (account login, entit
 | One-click security fixes (harden SSH, enable ufw, fix permissions) | 14-day trial | ✅ |
 | View, remount, unmount, remove and disconnect existing network storage | ✅ | ✅ |
 | Desk pet — dog, qi fighter, excavator, jade loong | ✅ | ✅ |
-| Desk pet — monkey, Golden Buddha, Taishang Laojun, Cloud Bun | 14-day trial | ✅ |
+| Desk pet — monkey, Golden Buddha, Taishang Laojun, Cloud Bun, Ops Zombie | 14-day trial | ✅ |
 | Personal Cloud account / devices | ✅ | ✅ |
 | Cloud sync (sessions, commands, layouts, preferences, credentials) | ✗ | ✅ |
 | Future enhancements | Not supported | Continuously supported |
@@ -131,16 +132,17 @@ Without your master password (and the derived sync key), cloud blobs are not dec
 
 <table>
 <tr>
-<td colspan="4"><strong>Pro</strong> · 14-day trial</td>
+<td colspan="5"><strong>Pro</strong> · 14-day trial</td>
 </tr>
 <tr>
 <td align="center"><img src="assets/screenshots/desk_pet_monkey.webp" width="200" alt="Monkey"><br>Monkey</td>
 <td align="center"><img src="assets/screenshots/desk_pet_buddha.webp" width="200" alt="Golden Buddha"><br>Golden Buddha</td>
 <td align="center"><img src="assets/screenshots/desk_pet_laojun.webp" width="200" alt="Taishang Laojun"><br>Taishang Laojun</td>
 <td align="center"><img src="assets/screenshots/desk_pet_cloud.webp" width="200" alt="Cloud Bun"><br>Cloud Bun</td>
+<td align="center"><img src="assets/screenshots/desk_pet_zombie.webp" width="200" alt="Ops Zombie"><br>Ops Zombie</td>
 </tr>
 <tr>
-<td colspan="4"><strong>Free</strong></td>
+<td colspan="5"><strong>Free</strong></td>
 </tr>
 <tr>
 <td align="center"><img src="assets/screenshots/desk_pet_dog.webp" width="200" alt="Dog"><br>Dog</td>

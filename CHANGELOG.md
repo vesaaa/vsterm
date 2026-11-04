@@ -8,6 +8,28 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.5.3] — 2026-11-04
+
+### Added
+- **Find in the terminal**: ⌘F on macOS, Ctrl+Shift+F elsewhere (or **Find…** in the terminal's right-click menu) opens a find bar that searches the screen and the whole scrollback, with case and regex toggles and a "current / total" count. Enter goes to the previous (older) match, Shift+Enter to the next, Esc closes it. Fast even on a full Pro history of 500,000 lines.
+- **Jump host (ProxyJump)**: a session can name another saved session as its jump host (session editor → **Jump host**, under Proxy), like `ssh -J`. Terminal, SFTP, tunnels and monitors all work through it. The jump host logs in with its own key or saved password; when that step fails, the error says so instead of asking again for this server's password.
+- **OpenSSH certificates**: a certificate next to the private key (`id_ed25519` → `id_ed25519-cert.pub`) is used automatically, as `ssh` does; if the server refuses it, the key alone is tried. RSA certificates also work with OpenSSH 8.8 and newer.
+- **Options → UI scale** (80–200 %, on top of the system's display scale) and **Options → Terminal font size** (10–24 pt). Both apply at once; the font size syncs with your other preferences, the UI scale stays per device.
+- **Ops Zombie** desk pet (Pro): a hoodie-wearing zombie with a laptop and a "sudo" bucket on its head, which it throws at the login dialog.
+
+### Changed
+- What a Pro pet throws at the login dialog now flies back to the pet after the hit: Laojun's taiji returns to his wheel, the Monkey catches his banana, the 卍 sinks back into the Golden Buddha's chest, and Cloud Bun's cloud melts back into the one she holds.
+- Cloud Bun has a dark outline and richer colours, so she is easy to see on light themes.
+
+### 中文
+- **新增**：**终端查找**：macOS 按 ⌘F，其他系统按 Ctrl+Shift+F（或终端右键菜单「查找…」），打开查找栏，搜索当前屏幕和全部滚动历史；支持区分大小写、正则，显示「当前 / 总数」。回车跳到上一个（更早的）匹配，Shift+回车跳到下一个，Esc 关闭。即使是 Pro 的 50 万行完整历史也很快。
+- **新增**：**跳板机（ProxyJump）**：会话可以把另一个已保存的会话设为跳板机（会话编辑 → 代理下的「跳板机」），效果同 `ssh -J`；终端、SFTP、隧道和监控都能经跳板机使用。跳板机用它自己的密钥或已保存的密码登录；这一步失败时会明确提示是跳板机的问题，而不是再次询问目标服务器的密码。
+- **新增**：**OpenSSH 证书登录**：私钥旁边的证书（`id_ed25519` → `id_ed25519-cert.pub`）会像 `ssh` 一样自动使用；服务器不接受证书时再单独尝试密钥。RSA 证书也支持 OpenSSH 8.8 及以上版本。
+- **新增**：「选项 → 界面缩放」（80–200%，叠加在系统显示缩放之上）和「选项 → 终端字号」（10–24 pt），即时生效；终端字号随其他偏好同步，界面缩放按设备单独保存。
+- **新增**：**运维僵尸**桌宠（Pro）：穿连帽衫、抱着笔记本、头顶「sudo」水桶的僵尸，登录时把水桶砸向登录框。
+- **改进**：Pro 宠物砸向登录框的法宝，击中后会飞回宠物身上：太上老君的太极回到法轮，猴子接住香蕉，卍 字回到金佛胸前，云团的云朵融回她手里的那朵。
+- **改进**：云团加了深色描边、颜色更饱满，在浅色主题下也看得清。
+
 ## [1.5.2] — 2026-11-02
 
 ### Fixed
