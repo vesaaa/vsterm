@@ -8,6 +8,24 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.5.5] — 2026-11-05
+
+### Added
+- **macOS hosts** (over SSH, and the local shell on a Mac):
+  - **Monitor / System info**: CPU, memory, swap, network traffic, top processes and disks are filled in.
+  - **Routes**: the overview shows the interfaces, gateway and topology; the routing table lists the Mac's routes.
+  - **Processes**: the full process list with CPU, memory, user, uptime and listening ports; per-process details (executable, working directory, open files, connections) and ending a process.
+  - **Disk analysis**: filesystems (macOS system volumes left out), directory sizes, large files, log cleanup.
+  - **Disk management**: a read-only view of disks, partitions, APFS containers and volumes. Changes stay with Disk Utility / diskutil.
+
+### 中文
+- **新增**：**macOS 主机**（SSH 连接，以及 Mac 本机的本地 Shell）：
+  - **系统监控 / 系统信息**：CPU、内存、交换、网络流量、进程排行和磁盘都有数据了。
+  - **路由信息**：概览显示网卡、网关和网络拓扑；路由表列出 Mac 的路由。
+  - **进程**：完整进程列表，含 CPU、内存、用户、运行时长和监听端口；可查看进程详情（可执行文件、工作目录、打开的文件、网络连接），也可以结束进程。
+  - **磁盘分析**：文件系统列表（不含 macOS 系统卷）、目录大小、大文件、日志清理。
+  - **磁盘管理**：只读查看磁盘、分区、APFS 容器和卷；修改请用「磁盘工具」或 diskutil。
+
 ## [1.5.4] — 2026-11-05
 
 ### Fixed
