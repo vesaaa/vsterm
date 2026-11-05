@@ -8,6 +8,16 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.5.4] — 2026-11-05
+
+### Fixed
+- macOS: the interface uses PingFang SC again on recent macOS, where it is installed as a system font asset. Before, VsTerm fell back to another font that drew all text slightly too high, so the icons in the host tabs (System info, Routes, Network connections …) looked lower than their labels.
+- macOS: the Routes overview for the local shell no longer says "Asuswrt-Merlin"; it now shows the macOS version (for example "macOS 15.8.2") with the Apple icon.
+
+### 中文
+- **修复**：macOS：在较新的 macOS 上，界面重新使用苹方（PingFang SC，以系统字体资源形式安装）。之前 VsTerm 退回到了另一种字体，文字整体偏高，主机标签页（系统信息、路由信息、网络连接等）的图标看起来比文字低。
+- **修复**：macOS：本地 Shell 的路由信息概览不再显示为「华硕梅林」，改为显示 macOS 版本（例如「macOS 15.8.2」）和苹果图标。
+
 ## [1.5.3] — 2026-11-04
 
 ### Added
