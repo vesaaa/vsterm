@@ -8,6 +8,20 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.5.6] — 2026-11-05
+
+### Added
+- **Options → IP databases**: download, update and delete the offline IP databases. **DB-IP Lite** (City + ASN, CC BY 4.0, about 65 MB) is downloaded on demand; the bundled **ip2region** can be updated too, or set back to the bundled copy.
+- With DB-IP downloaded, **Path trace**, **Network connections** and the **Routes** overview look up locations, coordinates and ASNs on your computer, with no online queries. IPs in China (including Hong Kong, Macao and Taiwan) keep using ip2region, which is more accurate there; all other IPs use DB-IP, which places overseas IPs far better. Non-Chinese interfaces now get offline locations as well.
+
+### Changed
+- The credential library, proxy library, profile directory and About dialogs have the same look as Preferences and the server editor: cards, accent buttons, notices, and labels above fields. Rows in the credential / proxy pickers are easier to read.
+
+### 中文
+- **新增**：「选项 → IP 数据库」：下载、更新和删除离线 IP 库。**DB-IP Lite**（City + ASN，CC BY 4.0，约 65 MB）按需下载；内置的 **ip2region** 也可以更新，或恢复为内置版本。
+- **新增**：下载 DB-IP 后，**路径追踪**、**网络连接**和**路由信息**概览的归属地、经纬度和 ASN 都在本机查询，不再联网。国内 IP（含港澳台）继续用更准的 ip2region，其他 IP 用 DB-IP，海外 IP 的定位准确很多；非中文界面也有了离线归属地。
+- **改进**：凭证库、代理库、配置文件目录和「关于」窗口改成和偏好设置、服务器编辑一样的样式：卡片、主色按钮、提示条、标签在上的表单；凭证 / 代理选择列表也更易读。
+
 ## [1.5.5] — 2026-11-05
 
 ### Added
