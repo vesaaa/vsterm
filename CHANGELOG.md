@@ -8,6 +8,22 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.5.7] — 2026-11-09
+
+### Added
+- Pasting several lines into the Windows local shell (PowerShell / cmd), where each line runs as soon as it arrives, first asks for confirmation, with the line count and a preview. Tick **Don't ask again** to skip it; **Preferences → General → Paste** turns it back on. SSH sessions and macOS / Linux shells, which take a paste as one block, never ask.
+
+### Fixed
+- Windows local shell: pasting several lines no longer reverses their order or cuts off the first line.
+- SSH: RSA OpenSSH certificates also work with servers running OpenSSH 7.7 and older.
+- macOS: VsTerm keeps all its secrets in one Keychain item and reads it once per launch, so after an update macOS asks for your password at most once instead of up to four times. Older items are moved over automatically.
+
+### 中文
+- **新增**：在 Windows 本地 Shell（PowerShell / cmd）里粘贴多行时，每一行都会立即执行，因此会先弹出确认框，显示行数和预览。勾选「不再提示」可跳过，在「偏好设置 → 常规 → 粘贴」中可重新打开。SSH 会话和 macOS / Linux 的 Shell 会把粘贴内容当作一整块处理，不会弹框。
+- **修复**：Windows 本地 Shell：粘贴多行时不再出现行序倒置、第一行被截断的问题。
+- **修复**：SSH：RSA 类型的 OpenSSH 证书也能用于 OpenSSH 7.7 及更早版本的服务器了。
+- **修复**：macOS：所有密钥合并存进一个钥匙串条目，每次启动只读一次。更新后 macOS 最多只会要求输入一次密码，以前最多要输四次。旧条目会自动迁移。
+
 ## [1.5.6] — 2026-11-05
 
 ### Added
