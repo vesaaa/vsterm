@@ -8,6 +8,34 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.5.8] — 2026-11-10
+
+### Changed
+- **Interface pass**: buttons share one look and size across dialogs and panels, icons are drawn slightly heavier and are easier to read, and corner radii and text sizes are consistent. Dimmed text has more contrast in the Tokyo Night, Nord, Kanagawa and Everforest themes, and status colours follow the theme.
+- With no connection open, the main area shows a short start screen with **Server**, **Quick Connect** and **Local shell** buttons.
+- **Preferences** is modal: the window behind it is dimmed and cannot be clicked until it is closed.
+- **Update check**: runs once a day even when VsTerm stays open for days, and prefers a moment when the screen is locked or you have been idle. A newer version found earlier is offered again right after the next start, and a failed check is retried within the hour.
+- System monitor: the network chart no longer shows a crosshair under the pointer.
+
+### Fixed
+- Files: **Sync terminal path to files** follows the terminal after `sudo -i`, `su` or a nested shell, instead of jumping back to the login user's directory.
+- System monitor on Ubuntu 22.04 / 20.04 and Debian 12 hosts that have been up for weeks: CPU usage and disk sizes are read correctly again.
+- Disk analysis cleanup sizes and the security audit's last-login time are correct on those systems too.
+- Local system monitor: network speeds were about 20 times too low; the process list no longer shows every thread as a process.
+- System monitor: Docker image layer mounts are left out of the disk list.
+
+### 中文
+- **改进**：界面整理：各对话框和面板的按钮统一了样式和尺寸，图标线条略加粗、更清晰，圆角和字号保持一致。Tokyo Night、Nord、Kanagawa、Everforest 主题下的次要文字对比度更高，状态颜色跟随主题。
+- **改进**：没有打开连接时，主区域显示起始页，提供「服务器」「快速连接」「本地 Shell」三个按钮。
+- **改进**：「偏好设置」改为模态窗口：打开时后面的界面变暗且不可点击。
+- **改进**：检查更新：即使 VsTerm 连续开着好几天也会每天检查一次，并优先选在锁屏或空闲的时候。之前查到的新版本，下次启动后会马上再次提示；检查失败会在一小时内重试。
+- **改进**：系统监控：网络流量图上不再显示跟随鼠标的十字线。
+- **修复**：文件区：执行 `sudo -i`、`su` 或进入嵌套 Shell 之后，「将终端路径同步到文件区」会跟到终端的实际目录，不再跳回登录用户的目录。
+- **修复**：系统监控：在已连续运行数周的 Ubuntu 22.04 / 20.04、Debian 12 主机上，CPU 占用和磁盘容量恢复正常读取。
+- **修复**：这些系统上磁盘分析的清理大小、安全审计的最近登录时间也已修正。
+- **修复**：本机系统监控：网速显示约为实际的二十分之一的问题；进程列表不再把每个线程都列为一个进程。
+- **修复**：系统监控：磁盘列表不再列出 Docker 镜像层挂载。
+
 ## [1.5.7] — 2026-11-09
 
 ### Added
