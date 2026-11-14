@@ -8,6 +8,22 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.5.9] — 2026-11-14
+
+### Fixed
+- Terminal: pasting several lines into a BusyBox shell (Asuswrt-Merlin, OpenWrt, Alpine) no longer loses the first 10 characters or shows nothing until the next key. Multi-line quick commands had the same problem. These shells now get the multi-line paste confirmation, since each line runs as a command.
+- Terminal: a selection dragged past the right edge, the scrollbar or the last row reaches that edge, so the text at the end of the lines is copied.
+- Terminal: copying a long line that the terminal wrapped gives one line instead of one per row.
+
+### Changed
+- Terminal: the echo of a key is drawn at once instead of on the next frame interval, so the cursor follows a held-down arrow key more closely.
+
+### 中文
+- **修复**：终端：向 BusyBox shell（梅林、OpenWrt、Alpine）粘贴多行时，不再丢失前 10 个字符，也不再出现粘贴后不显示、要再按一次键的情况。多行快捷命令有同样的问题，一并修复。这类 shell 中每行都会作为命令执行，因此会先弹出多行粘贴确认。
+- **修复**：终端：拖选时鼠标移到右边界、滚动条或最后一行之外，选区会延伸到边界，行尾的内容可以复制到。
+- **修复**：终端：复制被终端自动折行的长行时，得到的是一行，不再按屏幕行拆开。
+- **改进**：终端：按键回显立即绘制，不再等到下一个帧间隔，按住方向键时光标跟随更紧。
+
 ## [1.5.8] — 2026-11-10
 
 ### Changed
