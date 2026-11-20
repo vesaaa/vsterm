@@ -161,7 +161,7 @@ Download a build from [Releases](https://github.com/vesaaa/vsterm/releases), unp
 
 To bring over a host list: **File → Import from Others**, then **WindTerm** (`.wind` / `profiles/`), **Xshell** (`Sessions` / `.xsh`), **FinalShell** (data dir or `conn/`), **MobaXterm** (`MobaXterm.ini` / `.mxtsessions`), **Tabby** (`config.yaml`), **OpenSSH** (`~/.ssh/config`), or **SecureCRT** (`Sessions` / `.ini`). SSH hosts and groups come across (two folder levels). Encrypted passwords are not copied — you enter them on first connect. A private-key *file path* keeps public-key auth; named keys stored inside Xshell / FinalShell are not resolved.
 
-Packages are not Microsoft / Apple notarized yet — the OS may warn once; use the steps below.
+The macOS builds are signed and notarized by Apple (since 1.5.10) and open directly. The Windows build is not signed yet — Windows may warn once; use the steps below.
 
 ### Windows (SmartScreen)
 
@@ -171,16 +171,12 @@ Packages are not Microsoft / Apple notarized yet — the OS may warn once; use t
 
 Or: right-click `VsTerm.exe` → **Properties** → check **Unblock** → OK, then open again.
 
-### macOS (blocked / damaged)
+### macOS
 
 1. Download the matching chip DMG: Apple Silicon `vsterm-macos-arm64.dmg`, Intel `vsterm-macos-x64.dmg`
 2. Open the DMG and drag **VsTerm** into **Applications** (runtime data such as GeoIP is inside the `.app` — no separate `tools/` folder)
-3. If Gatekeeper blocks it: **System Settings → Privacy &amp; Security** → **Open Anyway**
-4. If quarantine still blocks it:
 
-```bash
-xattr -cr /Applications/VsTerm.app
-```
+Upgrading from 1.5.9 or earlier: macOS asks once more for access to the saved passwords in Keychain, because the signing certificate changed.
 
 ### Linux
 

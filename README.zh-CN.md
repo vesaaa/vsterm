@@ -161,7 +161,7 @@ VsTerm 本地 SSH 功能可完全离线使用。**Personal Cloud**（账号登�
 
 若要从其他终端迁主机列表：菜单 **文件 → 从其他导入**，再选 **WindTerm**（`.wind` / `profiles/`）、**Xshell**（带 `.xsh` 的 `Sessions`）、**FinalShell**（数据目录或 `conn/`）、**MobaXterm**（`MobaXterm.ini` / `.mxtsessions`）、**Tabby**（`config.yaml`）、**OpenSSH**（`~/.ssh/config`）或 **SecureCRT**（带 `.ini` 的 `Sessions`）。只导入 SSH 主机与分组（最多两层文件夹）。密码因对方加密无法导入，首次连接时再输入。私钥**文件路径**会保留公钥登录；Xshell / FinalShell 密钥管理器里的名称无法解析。
 
-当前发布包尚未经过微软 / Apple 商业签名公证，系统可能拦截——按下面步骤放行即可（仅需一次）。
+macOS 版自 1.5.10 起已通过 Apple 签名和公证，可直接打开。Windows 版尚未签名，系统可能拦截——按下面步骤放行即可（仅需一次）。
 
 ### Windows（SmartScreen 拦截）
 
@@ -171,16 +171,13 @@ VsTerm 本地 SSH 功能可完全离线使用。**Personal Cloud**（账号登�
 
 也可：右键 `VsTerm.exe` → **属性** → 勾选 **解除锁定** → 确定后再打开。
 
-### macOS（无法打开 / 已损坏类提示）
+### macOS
 
 1. 下载对应芯片的 DMG：Apple Silicon 用 `vsterm-macos-arm64.dmg`，Intel 用 `vsterm-macos-x64.dmg`
 2. 打开 DMG，将 **VsTerm** 拖到 **应用程序**（GeoIP 等运行时数据已打进 `.app`，无需再拷 `tools/`）
-3. 若双击提示无法打开或来自未识别开发者：打开 **系统设置 → 隐私与安全性**，在下方找到被拦截的 VsTerm，点 **仍要打开**
-4. 若仍被 Gatekeeper / quarantine 拦住，在终端执行一次清除隔离属性后再打开：
 
-```bash
-xattr -cr /Applications/VsTerm.app
-```
+从 1.5.9 及更早版本升级：因签名证书更换，macOS 会再询问一次钥匙串中已存密码的访问授权。
+
 ### Linux
 
 解压后赋予执行权限并运行：

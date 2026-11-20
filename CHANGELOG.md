@@ -8,6 +8,28 @@ On each `v*` tag, CI also syncs `README.md`, `README.zh-CN.md`, `CHANGELOG.md`,
 and `LICENSE` to the public `vesaaa/vsterm` main branch, and copies this file’s
 section for that version into the GitHub Release notes.
 
+## [1.5.10] — 2026-11-20
+
+### Added
+- **Route trace**: a 3D globe above the hop list shows where the path goes. Hops with a known location are joined by arcs coloured by latency; drag to rotate, double-click to re-centre, and hover a marker for its hops. It appears when at least two places are known.
+- **Quick commands**: a search field finds commands by name or content across all folders, and a button beside it adds a command. A new command starts with a random icon.
+- **Quick commands**: pin a command from its right-click menu to keep it first in its folder.
+- **Quick commands**: variables. Write `{{name}}` or `{{port:22}}` (with a default) in a command and VsTerm asks for the values when you send it. Go templates such as `{{.Names}}` are sent as typed.
+- **macOS**: the app is now signed with an Apple Developer ID and notarized, so it opens without a Gatekeeper warning and no longer needs `xattr -cr`. After this upgrade macOS asks once more for access to saved passwords in Keychain, because the signing certificate changed.
+
+### Fixed
+- **Route trace**: hops outside China are located online first, even with the DB-IP database downloaded. The offline database often placed carrier backbone routers in the wrong country (a router in Los Angeles showed up in Belgium). Hops in China and the other pages still use the local databases.
+- **Quick commands**: editing a command no longer clears its description.
+
+### 中文
+- **新增**：路由追踪：跳点列表上方新增 3D 地球，显示路径经过的位置。能定位的跳点之间用弧线相连，颜色表示延迟；可拖拽旋转，双击回到自动取景，鼠标停在标记上显示该地点的跳点。至少识别出两个地点时才显示。
+- **新增**：快捷命令：新增搜索框，按名称或内容跨分组查找；旁边新增添加按钮。新命令会随机分配一个图标。
+- **新增**：快捷命令：右键可置顶，置顶的命令排在分组最前。
+- **新增**：快捷命令：支持变量。命令里写 `{{名称}}` 或 `{{端口:22}}`（带默认值），发送时弹框填写。`{{.Names}}` 这类 Go 模板原样发送。
+- **新增**：macOS：应用已使用 Apple 开发者 ID 签名并通过公证，打开时不再被系统拦截，也不需要执行 `xattr -cr`。因签名证书更换，本次升级后 macOS 会再询问一次钥匙串中已存密码的访问授权。
+- **修复**：路由追踪：境外跳点改为优先联网定位，即使已下载 DB-IP 数据库。离线库经常把运营商骨干路由器定位到错误的国家（洛杉矶的路由器显示成比利时）。国内跳点和其他页面仍使用本地数据库。
+- **修复**：快捷命令：编辑命令后不再清空其描述。
+
 ## [1.5.9] — 2026-11-14
 
 ### Fixed
